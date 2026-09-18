@@ -498,6 +498,17 @@ def init_db() -> None:
     receiving_columns = {row["name"] for row in con.execute("PRAGMA table_info(receivings)").fetchall()}
     if "triage_completed" not in receiving_columns:
         con.execute("ALTER TABLE receivings ADD COLUMN triage_completed INTEGER NOT NULL DEFAULT 0")
+    if "source_subset" not in receiving_columns:
+        con.execute("ALTER TABLE receivings ADD COLUMN source_subset INTEGER NOT NULL DEFAULT 0")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS receiving_operation_items (
+            receiving_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            PRIMARY KEY(receiving_id,item_id),
+            FOREIGN KEY(receiving_id) REFERENCES receivings(id) ON DELETE CASCADE,
+            FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+        )"""
+    )
     con.execute("UPDATE receivings SET ten_percent_required=1 WHERE receiving_type='RETORNO' AND closed_at IS NULL")
     open_returns = con.execute(
         """SELECT r.id,r.received_qty,c.purchase_mode,c.id card_id
@@ -516,6 +527,37 @@ def init_db() -> None:
         WHEN lower(COALESCE(original_type,'')) LIKE '%saldo%' THEN 'SALDO'
         ELSE purchase_mode END
         WHERE purchase_mode IS NULL OR purchase_mode=''""")
+    # Ativa automaticamente os retornos da Costura já existentes na base.
+    returned_cards = con.execute(
+        """SELECT DISTINCT c.id FROM cards c JOIN items i ON i.card_id=c.id
+           WHERE c.source_snapshot_at IS NOT NULL AND i.source_stage='RETORNO_COSTURA'"""
+    ).fetchall()
+    for returned_card in returned_cards:
+        item_ids = [row["id"] for row in con.execute(
+            "SELECT id FROM items WHERE card_id=? AND source_stage='RETORNO_COSTURA' AND expected_qty>0 ORDER BY id",
+            (returned_card["id"],),
+        ).fetchall()]
+        if item_ids:
+            ensure_receiving(con, returned_card["id"], "RETORNO", item_ids)
+    # Cards que ainda estão na Costura também precisam de um controle de
+    # produção próprio, sem misturá-lo com o recebimento do futuro retorno.
+    costura_cards = con.execute(
+        """SELECT c.id FROM cards c
+           WHERE c.source_snapshot_at IS NOT NULL
+             AND EXISTS (SELECT 1 FROM items i WHERE i.card_id=c.id AND i.source_stage='EM_COSTURA')
+             AND NOT EXISTS (SELECT 1 FROM items i WHERE i.card_id=c.id AND i.source_stage!='EM_COSTURA')"""
+    ).fetchall()
+    for costura_card in costura_cards:
+        item_ids = [row["id"] for row in con.execute(
+            "SELECT id FROM items WHERE card_id=? AND source_stage='EM_COSTURA' AND expected_qty>0 ORDER BY id",
+            (costura_card["id"],),
+        ).fetchall()]
+        if item_ids:
+            con.execute(
+                "UPDATE cards SET receiving_type='COSTURA' WHERE id=?",
+                (costura_card["id"],),
+            )
+            ensure_receiving(con, costura_card["id"], "COSTURA", item_ids)
     con.commit()
     con.close()
 
@@ -541,29 +583,60 @@ def require_role(con: sqlite3.Connection, user_id: int, allowed: set[str]) -> sq
     return user
 
 
-def ensure_receiving(con: sqlite3.Connection, card_id: int, receiving_type: str) -> int:
+def ensure_receiving(
+    con: sqlite3.Connection, card_id: int, receiving_type: str, item_ids: Optional[list[int]] = None
+) -> int:
     row = con.execute(
-        "SELECT id FROM receivings WHERE card_id=? AND receiving_type=? ORDER BY id DESC LIMIT 1",
+        """SELECT id FROM receivings WHERE card_id=? AND receiving_type=? AND closed_at IS NULL
+           ORDER BY id DESC LIMIT 1""",
         (card_id, receiving_type),
     ).fetchone()
-    if row:
-        return row["id"]
-    total = con.execute(
-        "SELECT COALESCE(SUM(expected_qty),0) total FROM items WHERE card_id=?",
-        (card_id,),
-    ).fetchone()["total"]
+    normalized_ids = sorted({int(item_id) for item_id in (item_ids or []) if int(item_id) > 0})
+    if normalized_ids:
+        marks = ",".join("?" for _ in normalized_ids)
+        totals = con.execute(
+            f"""SELECT COALESCE(SUM(expected_qty),0) total,COUNT(*) n FROM items
+                WHERE card_id=? AND expected_qty>0 AND id IN ({marks})""",
+            (card_id, *normalized_ids),
+        ).fetchone()
+        total = int(totals["total"] or 0)
+        item_count = int(totals["n"] or 0)
+    else:
+        total = con.execute(
+            "SELECT COALESCE(SUM(expected_qty),0) total FROM items WHERE card_id=?",
+            (card_id,),
+        ).fetchone()["total"]
+        item_count = con.execute(
+            "SELECT COUNT(*) n FROM items WHERE card_id=? AND expected_qty>0", (card_id,)
+        ).fetchone()["n"]
     required = 1
-    item_count = con.execute(
-        "SELECT COUNT(*) n FROM items WHERE card_id=? AND expected_qty>0", (card_id,)
-    ).fetchone()["n"]
     mode = con.execute("SELECT purchase_mode FROM cards WHERE id=?", (card_id,)).fetchone()["purchase_mode"]
     minimum = max(math.ceil(total * 0.10), item_count if mode == "GRADE" else 0)
+    if row:
+        receiving_id = int(row["id"])
+        if normalized_ids:
+            con.execute(
+                "UPDATE receivings SET source_subset=1,ten_percent_required=1,ten_percent_min=? WHERE id=?",
+                (minimum, receiving_id),
+            )
+            con.execute("DELETE FROM receiving_operation_items WHERE receiving_id=?", (receiving_id,))
+            con.executemany(
+                "INSERT INTO receiving_operation_items(receiving_id,item_id) VALUES(?,?)",
+                [(receiving_id, item_id) for item_id in normalized_ids],
+            )
+        return receiving_id
     cur = con.execute(
-        """INSERT INTO receivings(card_id,receiving_type,ten_percent_required,ten_percent_min,created_at)
-           VALUES(?,?,?,?,?)""",
-        (card_id, receiving_type, required, minimum, iso_now()),
+        """INSERT INTO receivings(card_id,receiving_type,ten_percent_required,ten_percent_min,source_subset,created_at)
+           VALUES(?,?,?,?,?,?)""",
+        (card_id, receiving_type, required, minimum, 1 if normalized_ids else 0, iso_now()),
     )
-    return cur.lastrowid
+    receiving_id = int(cur.lastrowid)
+    if normalized_ids:
+        con.executemany(
+            "INSERT INTO receiving_operation_items(receiving_id,item_id) VALUES(?,?)",
+            [(receiving_id, item_id) for item_id in normalized_ids],
+        )
+    return receiving_id
 
 
 def timer_events(con: sqlite3.Connection, receiving_id: int) -> list[sqlite3.Row]:
@@ -651,8 +724,13 @@ def timer_action(con: sqlite3.Connection, receiving_id: int, action: str, user_i
 def current_receiving(con: sqlite3.Connection, card_id: int) -> Optional[dict[str, Any]]:
     row = con.execute(
         """SELECT r.*,u.name physical_completed_by_name
-           FROM receivings r LEFT JOIN users u ON u.id=r.physical_completed_by
-           WHERE r.card_id=? ORDER BY r.id DESC LIMIT 1""",
+           FROM receivings r
+           JOIN cards c ON c.id=r.card_id
+           LEFT JOIN users u ON u.id=r.physical_completed_by
+           WHERE r.card_id=?
+           ORDER BY (r.closed_at IS NULL) DESC,
+                    (r.receiving_type=c.receiving_type) DESC,
+                    r.id DESC LIMIT 1""",
         (card_id,),
     ).fetchone()
     if not row:
@@ -660,6 +738,48 @@ def current_receiving(con: sqlite3.Connection, card_id: int) -> Optional[dict[st
     data = dict(row)
     data["photo_paths"] = from_json(data.get("photo_paths"), [])
     data["timer"] = timer_summary(con, data["id"]) if data["ten_percent_required"] else None
+    data["operation_items"] = [dict(item) for item in con.execute(
+        """SELECT i.id,i.product,i.reference,i.sku,i.color,i.size,i.expected_qty,i.source_stage
+           FROM receiving_operation_items roi JOIN items i ON i.id=roi.item_id
+           WHERE roi.receiving_id=? ORDER BY i.product,i.color,i.size,i.id""",
+        (data["id"],),
+    ).fetchall()]
+    plan_items = data["operation_items"]
+    if not plan_items:
+        plan_items = [dict(item) for item in con.execute(
+            """SELECT id,product,reference,sku,color,size,expected_qty,source_stage
+               FROM items WHERE card_id=? AND expected_qty>0
+               ORDER BY product,color,size,id""",
+            (card_id,),
+        ).fetchall()]
+    target = int(data.get("ten_percent_min") or 0)
+    mode = con.execute("SELECT purchase_mode FROM cards WHERE id=?", (card_id,)).fetchone()["purchase_mode"]
+    if str(mode or "").upper() == "GRADE" and plan_items:
+        allocations = {int(item["id"]): 1 for item in plan_items}
+        capacities = {int(item["id"]): max(0, int(item["expected_qty"] or 0) - 1) for item in plan_items}
+        remaining = max(0, target - len(plan_items))
+        active = [int(item["id"]) for item in plan_items if capacities[int(item["id"])] > 0]
+        while remaining > 0 and active:
+            share = max(1, remaining // len(active))
+            next_active: list[int] = []
+            for item_id in active:
+                if remaining <= 0:
+                    break
+                added = min(share, capacities[item_id], remaining)
+                allocations[item_id] += added
+                capacities[item_id] -= added
+                remaining -= added
+                if capacities[item_id] > 0:
+                    next_active.append(item_id)
+            active = next_active
+        data["sample_plan"] = [item | {"sample_qty": allocations[int(item["id"])]} for item in plan_items]
+    else:
+        data["sample_plan"] = [{
+            "id": None, "product": "Quantidade geral", "reference": None, "sku": None,
+            "color": None, "size": None,
+            "expected_qty": sum(int(item["expected_qty"] or 0) for item in plan_items),
+            "sample_qty": target,
+        }] if target > 0 else []
     return data
 
 
@@ -683,8 +803,35 @@ def update_new_receiving_flow(con: sqlite3.Connection, receiving_id: int, user_i
         raise HTTPException(404, "Recebimento não encontrado.")
     physical_done = rec["physical_status"] == "CONCLUIDO"
     sample_done = rec["ten_percent_status"] == "CONCLUIDA"
+    if rec["receiving_type"] == "COSTURA":
+        return con.execute("SELECT status FROM cards WHERE id=?", (rec["card_id"],)).fetchone()["status"]
     if physical_done and sample_done:
         is_return = rec["receiving_type"] == "RETORNO"
+        if rec["source_subset"]:
+            mapped_ids = [row["item_id"] for row in con.execute(
+                "SELECT item_id FROM receiving_operation_items WHERE receiving_id=?", (receiving_id,)
+            ).fetchall()]
+            if mapped_ids:
+                marks = ",".join("?" for _ in mapped_ids)
+                con.execute(
+                    f"""UPDATE items SET source_stage='QUALIDADE',source_status_quality='Pendente'
+                        WHERE id IN ({marks})""",
+                    mapped_ids,
+                )
+            status = "ORIGEM_MISTO"
+            con.execute(
+                "UPDATE cards SET current_sector='RECEBIMENTO',status=?,updated_at=? WHERE id=?",
+                (status, iso_now(), rec["card_id"]),
+            )
+            con.execute("UPDATE receivings SET closed_at=? WHERE id=?", (iso_now(), receiving_id))
+            if rec["receiving_type"] == "RETORNO":
+                event_type = "RECEBIMENTO_RETORNO_CONCLUIDO"
+                description = "Itens retornados da Costura recebidos e nova amostra de 10% separada. Somente esses itens foram encaminhados à Inspeção 2."
+            else:
+                event_type = "RECEBIMENTO_PARCIAL_CONCLUIDO"
+                description = "Itens em trânsito recebidos, triados e com amostra de 10% separada. Somente esses itens foram encaminhados à Qualidade."
+            add_history(con, rec["card_id"], event_type, description, user_id)
+            return status
         status = "RETORNO_CONCLUIDO" if is_return else "AGUARDANDO_QUALIDADE"
         con.execute(
             "UPDATE cards SET current_sector='QUALIDADE',status=?,updated_at=? WHERE id=?",
@@ -931,7 +1078,11 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 cards_removed_cd02 += 1
                 continue
             sector, status = imported_card_route(stages)
-            receiving_type = "RETORNO" if "RETORNO_COSTURA" in stages else "NOVA"
+            receiving_type = (
+                "RETORNO" if "RETORNO_COSTURA" in stages
+                else "COSTURA" if stages == {"EM_COSTURA"}
+                else "NOVA"
+            )
             if card and has_local_workflow(con, card_id, card["current_sector"]):
                 con.execute("""UPDATE cards SET source_location_summary=?,source_snapshot_at=?,updated_at=?
                     WHERE id=?""", (summary, iso_now(), iso_now(), card_id))
@@ -939,10 +1090,31 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 con.execute("""UPDATE cards SET current_sector=?,status=?,receiving_type=?,
                     source_location_summary=?,source_snapshot_at=?,updated_at=? WHERE id=?""",
                     (sector, status, receiving_type, summary, iso_now(), iso_now(), card_id))
-            # Só abre um recebimento operacional quando a fonte diz que a mercadoria está em trânsito.
-            # As demais posições são exibidas no Recebimento como fotografia fiel do relatório.
-            if stages == {"TRANSITO"}:
-                ensure_receiving(con, card_id, "NOVA")
+            # O controle é aberto sobre os itens da etapa correspondente. Assim uma
+            # compra mista não movimenta tamanhos que já estão em outros setores.
+            if "RETORNO_COSTURA" in stages:
+                con.execute("UPDATE cards SET receiving_type='RETORNO' WHERE id=?", (card_id,))
+                return_item_ids = [row["id"] for row in con.execute(
+                    """SELECT id FROM items WHERE card_id=? AND source_stage='RETORNO_COSTURA'
+                       AND expected_qty>0 ORDER BY id""", (card_id,)
+                ).fetchall()]
+                ensure_receiving(con, card_id, "RETORNO", return_item_ids)
+            elif "TRANSITO" in stages:
+                transit_item_ids = [row["id"] for row in con.execute(
+                    """SELECT id FROM items WHERE card_id=? AND source_stage='TRANSITO'
+                       AND expected_qty>0 ORDER BY id""", (card_id,)
+                ).fetchall()]
+                ensure_receiving(
+                    con, card_id, "NOVA",
+                    transit_item_ids if stages != {"TRANSITO"} else None,
+                )
+            elif stages == {"EM_COSTURA"}:
+                con.execute("UPDATE cards SET receiving_type='COSTURA' WHERE id=?", (card_id,))
+                costura_item_ids = [row["id"] for row in con.execute(
+                    """SELECT id FROM items WHERE card_id=? AND source_stage='EM_COSTURA'
+                       AND expected_qty>0 ORDER BY id""", (card_id,)
+                ).fetchall()]
+                ensure_receiving(con, card_id, "COSTURA", costura_item_ids)
         con.execute(
             """INSERT INTO imports(filename,total_rows,matched_rows,cards_created,cards_updated,items_created,items_updated,
                errors,user_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -1004,31 +1176,29 @@ def dashboard():
             OR EXISTS (SELECT 1 FROM items i WHERE i.card_id=c.id AND i.source_stage='ESTOCAGEM')""").fetchone()["n"],
         "processing_in_progress": counts.get("EM_PROCESSAMENTO", 0) + counts.get("PROCESSAMENTO_PAUSADO", 0),
     }
-
-    # Cards de métrica por setor (número grande + %), no mesmo espírito do
-    # indicador "Casulos necessários" que já existia só no Recebimento —
-    # soma de peças esperadas por setor, cruzada com a capacidade real do
-    # CD (Recebimento) ou com o quanto disso está sendo trabalhado agora
-    # de verdade, não só esperando na fila (Qualidade/Processamento).
-    def _soma_esperada(filtro_sql: str) -> int:
-        linha = con.execute(
+    def sum_expected(filter_sql: str) -> int:
+        row = con.execute(
             f"""SELECT COALESCE(SUM(i.expected_qty),0) total FROM cards c
-                LEFT JOIN items i ON i.card_id=c.id WHERE {filtro_sql}"""
+                LEFT JOIN items i ON i.card_id=c.id WHERE {filter_sql}"""
         ).fetchone()
-        return int(linha["total"] or 0)
+        return int(row["total"] or 0)
 
-    totals["receiving_qty"] = _soma_esperada("c.current_sector='RECEBIMENTO' OR c.source_snapshot_at IS NOT NULL")
-    totals["quality_qty"] = _soma_esperada(
-        "c.current_sector='QUALIDADE' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage IN "
-        "('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO'))"
+    totals["receiving_qty"] = sum_expected(
+        "c.current_sector='RECEBIMENTO' OR c.source_snapshot_at IS NOT NULL"
     )
-    totals["processing_qty"] = _soma_esperada(
-        "c.current_sector='PROCESSAMENTO' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage IN "
-        "('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO'))"
+    totals["quality_qty"] = sum_expected(
+        "c.current_sector='QUALIDADE' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id "
+        "AND si.source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO'))"
     )
-    linha_capacidade = con.execute("SELECT COALESCE(SUM(capacity),0) total FROM warehouse_locations").fetchone()
-    totals["warehouse_capacity"] = int(linha_capacidade["total"] or 0) if linha_capacidade else 0
-
+    totals["processing_qty"] = sum_expected(
+        "c.current_sector='PROCESSAMENTO' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id "
+        "AND si.source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO'))"
+    )
+    capacity_row = con.execute(
+        """SELECT COALESCE(SUM(l.capacity),0) total FROM warehouse_locations l
+           JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active=1"""
+    ).fetchone()
+    totals["warehouse_capacity"] = int(capacity_row["total"] or 0)
     con.close()
     return {
         "totals": totals,
@@ -1045,6 +1215,7 @@ def list_cards(scope: str = "receiving", search: str = ""):
     con = db_connect()
     sql = """SELECT c.id,c.purchase_id,c.supplier,c.original_type,c.purchase_mode,c.brand,c.forecast_date,c.current_sector,c.status,
              c.receiving_type,c.quality_destination,c.casulo_current,c.source_location_summary,c.source_snapshot_at,c.updated_at,
+             (SELECT r.ten_percent_status FROM receivings r WHERE r.card_id=c.id ORDER BY r.id DESC LIMIT 1) receiving_activity,
              COALESCE(SUM(i.expected_qty),0) expected_total,COUNT(i.id) item_count,
              GROUP_CONCAT(DISTINCT COALESCE(i.product,'') || ' ' || COALESCE(i.reference,'') || ' ' || COALESCE(i.sku,'')) material_search
              FROM cards c LEFT JOIN items i ON i.card_id=c.id WHERE 1=1"""
@@ -1056,7 +1227,7 @@ def list_cards(scope: str = "receiving", search: str = ""):
     elif scope == "processing":
         sql += " AND (c.current_sector='PROCESSAMENTO' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO')))"
     elif scope == "labeling":
-        sql += " AND c.current_sector='ETIQUETAGEM'"
+        sql += " AND (c.current_sector='ETIQUETAGEM' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage='ETIQUETAGEM'))"
     elif scope == "storage":
         sql += " AND (c.current_sector='ESTOCAGEM' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage='ESTOCAGEM'))"
     elif scope == "outside":
@@ -1138,9 +1309,16 @@ async def save_receiving(receiving_id: int, request: Request):
     )
     received_qty = incoming("received_qty", rec["received_qty"])
     if received_qty is not None:
-        item_count = con.execute(
-            "SELECT COUNT(*) n FROM items WHERE card_id=? AND expected_qty>0", (rec["card_id"],)
-        ).fetchone()["n"]
+        if rec["source_subset"]:
+            item_count = con.execute(
+                """SELECT COUNT(*) n FROM receiving_operation_items roi
+                   JOIN items i ON i.id=roi.item_id
+                   WHERE roi.receiving_id=? AND i.expected_qty>0""", (receiving_id,)
+            ).fetchone()["n"]
+        else:
+            item_count = con.execute(
+                "SELECT COUNT(*) n FROM items WHERE card_id=? AND expected_qty>0", (rec["card_id"],)
+            ).fetchone()["n"]
         minimum = max(math.ceil(int(received_qty) * 0.10), item_count if card["purchase_mode"] == "GRADE" else 0)
         con.execute("UPDATE receivings SET ten_percent_min=? WHERE id=?", (minimum, receiving_id))
     add_history(con, rec["card_id"], "RECEBIMENTO_SALVO", "Dados do Recebimento atualizados.", user_id)
@@ -1208,8 +1386,10 @@ async def sample_timer(receiving_id: int, action: str, request: Request):
         rec = con.execute("SELECT * FROM receivings WHERE id=?", (receiving_id,)).fetchone()
         if rec["ten_percent_actual"] is None:
             con.close()
-            raise HTTPException(400, "Informe a quantidade efetivamente separada.")
-        if rec["ten_percent_actual"] < rec["ten_percent_min"]:
+            message = ("Informe a quantidade produzida." if rec["receiving_type"] == "COSTURA"
+                       else "Informe a quantidade efetivamente separada.")
+            raise HTTPException(400, message)
+        if rec["receiving_type"] != "COSTURA" and rec["ten_percent_actual"] < rec["ten_percent_min"]:
             con.close()
             raise HTTPException(400, f"A quantidade separada deve ser no mínimo {rec['ten_percent_min']} peças.")
     summary = timer_action(con, receiving_id, action, user_id)
@@ -1218,11 +1398,14 @@ async def sample_timer(receiving_id: int, action: str, request: Request):
     con.execute("UPDATE receivings SET ten_percent_status=?,triage_completed=? WHERE id=?",
                 (status_map[action],triage_done,receiving_id))
     verbs = {"start": "iniciou", "pause": "pausou", "resume": "retomou", "finish": "concluiu"}
-    activity = ("a separação dos 10% e a triagem inicial" if rec["receiving_type"] == "NOVA"
-                else "a separação da nova amostra de 10% do retorno CD01")
+    activity = (
+        "o controle de produção da Costura" if rec["receiving_type"] == "COSTURA"
+        else "a separação dos 10% e a triagem inicial" if rec["receiving_type"] == "NOVA"
+        else "a separação da nova amostra de 10% do retorno CD01"
+    )
     add_history(con, rec["card_id"], "SEPARACAO_10", f"Operador {verbs[action]} {activity}.", user_id)
     next_status = None
-    if action == "finish":
+    if action == "finish" and rec["receiving_type"] != "COSTURA":
         next_status = update_new_receiving_flow(con, receiving_id, user_id)
     con.commit()
     con.close()
@@ -1312,9 +1495,11 @@ async def complete_dispatch(card_id: int, request: Request):
             f"costureiro {seamstress}. Card encerrado no fluxo interno."
         )
     con.execute(
-        "UPDATE cards SET current_sector=?,status=?,updated_at=? WHERE id=?",
-        (next_sector, next_status, iso_now(), card_id),
+        "UPDATE cards SET current_sector=?,status=?,receiving_type=?,updated_at=? WHERE id=?",
+        (next_sector, next_status, "COSTURA" if destination == "CD01" else card["receiving_type"], iso_now(), card_id),
     )
+    if destination == "CD01":
+        ensure_receiving(con, card_id, "COSTURA")
     add_history(con, card_id, "DESPACHO_COSTURA", description, user_id)
     con.commit()
     con.close()
@@ -1426,4 +1611,3 @@ def global_history(limit: int = 300):
     ).fetchall()
     con.close()
     return [dict(r) for r in rows]
-
