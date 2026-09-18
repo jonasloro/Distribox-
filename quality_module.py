@@ -109,6 +109,7 @@ def init_quality_db() -> None:
             development_required INTEGER,
             development_separated INTEGER,
             development_pending INTEGER NOT NULL DEFAULT 0,
+            source_subset INTEGER NOT NULL DEFAULT 0,
             created_by INTEGER NOT NULL,
             completed_by INTEGER,
             created_at TEXT NOT NULL,
@@ -125,6 +126,14 @@ def init_quality_db() -> None:
             sample_qty INTEGER NOT NULL DEFAULT 0,
             sample_scope TEXT NOT NULL DEFAULT 'ITEM',
             UNIQUE(inspection_id,item_id),
+            FOREIGN KEY(inspection_id) REFERENCES quality_inspections(id) ON DELETE CASCADE,
+            FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS quality_inspection_items (
+            inspection_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            PRIMARY KEY(inspection_id,item_id),
             FOREIGN KEY(inspection_id) REFERENCES quality_inspections(id) ON DELETE CASCADE,
             FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
         );
@@ -176,6 +185,8 @@ def init_quality_db() -> None:
     inspection_columns = {row["name"] for row in con.execute("PRAGMA table_info(quality_inspections)").fetchall()}
     if "purchase_mode" not in inspection_columns:
         con.execute("ALTER TABLE quality_inspections ADD COLUMN purchase_mode TEXT NOT NULL DEFAULT 'GRADE'")
+    if "source_subset" not in inspection_columns:
+        con.execute("ALTER TABLE quality_inspections ADD COLUMN source_subset INTEGER NOT NULL DEFAULT 0")
     sample_columns = {row["name"] for row in con.execute("PRAGMA table_info(quality_sample_items)").fetchall()}
     if "sample_scope" not in sample_columns:
         con.execute("ALTER TABLE quality_sample_items ADD COLUMN sample_scope TEXT NOT NULL DEFAULT 'ITEM'")
@@ -222,9 +233,17 @@ def distribute_grade_sample(items: list[sqlite3.Row], requested_total: int) -> t
 
 
 def create_automatic_sample(
-    con: sqlite3.Connection, inspection_id: int, card_id: int, purchase_mode: str, requested_total: int
+    con: sqlite3.Connection, inspection_id: int, card_id: int, purchase_mode: str, requested_total: int,
+    item_ids: Optional[list[int]] = None,
 ) -> int:
-    items = con.execute("SELECT id,expected_qty FROM items WHERE card_id=? ORDER BY id", (card_id,)).fetchall()
+    if item_ids:
+        marks = ",".join("?" for _ in item_ids)
+        items = con.execute(
+            f"SELECT id,expected_qty FROM items WHERE card_id=? AND id IN ({marks}) ORDER BY id",
+            (card_id, *item_ids),
+        ).fetchall()
+    else:
+        items = con.execute("SELECT id,expected_qty FROM items WHERE card_id=? ORDER BY id", (card_id,)).fetchall()
     if not items:
         raise HTTPException(400, "O Card não possui itens para compor a amostra.")
     if purchase_mode == "SALDO":
@@ -574,6 +593,7 @@ async def create_inspection(card_id: int, request: Request):
     destination = str(payload.get("destination") or "").strip().upper() or None
     development_required_raw = payload.get("development_required")
     development_separated_raw = payload.get("development_separated")
+    source_subset_requested = bool(payload.get("source_subset"))
     if inspection_type not in (1, 2):
         raise HTTPException(400, "Selecione Inspeção 1 ou Inspeção 2.")
     if development_required_raw is None:
@@ -596,9 +616,20 @@ async def create_inspection(card_id: int, request: Request):
     if not card:
         con.close()
         raise HTTPException(404, "Card não encontrado.")
+    source_items: list[sqlite3.Row] = []
+    source_subset = False
     if card["current_sector"] != "QUALIDADE":
-        con.close()
-        raise HTTPException(400, "O Card não está na Qualidade.")
+        if source_subset_requested and card["source_snapshot_at"]:
+            source_items = con.execute(
+                """SELECT id,expected_qty FROM items WHERE card_id=?
+                   AND source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO')
+                   AND expected_qty>0 ORDER BY id""",
+                (card_id,),
+            ).fetchall()
+            source_subset = bool(source_items)
+        if not source_subset:
+            con.close()
+            raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
     purchase_mode = str(card["purchase_mode"] or "").upper()
     if purchase_mode not in {"GRADE", "SALDO"}:
         con.close()
@@ -621,7 +652,14 @@ async def create_inspection(card_id: int, request: Request):
     # - Retorno da Costura: a Inspeção 2 é obrigatória e usa a nova amostra de
     #   10% já separada pelo Recebimento sobre a quantidade efetivamente retornada.
     is_costura_return = card["receiving_type"] == "RETORNO"
-    if inspection_type == 1 or not is_costura_return:
+    if source_subset:
+        subset_total = sum(int(item["expected_qty"] or 0) for item in source_items)
+        requested_target = max(
+            math.ceil(subset_total * 0.10),
+            len(source_items) if purchase_mode == "GRADE" else 1,
+        )
+        sample_source = "IMPORTACAO_QUALIDADE"
+    elif inspection_type == 1 or not is_costura_return:
         receiving = con.execute(
             """SELECT * FROM receivings WHERE card_id=? AND receiving_type='NOVA'
                ORDER BY id DESC LIMIT 1""",
@@ -646,8 +684,8 @@ async def create_inspection(card_id: int, request: Request):
 
     cur = con.execute(
         """INSERT INTO quality_inspections(card_id,inspection_type,status,destination,sample_source,purchase_mode,
-           sample_target_total,development_required,development_separated,development_pending,created_by,created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+           sample_target_total,development_required,development_separated,development_pending,source_subset,created_by,created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             card_id,
             inspection_type,
@@ -659,21 +697,32 @@ async def create_inspection(card_id: int, request: Request):
             development_required,
             development_separated,
             1 if development_required and not development_separated else 0,
+            1 if source_subset else 0,
             user_id,
             iso_now(),
         ),
     )
     inspection_id = cur.lastrowid
-    target = create_automatic_sample(con, inspection_id, card_id, purchase_mode, requested_target)
+    source_item_ids = [int(item["id"]) for item in source_items]
+    if source_subset:
+        con.executemany(
+            "INSERT INTO quality_inspection_items(inspection_id,item_id) VALUES(?,?)",
+            [(inspection_id, item_id) for item_id in source_item_ids],
+        )
+    target = create_automatic_sample(
+        con, inspection_id, card_id, purchase_mode, requested_target,
+        source_item_ids if source_subset else None,
+    )
     con.execute(
         "UPDATE quality_inspections SET sample_target_total=? WHERE id=?",
         (target, inspection_id),
     )
 
-    con.execute(
-        "UPDATE cards SET status='AGUARDANDO_INSPECAO',updated_at=? WHERE id=?",
-        (iso_now(), card_id),
-    )
+    if not source_subset:
+        con.execute(
+            "UPDATE cards SET status='AGUARDANDO_INSPECAO',updated_at=? WHERE id=?",
+            (iso_now(), card_id),
+        )
     development_text = (
         "Separação para Desenvolvimento necessária e ainda pendente."
         if development_required and not development_separated
@@ -1183,7 +1232,31 @@ async def complete_inspection(inspection_id: int, request: Request):
            WHERE id=?""",
         (user_id, now, 1 if pending else 0, inspection_id),
     )
-    if inspection["inspection_type"] == 1:
+    if inspection["source_subset"]:
+        mapped_ids = [row["item_id"] for row in con.execute(
+            "SELECT item_id FROM quality_inspection_items WHERE inspection_id=?", (inspection_id,)
+        ).fetchall()]
+        next_stage = (
+            "AGUARDANDO_COSTURA" if inspection["inspection_type"] == 1 and inspection["destination"] == "CD01"
+            else "CONCLUIDO" if inspection["inspection_type"] == 1
+            else "AGUARDANDO_PROCESSAMENTO"
+        )
+        if mapped_ids:
+            marks = ",".join("?" for _ in mapped_ids)
+            con.execute(
+                f"UPDATE items SET source_stage=?,source_status_quality='Concluído' WHERE id IN ({marks})",
+                (next_stage, *mapped_ids),
+            )
+        con.execute(
+            "UPDATE cards SET status='ORIGEM_MISTO',updated_at=? WHERE id=?",
+            (now, inspection["card_id"]),
+        )
+        route_text = (
+            f"Itens importados encaminhados para Costura ({inspection['destination']})."
+            if inspection["inspection_type"] == 1
+            else "Itens importados encaminhados ao Processamento."
+        )
+    elif inspection["inspection_type"] == 1:
         con.execute(
             """UPDATE cards SET current_sector='RECEBIMENTO',status='AGUARDANDO_DESPACHO_COSTURA',
                quality_destination=?,receiving_type='NOVA',updated_at=? WHERE id=?""",
@@ -1216,4 +1289,3 @@ async def complete_inspection(inspection_id: int, request: Request):
 
 def register_quality_routes(app: FastAPI) -> None:
     app.include_router(router)
-
