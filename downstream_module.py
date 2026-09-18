@@ -46,8 +46,12 @@ def init_downstream_db() -> None:
     CREATE TABLE IF NOT EXISTS downstream_operations(
       id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT NULL, sector TEXT NOT NULL,
       purchase_mode TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ABERTO', created_at TEXT NOT NULL,
-      completed_at TEXT, completed_by INTEGER, UNIQUE(card_id,sector),
+      completed_at TEXT, completed_by INTEGER, source_subset INTEGER NOT NULL DEFAULT 0, UNIQUE(card_id,sector),
       FOREIGN KEY(card_id) REFERENCES cards(id), FOREIGN KEY(completed_by) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS downstream_operation_items(
+      operation_id INTEGER NOT NULL, item_id INTEGER NOT NULL, PRIMARY KEY(operation_id,item_id),
+      FOREIGN KEY(operation_id) REFERENCES downstream_operations(id) ON DELETE CASCADE,
+      FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE);
     CREATE TABLE IF NOT EXISTS downstream_assignments(
       id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id INTEGER NOT NULL, item_id INTEGER,
       worker_user_id INTEGER NOT NULL, assigned_qty INTEGER NOT NULL, completed_qty INTEGER NOT NULL DEFAULT 0,
@@ -58,6 +62,9 @@ def init_downstream_db() -> None:
     CREATE INDEX IF NOT EXISTS idx_downstream_card ON downstream_operations(card_id,sector);
     CREATE INDEX IF NOT EXISTS idx_downstream_assignment ON downstream_assignments(operation_id,item_id);
     """)
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(downstream_operations)").fetchall()}
+    if "source_subset" not in columns:
+        con.execute("ALTER TABLE downstream_operations ADD COLUMN source_subset INTEGER NOT NULL DEFAULT 0")
     con.commit()
     con.close()
 
@@ -69,13 +76,30 @@ def ensure_operation(con: sqlite3.Connection, card_id: int, sector: str) -> sqli
     card = con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
     if not card:
         raise HTTPException(404, "Card não encontrado.")
-    if card["current_sector"] != sector:
+    source_subset = bool(card["source_snapshot_at"] and card["current_sector"] != sector)
+    eligible_items = []
+    if source_subset:
+        eligible_items = con.execute(
+            "SELECT id FROM items WHERE card_id=? AND source_stage=? ORDER BY id", (card_id, sector)
+        ).fetchall()
+        if not eligible_items:
+            raise HTTPException(400, f"Não há itens disponíveis em {sector.title()}.")
+    elif card["current_sector"] != sector:
         raise HTTPException(400, f"O Card não está em {sector.title()}.")
     con.execute(
-        "INSERT OR IGNORE INTO downstream_operations(card_id,sector,purchase_mode,created_at) VALUES(?,?,?,?)",
-        (card_id, sector, card["purchase_mode"], now()),
+        "INSERT OR IGNORE INTO downstream_operations(card_id,sector,purchase_mode,source_subset,created_at) VALUES(?,?,?,?,?)",
+        (card_id, sector, card["purchase_mode"], 1 if source_subset else 0, now()),
     )
-    return con.execute("SELECT * FROM downstream_operations WHERE card_id=? AND sector=?", (card_id, sector)).fetchone()
+    operation = con.execute("SELECT * FROM downstream_operations WHERE card_id=? AND sector=?", (card_id, sector)).fetchone()
+    if operation["status"] != "ABERTO":
+        raise HTTPException(400, f"O controle de {sector.title()} desta compra já foi concluído.")
+    if source_subset:
+        for item in eligible_items:
+            con.execute(
+                "INSERT OR IGNORE INTO downstream_operation_items(operation_id,item_id) VALUES(?,?)",
+                (operation["id"], item["id"]),
+            )
+    return operation
 
 
 def elapsed(row: sqlite3.Row) -> int:
@@ -92,14 +116,18 @@ def downstream_card_data(con: sqlite3.Connection, card_id: int, sector: str) -> 
         return None
     if not op:
         return {"id": None, "sector": sector, "purchase_mode": card["purchase_mode"], "status": "NAO_INICIADO", "items": [], "assignments": [], "totals": {"expected": 0, "assigned": 0, "completed": 0, "available": 0}}
-    expected_expr = "COALESCE(NULLIF(piq.processed_qty,0),i.expected_qty)"
+    source_subset = bool("source_subset" in op.keys() and op["source_subset"])
+    subset_filter = "AND EXISTS (SELECT 1 FROM downstream_operation_items doi WHERE doi.operation_id=? AND doi.item_id=i.id)" if source_subset else ""
+    item_params = (op["id"], op["id"], card_id, op["id"]) if source_subset else (op["id"], op["id"], card_id)
     items = [dict(r) for r in con.execute(f"""
-      SELECT i.id item_id,i.product,i.reference,i.sku,i.color,i.size,{expected_expr} expected_qty,
+      SELECT i.id item_id,i.product,i.reference,i.sku,i.color,i.size,
+       COALESCE(NULLIF((SELECT piq.processed_qty FROM processing_item_quantities piq
+         JOIN processing_records pr ON pr.id=piq.processing_id WHERE pr.card_id=i.card_id AND piq.item_id=i.id
+         ORDER BY pr.id DESC LIMIT 1),0),i.expected_qty) expected_qty,
        COALESCE((SELECT SUM(a.assigned_qty) FROM downstream_assignments a WHERE a.operation_id=? AND a.item_id=i.id),0) assigned_qty,
        COALESCE((SELECT SUM(a.completed_qty) FROM downstream_assignments a WHERE a.operation_id=? AND a.item_id=i.id),0) completed_qty
-      FROM items i LEFT JOIN processing_records pr ON pr.card_id=i.card_id
-      LEFT JOIN processing_item_quantities piq ON piq.processing_id=pr.id AND piq.item_id=i.id
-      WHERE i.card_id=? ORDER BY i.product,i.color,i.size,i.id""", (op["id"], op["id"], card_id)).fetchall()]
+      FROM items i WHERE i.card_id=? {subset_filter}
+      ORDER BY i.product,i.color,i.size,i.id""", item_params).fetchall()]
     assignments = []
     for row in con.execute("""SELECT a.*,u.name worker_name,i.product,i.reference,i.sku,i.color,i.size
       FROM downstream_assignments a JOIN users u ON u.id=a.worker_user_id
@@ -107,7 +135,14 @@ def downstream_card_data(con: sqlite3.Connection, card_id: int, sector: str) -> 
         data = dict(row); data["elapsed_seconds"] = elapsed(row); assignments.append(data)
     expected = sum(int(i["expected_qty"] or 0) for i in items)
     if card["purchase_mode"] == "SALDO":
-        processed = con.execute("SELECT processed_qty_general FROM processing_records WHERE card_id=? ORDER BY id DESC LIMIT 1", (card_id,)).fetchone()
+        if source_subset:
+            processed = con.execute("""SELECT pr.processed_qty_general FROM processing_records pr
+              WHERE pr.card_id=? AND EXISTS (SELECT 1 FROM processing_item_quantities piq
+                JOIN downstream_operation_items doi ON doi.item_id=piq.item_id
+                WHERE piq.processing_id=pr.id AND doi.operation_id=?)
+              ORDER BY pr.id DESC LIMIT 1""", (card_id, op["id"])).fetchone()
+        else:
+            processed = con.execute("SELECT processed_qty_general FROM processing_records WHERE card_id=? ORDER BY id DESC LIMIT 1", (card_id,)).fetchone()
         if processed and int(processed["processed_qty_general"] or 0) > 0:
             expected = int(processed["processed_qty_general"])
     assigned = sum(int(a["assigned_qty"] or 0) for a in assignments)
@@ -152,6 +187,10 @@ async def claim(operation_id: int, request: Request):
         if not item_id: con.close(); raise HTTPException(400, "Selecione um tamanho.")
         item = con.execute("SELECT * FROM items WHERE id=? AND card_id=?", (item_id, op["card_id"])).fetchone()
         if not item: con.close(); raise HTTPException(400, "O tamanho não pertence a este Card.")
+        if op["source_subset"] and not con.execute(
+            "SELECT 1 FROM downstream_operation_items WHERE operation_id=? AND item_id=?", (operation_id, item_id)
+        ).fetchone():
+            con.close(); raise HTTPException(400, "Este tamanho não está disponível nesta etapa.")
         duplicate = con.execute("SELECT 1 FROM downstream_assignments WHERE operation_id=? AND item_id=? AND status!='LIBERADA'", (operation_id,item_id)).fetchone()
         if duplicate: con.close(); raise HTTPException(409, "Este tamanho já foi assumido.")
         processed = con.execute("""SELECT piq.processed_qty FROM processing_item_quantities piq
@@ -212,10 +251,28 @@ async def complete(operation_id: int, request: Request):
     if unfinished: con.close(); raise HTTPException(400,"Finalize o cronômetro de todas as atribuições antes de concluir o setor.")
     nxt="ESTOCAGEM" if op["sector"]=="ETIQUETAGEM" else "ESTOCAGEM"; status="AGUARDANDO_ESTOCAGEM" if op["sector"]=="ETIQUETAGEM" else "FINALIZADO"
     con.execute("UPDATE downstream_operations SET status='CONCLUIDO',completed_at=?,completed_by=? WHERE id=?",(now(),uid,operation_id))
-    con.execute("UPDATE cards SET current_sector=?,status=?,updated_at=? WHERE id=?",(nxt,status,now(),op["card_id"]))
+    if op["source_subset"]:
+        item_ids = [row["item_id"] for row in con.execute(
+            "SELECT item_id FROM downstream_operation_items WHERE operation_id=?", (operation_id,)
+        ).fetchall()]
+        if item_ids:
+            marks = ",".join("?" for _ in item_ids)
+            next_stage = "ESTOCAGEM" if op["sector"] == "ETIQUETAGEM" else "CONCLUIDO"
+            con.execute(f"UPDATE items SET source_stage=? WHERE id IN ({marks})", (next_stage, *item_ids))
+            if op["sector"] == "ESTOCAGEM" and op["purchase_mode"] == "GRADE":
+                completed = con.execute(
+                    "SELECT item_id,SUM(completed_qty) qty FROM downstream_assignments WHERE operation_id=? GROUP BY item_id",
+                    (operation_id,),
+                ).fetchall()
+                for row in completed:
+                    con.execute("""UPDATE processing_item_quantities SET stored_qty=? WHERE item_id=?
+                      AND processing_id=(SELECT id FROM processing_records WHERE card_id=? ORDER BY id DESC LIMIT 1)""",
+                      (int(row["qty"] or 0), row["item_id"], op["card_id"]))
+        con.execute("UPDATE cards SET updated_at=? WHERE id=?", (now(), op["card_id"]))
+    else:
+        con.execute("UPDATE cards SET current_sector=?,status=?,updated_at=? WHERE id=?",(nxt,status,now(),op["card_id"]))
     history(con,op["card_id"],f"{op['sector']}_CONCLUIDA",f"{actor['name']} concluiu {op['sector'].title()}.",uid); con.commit(); con.close(); return {"status":status}
 
 
 def register_downstream_routes(app: FastAPI) -> None:
     app.include_router(router)
-
