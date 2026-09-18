@@ -13,7 +13,8 @@ from fastapi import File, HTTPException, Request, UploadFile
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
-from warehouse_structure import ESTRUTURA_CD, gerar_todos_casulos
+from warehouse_structure import ESTRUTURA_CD
+from supabase_module import pg_connect
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -256,69 +257,11 @@ def init_unified_db() -> None:
     }.items():
         if name not in shipment_item_columns:
             con.execute(f"ALTER TABLE shipment_items ADD COLUMN {name} {definition}")
-    if not con.execute("SELECT 1 FROM warehouse_zones LIMIT 1").fetchone():
-        zones = [
-            ("A", "Zona A — Giro alto", "Misto", 5000),
-            ("B", "Zona B — Grade", "Grade", 4500),
-            ("C", "Zona C — Saldo", "Saldo", 3500),
-            ("D", "Zona D — Reserva", "Misto", 2500),
-        ]
-        con.executemany(
-            "INSERT INTO warehouse_zones(code,name,gender,capacity,created_at) VALUES(?,?,?,?,?)",
-            [(code, name, gender, capacity, now()) for code, name, gender, capacity in zones],
-        )
-        zone_ids = {r["code"]: r["id"] for r in con.execute("SELECT id,code FROM warehouse_zones")}
-        locations = []
-        for zone in "ABCD":
-            for column in range(1, 9):
-                for level in ("A", "B", "C"):
-                    address = f"{zone}-{column:03d}-{level}"
-                    locations.append((zone_ids[zone], address, zone, "UNICO", column, level, "CASULO", 100, now()))
-        con.executemany(
-            """INSERT INTO warehouse_locations(zone_id,address,aisle,side,column_no,level_no,structure_type,capacity,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            locations,
-        )
-    # Integração segura da estrutura física real do CD. Os endereços antigos
-    # são preservados no banco (inclusive seus lançamentos de estoque), mas
-    # ficam inativos quando a estrutura real está pronta. Nenhum registro é
-    # apagado durante a migração.
-    casulos = gerar_todos_casulos()
-    real_location_count = con.execute(
-        """SELECT COUNT(*) n FROM warehouse_locations l
-           JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.code LIKE 'Rua %'"""
-    ).fetchone()["n"]
-    if real_location_count < len(casulos):
-        ruas_presentes = sorted({c["rua"] for c in casulos}, key=lambda r: int(r.split()[1]))
-        zone_capacity: dict[str, int] = {}
-        zone_gender: dict[str, str] = {}
-        for casulo in casulos:
-            zone_capacity[casulo["rua"]] = zone_capacity.get(casulo["rua"], 0) + int(casulo["capacidade"])
-            zone_gender[casulo["rua"]] = casulo["genero"]
-        con.executemany(
-            """INSERT OR IGNORE INTO warehouse_zones(code,name,gender,capacity,created_at)
-               VALUES(?,?,?,?,?)""",
-            [(rua, rua, zone_gender[rua], zone_capacity[rua], now()) for rua in ruas_presentes],
-        )
-        zone_ids = {r["code"]: r["id"] for r in con.execute(
-            "SELECT id,code FROM warehouse_zones WHERE code LIKE 'Rua %'"
-        )}
-        con.executemany(
-            """INSERT OR IGNORE INTO warehouse_locations(
-               zone_id,address,aisle,side,column_no,level_no,structure_type,capacity,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            [(
-                zone_ids[c["rua"]], c["address"], c["rua"], c["lado"], c["coluna"],
-                c["nivel"], c["tipo_estrutural"], c["capacidade"], now(),
-            ) for c in casulos],
-        )
-        con.execute("UPDATE warehouse_zones SET active=0 WHERE code NOT LIKE 'Rua %'")
-        con.execute("UPDATE warehouse_zones SET active=1 WHERE code LIKE 'Rua %'")
-        add_movement(
-            con, "ESTOQUE", None, "SEED_ESTRUTURA_REAL_SEGURA",
-            f"Estrutura real carregada com {len(casulos)} casulos; endereços legados preservados e inativados.",
-            None,
-        )
+    # A estrutura de casulos (warehouse_zones/warehouse_locations) NÃO é
+    # mais populada aqui — ela mora no Supabase agora (ver
+    # supabase_module.seed_warehouse_supabase, chamada no startup do
+    # app.py). As tabelas continuam existindo no SQLite só por
+    # compatibilidade com o schema antigo, mas ficam vazias e sem uso.
     con.commit()
     con.close()
 
@@ -360,69 +303,102 @@ def register_unified_routes(app) -> None:
 
     @app.get("/api/unified/warehouse")
     def warehouse(search: str = "", zone: str = "", status: str = ""):
-        con = db_connect()
-        sql = """SELECT l.*,z.code zone_code,z.name zone_name,
-                 CASE WHEN l.capacity>0 THEN ROUND(l.occupied_qty*100.0/l.capacity,1) ELSE 0 END occupancy
-                 FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active=1"""
-        args: list[Any] = []
-        if search:
-            sql += " AND (l.address LIKE ? OR l.category LIKE ? OR l.structure_type LIKE ?)"
-            q = f"%{search}%"; args += [q, q, q]
-        if zone:
-            sql += " AND z.code=?"; args.append(zone)
-        if status:
-            sql += " AND l.status=?"; args.append(status)
-        sql += " ORDER BY z.code,l.column_no,l.level_no"
-        locations = [dict(r) for r in con.execute(sql, args).fetchall()]
-        zones = [dict(r) for r in con.execute(
-            """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) occupied,
-               CASE WHEN z.capacity>0 THEN ROUND(COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity,1) ELSE 0 END occupancy
-               FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
-               WHERE z.active=1 GROUP BY z.id ORDER BY z.code"""
-        ).fetchall()]
-        con.close()
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                sql = """SELECT l.*,z.code AS zone_code,z.name AS zone_name,
+                         CASE WHEN l.capacity>0 THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy
+                         FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
+                args: list[Any] = []
+                if search:
+                    sql += " AND (l.address ILIKE %s OR l.category ILIKE %s OR l.structure_type ILIKE %s)"
+                    q = f"%{search}%"; args += [q, q, q]
+                if zone:
+                    sql += " AND z.code=%s"; args.append(zone)
+                if status:
+                    sql += " AND l.status=%s"; args.append(status)
+                sql += " ORDER BY z.code,l.column_no,l.level_no"
+                cur.execute(sql, args)
+                locations = cur.fetchall()
+                cur.execute(
+                    """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) AS occupied,
+                       CASE WHEN z.capacity>0 THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1) ELSE 0 END AS occupancy
+                       FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                       WHERE z.active GROUP BY z.id ORDER BY z.code"""
+                )
+                zones = cur.fetchall()
         return {"zones": zones, "locations": locations}
 
     @app.post("/api/unified/warehouse/locations/{location_id}")
     async def update_location(location_id: int, request: Request):
         data = await request.json(); user_id = as_int(data.get("user_id"))
-        con = db_connect(); require_user(con, user_id, {"admin", "supervisor", "estocagem"})
-        location = con.execute("SELECT * FROM warehouse_locations WHERE id=?", (location_id,)).fetchone()
-        if not location:
-            con.close(); raise HTTPException(404, "Endereço não encontrado.")
-        capacity = max(0, as_int(data.get("capacity"), location["capacity"]))
-        category = str(data.get("category", location["category"] or "")).strip()
-        status = str(data.get("status", location["status"])).upper()
-        con.execute("UPDATE warehouse_locations SET capacity=?,category=?,status=?,updated_at=? WHERE id=?", (capacity, category, status, now(), location_id))
-        add_movement(con, "ESTOQUE", location_id, "ENDERECO_ATUALIZADO", f"Endereço {location['address']} atualizado.", user_id)
-        con.commit(); con.close(); return {"ok": True}
+        con_local = db_connect(); require_user(con_local, user_id, {"admin", "supervisor", "estocagem"})
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute("SELECT * FROM warehouse_locations WHERE id=%s", (location_id,))
+                location = cur.fetchone()
+                if not location:
+                    con_local.close(); raise HTTPException(404, "Endereço não encontrado.")
+                capacity = max(0, as_int(data.get("capacity"), location["capacity"]))
+                category = str(data.get("category", location["category"] or "")).strip()
+                status = str(data.get("status", location["status"])).upper()
+                cur.execute(
+                    "UPDATE warehouse_locations SET capacity=%s,category=%s,status=%s,updated_at=now() WHERE id=%s",
+                    (capacity, category, status, location_id),
+                )
+            con.commit()
+        # add_movement (histórico geral) continua no SQLite — é um log que
+        # cruza cards/tarefas/qualidade/estoque, não faz sentido dividir.
+        add_movement(con_local, "ESTOQUE", location_id, "ENDERECO_ATUALIZADO", f"Endereço {location['address']} atualizado.", user_id)
+        con_local.commit(); con_local.close(); return {"ok": True}
 
     @app.post("/api/unified/warehouse/store")
     async def store(request: Request):
         data = await request.json(); user_id = as_int(data.get("user_id")); qty = as_int(data.get("quantity"))
-        con = db_connect(); require_user(con, user_id, {"admin", "supervisor", "estocagem"})
-        location = con.execute("SELECT * FROM warehouse_locations WHERE id=?", (as_int(data.get("location_id")),)).fetchone()
-        if not location or qty <= 0:
-            con.close(); raise HTTPException(400, "Informe endereço e quantidade válidos.")
-        if int(location["occupied_qty"]) + qty > int(location["capacity"]):
-            con.close(); raise HTTPException(400, "A quantidade ultrapassa a capacidade do endereço.")
-        card_id = as_int(data.get("card_id")) or None; item_id = as_int(data.get("item_id")) or None
-        cur = con.execute(
+        con_local = db_connect(); require_user(con_local, user_id, {"admin", "supervisor", "estocagem"})
+        card_id = as_int(data.get("card_id")) or None
+        item_id = as_int(data.get("item_id")) or None
+
+        # 1) Confere capacidade e reserva o espaço no Supabase (casulos).
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute("SELECT * FROM warehouse_locations WHERE id=%s", (as_int(data.get("location_id")),))
+                location = cur.fetchone()
+                if not location or qty <= 0:
+                    con_local.close(); raise HTTPException(400, "Informe endereço e quantidade válidos.")
+                if int(location["occupied_qty"]) + qty > int(location["capacity"]):
+                    con_local.close(); raise HTTPException(400, "A quantidade ultrapassa a capacidade do endereço.")
+                novo_status = "LOTADO" if int(location["occupied_qty"]) + qty >= int(location["capacity"]) else "OCUPADO"
+                cur.execute(
+                    "UPDATE warehouse_locations SET occupied_qty=occupied_qty+%s,status=%s,updated_at=now() WHERE id=%s",
+                    (qty, novo_status, location["id"]),
+                )
+            con.commit()
+
+        # 2) Registra o que foi guardado no SQLite (stock_entries continua
+        # local, por decisão explícita — não precisa saber o conteúdo
+        # exato de cada casulo, só a ocupação, que já está no Supabase).
+        cur_local = con_local.execute(
             """INSERT INTO stock_entries(card_id,item_id,location_id,quantity,brand,category,lot,created_by,created_at)
                VALUES(?,?,?,?,?,?,?,?,?)""",
             (card_id, item_id, location["id"], qty, str(data.get("brand", "")), str(data.get("category", "")), str(data.get("lot", "")), user_id, now()),
         )
-        con.execute("UPDATE warehouse_locations SET occupied_qty=occupied_qty+?,status=CASE WHEN occupied_qty+?>=capacity THEN 'LOTADO' ELSE 'OCUPADO' END,updated_at=? WHERE id=?", (qty, qty, now(), location["id"]))
         if card_id:
-            con.execute("UPDATE cards SET casulo_current=?,current_sector='ESTOCAGEM',status='FINALIZADO',updated_at=? WHERE id=?", (location["address"], now(), card_id))
-        add_movement(con, "ESTOQUE", cur.lastrowid, "ENTRADA_ESTOQUE", f"{qty} peça(s) armazenadas em {location['address']}.", user_id)
-        con.commit(); con.close(); return {"ok": True, "stock_entry_id": cur.lastrowid}
+            con_local.execute("UPDATE cards SET casulo_current=?,current_sector='ESTOCAGEM',status='FINALIZADO',updated_at=? WHERE id=?", (location["address"], now(), card_id))
+        add_movement(con_local, "ESTOQUE", cur_local.lastrowid, "ENTRADA_ESTOQUE", f"{qty} peça(s) armazenadas em {location['address']}.", user_id)
+        con_local.commit(); con_local.close()
+        return {"ok": True, "stock_entry_id": cur_local.lastrowid}
 
     @app.get("/api/unified/warehouse/analytics")
     def warehouse_analytics():
-        con=db_connect()
-        structures=[dict(r) for r in con.execute("""SELECT COALESCE(structure_type,'NÃO DEFINIDO') label,COUNT(*) locations,
-            COALESCE(SUM(capacity),0) capacity,COALESCE(SUM(occupied_qty),0) occupied FROM warehouse_locations GROUP BY structure_type ORDER BY locations DESC""").fetchall()]
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute("""SELECT COALESCE(structure_type,'NÃO DEFINIDO') AS label,COUNT(*) AS locations,
+                    COALESCE(SUM(capacity),0) AS capacity,COALESCE(SUM(occupied_qty),0) AS occupied
+                    FROM warehouse_locations GROUP BY structure_type ORDER BY locations DESC""")
+                structures = cur.fetchall()
+        # categorias/marcas vêm do stock_entries (SQLite) — decisão de manter
+        # esse detalhe local, sem ligação direta com o casulo no Supabase.
+        con = db_connect()
         categories=[dict(r) for r in con.execute("""SELECT COALESCE(NULLIF(category,''),'SEM CATEGORIA') label,
             COALESCE(SUM(quantity),0) quantity FROM stock_entries GROUP BY category ORDER BY quantity DESC LIMIT 20""").fetchall()]
         brands=[dict(r) for r in con.execute("""SELECT COALESCE(NULLIF(brand,''),'SEM MARCA') label,
@@ -744,15 +720,16 @@ def register_unified_routes(app) -> None:
     @app.get("/api/unified/warehouse/heatmap")
     def warehouse_heatmap():
         """Ocupação por Rua/coluna, sem alterar os lançamentos de estoque."""
-        con = db_connect()
-        rows = con.execute(
-            """SELECT l.aisle,l.column_no,l.side,SUM(l.capacity) capacity,
-                      SUM(l.occupied_qty) occupied,COUNT(*) niveis
-               FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
-               WHERE z.active=1
-               GROUP BY l.aisle,l.column_no,l.side ORDER BY l.aisle,l.column_no"""
-        ).fetchall()
-        con.close()
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    """SELECT l.aisle,l.column_no,l.side,SUM(l.capacity) AS capacity,
+                              SUM(l.occupied_qty) AS occupied,COUNT(*) AS niveis
+                       FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
+                       WHERE z.active
+                       GROUP BY l.aisle,l.column_no,l.side ORDER BY l.aisle,l.column_no"""
+                )
+                rows = cur.fetchall()
         sequential_columns = {
             rua: set(config.get("cols_seq", [])) for rua, config in ESTRUTURA_CD.items()
         }
@@ -791,35 +768,39 @@ def register_unified_routes(app) -> None:
         (GET-only) mais pra frente."""
         data = await request.json()
         user_id = as_int(data.get("user_id"))
-        con = db_connect()
-        require_user(con, user_id)
+        con_local = db_connect()
+        require_user(con_local, user_id)
         itens = data.get("itens") or data.get("items") or []
         aplicados = 0
         nao_encontrados: list[dict] = []
-        for item in itens:
-            try:
-                rua_num = int(item["rua"])
-                coluna = int(item["coluna"])
-                nivel = str(item["linha"]).strip().upper()
-                quantidade = int(item.get("quantidade", 0) or 0)
-            except (KeyError, TypeError, ValueError):
-                nao_encontrados.append(item)
-                continue
-            lado = "par" if coluna % 2 == 0 else "impar"
-            endereco = f"Rua {rua_num:02d}-{coluna:03d}-{lado}-{nivel}"
-            cur = con.execute(
-                "UPDATE warehouse_locations SET occupied_qty=?,updated_at=? WHERE address=?",
-                (quantidade, now(), endereco),
-            )
-            if cur.rowcount:
-                aplicados += 1
-            else:
-                nao_encontrados.append(item)
-        con.commit()
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                for item in itens:
+                    try:
+                        rua_num = int(item["rua"])
+                        coluna = int(item["coluna"])
+                        nivel = str(item["linha"]).strip().upper()
+                        quantidade = int(item.get("quantidade", 0) or 0)
+                    except (KeyError, TypeError, ValueError):
+                        nao_encontrados.append(item)
+                        continue
+                    lado = "par" if coluna % 2 == 0 else "impar"
+                    endereco = f"Rua {rua_num:02d}-{coluna:03d}-{lado}-{nivel}"
+                    cur.execute(
+                        "UPDATE warehouse_locations SET occupied_qty=%s,updated_at=now() WHERE address=%s",
+                        (quantidade, endereco),
+                    )
+                    if cur.rowcount:
+                        aplicados += 1
+                    else:
+                        nao_encontrados.append(item)
+            con.commit()
         add_movement(
-            con, "ESTOQUE", None, "SNAPSHOT_ID_BRASIL_MANUAL",
+            con_local, "ESTOQUE", None, "SNAPSHOT_ID_BRASIL_MANUAL",
             f"{aplicados} casulos atualizados via JSON colado manualmente ({len(nao_encontrados)} nao encontrados).",
             user_id,
         )
-        con.close()
+        con_local.commit()
+        con_local.close()
         return {"aplicados": aplicados, "nao_encontrados": len(nao_encontrados), "total_recebido": len(itens)}
+
