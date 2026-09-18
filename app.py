@@ -21,6 +21,7 @@ from quality_module import init_quality_db, quality_card_data, register_quality_
 from processing_module import init_processing_db, processing_card_data, register_processing_routes
 from downstream_module import downstream_card_data, init_downstream_db, register_downstream_routes
 from unified_module import init_unified_db, register_unified_routes
+from supabase_module import verificar_login_supabase, seed_usuarios_supabase
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("OUTLOG_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -874,6 +875,34 @@ def startup() -> None:
     init_downstream_db()
     init_unified_db()
 
+    # Popula os 16 usuários padrão no Supabase (só na primeira vez — se já
+    # existirem lá, não faz nada). Se o Supabase ainda não estiver
+    # configurado (variável SUPABASE_DATABASE_URL ausente) ou fora do ar,
+    # não derruba o app inteiro por causa disso — só o login fica indisponível
+    # até isso ser resolvido; o resto (cards, tarefas, qualidade etc.,
+    # todos no SQLite local) continua funcionando normalmente.
+    try:
+        seed_usuarios_supabase([
+            ("admin", "1234", "admin"),
+            ("recebimento", "1234", "recebimento"),
+            ("recebimento2", "1234", "recebimento"),
+            ("consulta", "1234", "consulta"),
+            ("qualidade1", "1234", "qualidade"),
+            ("qualidade2", "1234", "qualidade"),
+            ("supervisor", "1234", "supervisor"),
+            ("processamento1", "1234", "processamento"),
+            ("processamento2", "1234", "processamento"),
+            ("etiquetagem1", "1234", "etiquetagem"),
+            ("etiquetagem2", "1234", "etiquetagem"),
+            ("estocagem1", "1234", "estocagem"),
+            ("estocagem2", "1234", "estocagem"),
+            ("planejamento1", "1234", "planejamento"),
+            ("expedicao1", "1234", "expedicao"),
+            ("devolucoes1", "1234", "devolucoes"),
+        ])
+    except Exception as e:
+        print(f"[aviso] não consegui popular usuarios no Supabase ainda: {e}")
+
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
@@ -883,14 +912,28 @@ def index(request: Request):
 @app.post("/api/login")
 async def login(request: Request):
     data = await request.json()
+    usuario = data.get("username", "")
+    senha = data.get("password", "")
+
+    # A senha é conferida no Supabase (hash de verdade, PBKDF2 — não é mais
+    # texto puro). O id/nome/papel que o resto do app usa (tarefas, cards,
+    # etc.) continua vindo do SQLite local, pra não quebrar nada que já
+    # depende desse id — os dois ficam sincronizados pelo username.
+    try:
+        confirmado = verificar_login_supabase(usuario, senha)
+    except Exception as e:
+        raise HTTPException(500, f"Não foi possível conectar no banco de autenticação: {e}")
+    if not confirmado:
+        raise HTTPException(401, "Usuário ou senha inválidos.")
+
     con = db_connect()
     user = con.execute(
-        "SELECT id,username,name,role FROM users WHERE username=? AND password=?",
-        (data.get("username", ""), data.get("password", "")),
+        "SELECT id,username,name,role FROM users WHERE username=?",
+        (usuario,),
     ).fetchone()
     con.close()
     if not user:
-        raise HTTPException(401, "Usuário ou senha inválidos.")
+        raise HTTPException(401, "Usuário existe no Supabase mas não está cadastrado localmente — fale com o administrador.")
     return dict(user)
 
 
