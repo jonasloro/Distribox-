@@ -413,3 +413,5 @@ def gerar_todos_casulos() -> list[dict]:
                 })
 
     return casulos
+
+
