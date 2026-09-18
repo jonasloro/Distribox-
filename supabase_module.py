@@ -99,3 +99,58 @@ def seed_usuarios_supabase(usuarios_padrao: list[tuple[str, str, str]]) -> None:
                     (usuario, senha_hash, papel),
                 )
         con.commit()
+
+
+def seed_warehouse_supabase(gerar_todos_casulos) -> None:
+    """Popula warehouse_zones/warehouse_locations no Supabase com a
+    estrutura física real do CD — só roda se a tabela ainda estiver vazia
+    (não sobrescreve ocupação real já lançada). Recebe a própria função
+    gerar_todos_casulos() do warehouse_structure.py como parâmetro, pra não
+    duplicar a lógica de estrutura em dois lugares — este módulo só cuida
+    de gravar no Postgres, não sabe nada sobre rua/coluna/capacidade.
+
+    Grava em blocos multi-valor (não linha por linha) — 19.582 casulos um
+    por vez seria muito mais lento e já vimos esse problema acontecer com
+    outra tabela antes."""
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM warehouse_zones")
+            if cur.fetchone()["n"] > 0:
+                return  # já tem estrutura — não mexe em ocupação real
+
+            casulos = gerar_todos_casulos()
+
+            capacidade_por_zona: dict[str, int] = {}
+            genero_por_zona: dict[str, str] = {}
+            for c in casulos:
+                capacidade_por_zona[c["rua"]] = capacidade_por_zona.get(c["rua"], 0) + c["capacidade"]
+                genero_por_zona.setdefault(c["rua"], c["genero"])
+
+            zona_id_por_nome: dict[str, int] = {}
+            for rua_nome, capacidade_total in capacidade_por_zona.items():
+                cur.execute(
+                    """INSERT INTO warehouse_zones (code, name, gender, capacity)
+                       VALUES (%s, %s, %s, %s) RETURNING id""",
+                    (rua_nome, rua_nome, genero_por_zona[rua_nome], capacidade_total),
+                )
+                zona_id_por_nome[rua_nome] = cur.fetchone()["id"]
+
+            linhas = [
+                (
+                    zona_id_por_nome[c["rua"]], c["address"], c["rua"], c["lado"],
+                    c["coluna"], c["nivel"], c["tipo_estrutural"], c["capacidade"],
+                )
+                for c in casulos
+            ]
+            tamanho_bloco = 500
+            for i in range(0, len(linhas), tamanho_bloco):
+                bloco = linhas[i:i + tamanho_bloco]
+                marcadores = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(bloco))
+                valores = [v for linha in bloco for v in linha]
+                cur.execute(
+                    f"""INSERT INTO warehouse_locations
+                        (zone_id, address, aisle, side, column_no, level_no, structure_type, capacity)
+                        VALUES {marcadores}""",
+                    valores,
+                )
+        con.commit()
