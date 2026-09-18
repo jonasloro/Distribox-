@@ -96,7 +96,7 @@ function setPage(title, subtitle) {
 }
 
 function activeNav(view) {
-  const parent = ({storage:"storage-hub",warehouse:"storage-hub","stock-stats":"storage-hub","capacity-simulator":"storage-hub",returns:"returns-hub","return-indicators":"returns-hub","return-history":"returns-hub",sgo:"sgo-indicators",tasks:"sgo-indicators",import:"sgo-indicators",test:"settings"})[view] || view;
+  const parent = ({storage:"storage-hub",warehouse:"storage-hub","warehouse-heatmap":"storage-hub","stock-stats":"storage-hub","capacity-simulator":"storage-hub",returns:"returns-hub","return-indicators":"returns-hub","return-history":"returns-hub",sgo:"sgo-indicators",tasks:"sgo-indicators",import:"sgo-indicators",test:"settings"})[view] || view;
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === parent);
   });
@@ -219,34 +219,18 @@ async function renderDashboardLegacy() {
 }
 
 function metricCardsHtml(scope, totals) {
-  // Cards de métrica (número grande + %) por setor — mesmo espírito do
-  // indicador "Casulos necessários" que só existia no Recebimento antes.
   if (scope === "receiving") {
-    const qty = totals.receiving_qty || 0;
-    const cap = totals.warehouse_capacity || 0;
-    const pct = cap ? ((qty / cap) * 100).toFixed(1) : "0,0";
-    return `<div class="metric-row-2">
-      <div class="kpi"><div class="kpi-label">Peças aguardando recebimento</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div>
-      <div class="kpi"><div class="kpi-label">% da capacidade do CD</div><div class="kpi-value">${pct}%</div></div>
-    </div>`;
+    const qty = Number(totals.receiving_qty || 0), capacity = Number(totals.warehouse_capacity || 0);
+    const percentage = capacity ? (qty * 100 / capacity).toFixed(1) : "0.0";
+    return `<div class="metric-row-2"><div class="kpi"><div class="kpi-label">Peças aguardando recebimento</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div><div class="kpi"><div class="kpi-label">% da capacidade real do CD</div><div class="kpi-value">${percentage}%</div></div></div>`;
   }
   if (scope === "quality") {
-    const qty = totals.quality_qty || 0;
-    const total = totals.quality || 0, ativo = totals.quality_in_progress || 0;
-    const pct = total ? ((ativo / total) * 100).toFixed(1) : "0,0";
-    return `<div class="metric-row-2">
-      <div class="kpi"><div class="kpi-label">Peças em Qualidade agora</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div>
-      <div class="kpi"><div class="kpi-label">% em inspeção ativa</div><div class="kpi-value">${pct}%</div></div>
-    </div>`;
+    const qty = Number(totals.quality_qty || 0), total = Number(totals.quality || 0), active = Number(totals.quality_in_progress || 0);
+    return `<div class="metric-row-2"><div class="kpi"><div class="kpi-label">Peças em Qualidade</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div><div class="kpi"><div class="kpi-label">% em inspeção ativa</div><div class="kpi-value">${total?(active*100/total).toFixed(1):"0.0"}%</div></div></div>`;
   }
   if (scope === "processing") {
-    const qty = totals.processing_qty || 0;
-    const total = totals.processing || 0, ativo = totals.processing_in_progress || 0;
-    const pct = total ? ((ativo / total) * 100).toFixed(1) : "0,0";
-    return `<div class="metric-row-2">
-      <div class="kpi"><div class="kpi-label">Peças em Processamento agora</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div>
-      <div class="kpi"><div class="kpi-label">% em execução ativa</div><div class="kpi-value">${pct}%</div></div>
-    </div>`;
+    const qty = Number(totals.processing_qty || 0), total = Number(totals.processing || 0), active = Number(totals.processing_in_progress || 0);
+    return `<div class="metric-row-2"><div class="kpi"><div class="kpi-label">Peças em Processamento</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div><div class="kpi"><div class="kpi-label">% em execução ativa</div><div class="kpi-value">${total?(active*100/total).toFixed(1):"0.0"}%</div></div></div>`;
   }
   return "";
 }
@@ -260,16 +244,14 @@ async function renderCards(scope) {
   setPage(title, subtitle);
   const cards = await api(`/api/cards?scope=${scope}`);
   const metrics = ["receiving","quality","processing"].includes(scope)
-    ? metricCardsHtml(scope, (await api("/api/dashboard")).totals)
-    : "";
-  if (processing || labeling || storage) {
+    ? metricCardsHtml(scope, (await api("/api/dashboard")).totals) : "";
+  if (["receiving","quality","processing","labeling","storage"].includes(scope)) {
     const tabs = storage ? moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage") : "";
-    $("mainContent").innerHTML = tabs + metrics + processingQueueHtml(cards);
+    $("mainContent").innerHTML = tabs + metrics + processingQueueHtml(cards, scope);
     filterProductionQueue();
     return;
   }
   $("mainContent").innerHTML = `
-    ${metrics}
     <div class="toolbar">
       <input id="cardSearch" placeholder="Pesquisar compra, fornecedor, marca ou Casulo" onkeydown="if(event.key==='Enter') searchCards('${scope}')">
       <button class="primary" onclick="searchCards('${scope}')">Pesquisar</button>
@@ -280,8 +262,8 @@ async function renderCards(scope) {
     </table></div></div>`;
 }
 
-function processingQueueHtml(cards) {
-  const tab = currentView === "labeling" ? "labeling" : currentView === "storage" ? "storage" : "processing";
+function processingQueueHtml(cards, scope=currentView) {
+  const tab = ["receiving","quality","processing","labeling","storage"].includes(scope) ? scope : "processing";
   const brands = [...new Set(cards.map((c)=>c.brand).filter(Boolean))].sort();
   return `<div class="work-queue">
     <div class="queue-toolbar">
@@ -296,15 +278,31 @@ function processingQueueHtml(cards) {
       <thead><tr><th class="select-col"></th><th>Material / compra</th><th>Fornecedor</th><th>Marca</th><th>Tipo</th><th>Itens</th><th>Qtd.</th><th>Casulo</th><th>Status</th><th></th></tr></thead>
       <tbody id="productionQueueBody">${cards.map((card)=>productionQueueRow(card,tab)).join("") || '<tr><td colspan="10">Nenhum material disponível.</td></tr>'}</tbody>
     </table></div></div>
-    <div id="productionSelectionBar" class="selection-bar hidden"><div><span>Material selecionado</span><b id="productionSelectionLabel"></b></div><div class="actions"><button class="ghost" onclick="clearProductionSelection()">Cancelar</button><button class="primary" onclick="openSelectedProduction('${tab}')">Abrir material →</button></div></div>
+    <div id="productionSelectionBar" class="selection-bar hidden"><div><span>Material selecionado</span><b id="productionSelectionLabel"></b></div><div class="actions"><button class="ghost" onclick="clearProductionSelection()">Cancelar</button><button class="primary" onclick="openSelectedProduction('${tab}')">Abrir controle →</button></div></div>
   </div>`;
+}
+
+function productionActivity(card, tab="processing") {
+  const status=String(card.status||"");
+  if (tab==="receiving") {
+    if (card.receiving_activity==="PAUSADA") return "PAUSADO";
+    if (card.receiving_activity==="EM_ANDAMENTO") return "ATIVO";
+    return "AGUARDANDO";
+  }
+  if (tab==="quality") {
+    if (status==="INSPECAO_PAUSADA") return "PAUSADO";
+    if (["EM_INSPECAO","AGUARDANDO_CONCLUSAO_QUALIDADE"].includes(status)) return "ATIVO";
+    return "AGUARDANDO";
+  }
+  if (tab==="processing") return status==="EM_PROCESSAMENTO" ? "ATIVO" : status==="PROCESSAMENTO_PAUSADO" ? "PAUSADO" : "AGUARDANDO";
+  return "AGUARDANDO";
 }
 
 function productionQueueRow(card,tab="processing") {
   const searchable = [card.purchase_id,card.supplier,card.brand,card.casulo_current,card.original_type,card.material_search].join(" ").toLowerCase();
-  const activity = card.status === "EM_PROCESSAMENTO" ? "ATIVO" : card.status === "PROCESSAMENTO_PAUSADO" ? "PAUSADO" : "AGUARDANDO";
+  const activity = productionActivity(card,tab);
   return `<tr class="production-material-row" tabindex="0" data-id="${card.id}" data-label="${esc(card.purchase_id)} — ${esc(card.brand||card.supplier||'Sem marca')}" data-search="${esc(searchable)}" data-type="${esc(card.purchase_mode||'')}" data-status="${activity}" data-brand="${esc(card.brand||'')}" onclick="selectProductionMaterial(${card.id})" ondblclick="openCard(${card.id},'${tab}')" onkeydown="if(event.key==='Enter')openCard(${card.id},'${tab}')">
-    <td class="select-col"><span class="row-selector"></span></td><td><b>${esc(card.purchase_id)}</b><small>${esc(card.original_type||'')}</small></td><td>${esc(card.supplier||"—")}</td><td>${esc(card.brand||"—")}</td><td><span class="type-pill">${card.purchase_mode === "GRADE" ? "Grade" : "Saldo"}</span></td><td>${card.item_count}</td><td><b>${card.expected_total}</b></td><td>${esc(card.casulo_current||"—")}</td><td><span class="badge ${statusClass(card.status)}">${esc(card.status_label)}</span></td><td><button class="row-open" onclick="event.stopPropagation();openCard(${card.id},'processing')" aria-label="Abrir material">›</button></td></tr>`;
+    <td class="select-col"><span class="row-selector"></span></td><td><b>${esc(card.purchase_id)}</b><small>${esc(card.original_type||'')}</small></td><td>${esc(card.supplier||"—")}</td><td>${esc(card.brand||"—")}</td><td><span class="type-pill">${card.purchase_mode === "GRADE" ? "Grade" : "Saldo"}</span></td><td>${card.item_count}</td><td><b>${card.expected_total}</b></td><td>${esc(card.casulo_current||"—")}</td><td><span class="badge ${statusClass(card.status)}">${esc(card.status_label)}</span></td><td><button class="row-open" onclick="event.stopPropagation();openCard(${card.id},'${tab}')" aria-label="Abrir material">›</button></td></tr>`;
 }
 
 function filterProductionQueue() {
@@ -486,7 +484,7 @@ function canDistributeProcessing() {
 
 function renderReceivingTab() {
   activateTab("tabReceivingBtn");
-  if (String(cardData.status||"").startsWith("ORIGEM_") || (cardData.source_snapshot_at && !cardData.receiving)) {
+  if (cardData.source_snapshot_at && !cardData.receiving) {
     window.sourceAllowedStages=null;
     $("cardTab").innerHTML = sourceLocationHtml();
     return;
@@ -509,11 +507,12 @@ function renderReceivingTab() {
     window.setTimeout(refreshTimerDisplay, 500);
     return;
   }
-  if (cardData.status === "EM_COSTURA_CD01") {
+  if (cardData.status === "EM_COSTURA_CD01" || cardData.receiving?.receiving_type === "COSTURA") {
     $("cardTab").innerHTML = inCosturaHtml();
     return;
   }
-  $("cardTab").innerHTML = receivingFormHtml(false);
+  const isReturn = cardData.receiving?.receiving_type === "RETORNO" || cardData.receiving_type === "RETORNO";
+  $("cardTab").innerHTML = receivingFormHtml(isReturn);
   window.setTimeout(refreshTimerDisplay, 500);
 }
 
@@ -527,7 +526,7 @@ function sourceLocationHtml() {
     ${cardData.items.map((i)=>`<tr class="source-item-row" data-stage="${esc(i.source_stage)}" data-search="${esc([i.product,i.reference,i.sku,i.color,i.size,i.source_seamstress].join(' ').toLowerCase())}"><td><b>${esc(i.product||'—')}</b></td><td>${esc(i.reference||i.sku||'—')}</td><td>${esc(i.color||'—')}</td><td><b>${esc(i.size||'—')}</b></td><td>${i.expected_qty}</td><td><span class="type-pill">${esc(sourceStageLabel(i.source_stage))}</span><small>${esc(i.source_status_pcp||i.source_status_logistics||i.source_status_quality||'')}</small></td><td>${esc(i.source_seamstress||'—')}</td></tr>`).join("")}
     </tbody></table></div><div class="notice">Atualizado em ${fmtDateTime(cardData.source_snapshot_at)}. Uma nova importação atualiza a posição sem criar outro Card.</div></div>`;
 }
-function sourceStageLabel(s){return ({FORNECEDOR:"No fornecedor",TRANSITO:"Em trânsito",QUALIDADE:"Qualidade",QUALIDADE_RETRABALHO:"Retrabalho",QUALIDADE_REJEITADO:"Rejeitado",PCP_CONFIGURAR:"PCP — configurar",AGUARDANDO_COSTURA:"Vai para Costura",EM_COSTURA:"Na Costura",RETORNO_COSTURA:"Retornou da Costura",AGUARDANDO_PROCESSAMENTO:"Aguardando Processamento",PROCESSAMENTO:"Processamento",ESTOCAGEM:"Estocagem",CONCLUIDO:"Concluído"})[s]||s||"Não classificado";}
+function sourceStageLabel(s){return ({FORNECEDOR:"No fornecedor",TRANSITO:"Em trânsito",QUALIDADE:"Qualidade",QUALIDADE_RETRABALHO:"Retrabalho",QUALIDADE_REJEITADO:"Rejeitado",PCP_CONFIGURAR:"PCP — configurar",AGUARDANDO_COSTURA:"Vai para Costura",EM_COSTURA:"Na Costura",RETORNO_COSTURA:"Retornou da Costura",AGUARDANDO_PROCESSAMENTO:"Aguardando Processamento",PROCESSAMENTO:"Processamento",TRIAGEM:"Triagem",ETIQUETAGEM:"Etiquetagem",ESTOCAGEM:"Estocagem",CONCLUIDO:"Concluído"})[s]||s||"Não classificado";}
 function filterSourceItems(stage="__KEEP__"){
   if(stage!=="__KEEP__") window.sourceStageFilter=stage;
   const term=normalizeSearch($("sourceItemSearch")?.value||"");
@@ -551,6 +550,9 @@ function outsideReceivingHtml() {
 
 function inCosturaHtml() {
   const d = cardData.dispatch;
+  const r = cardData.receiving;
+  const operate = canOperateReceiving();
+  const productionDone = r?.ten_percent_status === "CONCLUIDA";
   return `<div class="panel-body">
     <div class="notice success-box"><b>Mercadoria em Costura — CD01</b><br>O Card permanece na aba Recebimento para acompanhamento até o retorno da mercadoria.</div>
     <div class="form-grid">
@@ -564,9 +566,30 @@ function inCosturaHtml() {
       <div class="field"><label>Previsão de retorno</label><input class="readonly" readonly value="${fmtDate(d?.return_forecast)}"></div>
       <div class="field full"><label>Observações do despacho</label><textarea class="readonly" readonly>${esc(d?.notes || "")}</textarea></div>
     </div>
-    <div class="notice warn">Aguardando o retorno da Costura. Quando a mercadoria retornar, o mesmo Card mudará para <b>Aguardando recebimento do retorno</b>.</div>
+    ${r ? costuraProductionHtml(r, productionDone, operate) : '<div class="notice warn">O controle de produção da Costura será criado automaticamente na próxima atualização do relatório.</div>'}
+    <div class="notice warn">Aguardando o retorno da Costura. Quando a mercadoria retornar, será aberto um novo controle de recebimento e uma nova tiragem de 10%, sem perder este acompanhamento.</div>
     ${currentUser.role === "admin" ? `<div class="actions"><button class="success" onclick="simulateReturn(${cardData.id})">Registrar retorno CD01 — teste</button></div>` : ""}
   </div>`;
+}
+
+function samplePlanTable(r, title) {
+  const rows = r.sample_plan || [];
+  if (!rows.length) return "";
+  return `<h3 class="section-heading">${esc(title)}</h3>
+    <div class="notice"><b>Distribuição automática por cor e tamanho.</b><br>O total de peças é dividido com a mesma regra da Qualidade. Para Grade, cada combinação recebe pelo menos uma peça e a soma fecha exatamente a meta prevista de 10%.</div>
+    <div class="table-wrap compact-picker"><table class="compact-table"><thead><tr><th>Produto</th><th>Referência</th><th>Cor</th><th>Tamanho</th><th>Qtd. total</th><th>Retirar nos 10%</th></tr></thead><tbody>
+      ${rows.map((item)=>`<tr><td><b>${esc(item.product||"—")}</b></td><td>${esc(item.reference||item.sku||"—")}</td><td>${esc(item.color||"Geral")}</td><td><span class="size-token">${esc(item.size||"Geral")}</span></td><td>${item.expected_qty}</td><td><b>${item.sample_qty}</b></td></tr>`).join("")}
+    </tbody><tfoot><tr><td colspan="5"><b>Total previsto da tiragem</b></td><td><b>${rows.reduce((sum,item)=>sum+Number(item.sample_qty||0),0)}</b></td></tr></tfoot></table></div>`;
+}
+
+function costuraProductionHtml(r, productionDone, operate) {
+  const timer = r.timer || {state:"NAO_INICIADA",business_seconds:0,paused_seconds:0,permanence_seconds:0};
+  return `<h3 class="section-heading">Controle de produção — Costura</h3>
+    <div class="timer-card">
+      <div class="form-grid"><div class="field"><label>Quantidade prevista na Costura</label><input class="readonly" readonly value="${(r.operation_items||[]).reduce((sum,item)=>sum+Number(item.expected_qty||0),0)||cardData.expected_total}"></div><div class="field"><label>Quantidade produzida</label><input id="sampleActual" type="number" min="0" ${operate&&!productionDone?"":"readonly"} value="${r.ten_percent_actual??""}"></div></div>
+      <div class="timer-grid" style="margin-top:11px"><div class="timer-value"><span>Status</span><strong>${esc(timer.state)}</strong></div><div class="timer-value"><span>Tempo útil</span><strong>${fmtSeconds(timer.business_seconds)}</strong></div><div class="timer-value"><span>Tempo parado</span><strong>${fmtSeconds(timer.paused_seconds)}</strong></div><div class="timer-value"><span>Permanência</span><strong>${fmtSeconds(timer.permanence_seconds)}</strong></div></div>
+      <div class="actions">${operate&&!productionDone&&timer.state==="NAO_INICIADA"?'<button class="primary" onclick="sampleAction(\'start\')">Iniciar produção</button>':""}${operate&&!productionDone&&timer.state==="EM_ANDAMENTO"?'<button class="warning" onclick="sampleAction(\'pause\')">Pausar</button><button class="success" onclick="sampleAction(\'finish\')">Concluir produção</button>':""}${operate&&!productionDone&&timer.state==="PAUSADA"?'<button class="primary" onclick="sampleAction(\'resume\')">Retomar</button><button class="success" onclick="sampleAction(\'finish\')">Concluir produção</button>':""}${productionDone?'<span class="badge green">Produção concluída</span>':'<span class="badge orange">Produção em acompanhamento</span>'}</div>
+    </div>${samplePlanTable(r,"Previsão da tiragem de 10% no retorno")}`;
 }
 
 function receivingFormHtml(isReturn) {
@@ -577,9 +600,11 @@ function receivingFormHtml(isReturn) {
   const sampleDone = r.ten_percent_status === "CONCLUIDA";
   const readOnly = operate && !physicalDone ? "" : "readonly";
   const disabled = operate && !physicalDone ? "" : "disabled";
+  const operationItems = r.operation_items || [];
   return `
     <div class="panel-body">
-      <div class="notice ${isReturn ? "success-box" : ""}"><b>${isReturn ? "Recebimento do retorno CD01" : "Recebimento de mercadoria nova"}</b><br>${isReturn ? "Registre o retorno e separe uma nova amostra de 10%. O Card só segue para a Inspeção 2 quando as duas partes terminarem." : "O recebimento físico e a separação dos 10% com triagem inicial podem ser concluídos em qualquer ordem. O Card só segue para a Qualidade quando ambos terminarem."}</div>
+      <div class="notice ${isReturn ? "success-box" : ""}"><b>${isReturn ? "Recebimento do retorno CD01" : "Recebimento de mercadoria em trânsito"}</b><br>${isReturn ? "Registre o retorno e separe uma nova amostra de 10%. O Card só segue para a Inspeção 2 quando as duas partes terminarem." : "O recebimento físico e a separação dos 10% com triagem inicial podem ser concluídos em qualquer ordem. O Card só segue para a Qualidade quando ambos terminarem."}</div>
+      ${operationItems.length ? `<div class="notice"><b>${operationItems.length} item(ns) fazem parte deste controle</b><br>Somente estes itens serão movimentados. Os demais itens da compra permanecerão em suas etapas atuais.</div>` : ""}
       <h3 class="section-heading">Recebimento físico</h3>
       <div class="form-grid">
         <div class="field"><label>Volumes</label><input id="recVolumes" type="number" min="0" ${readOnly} value="${r.volumes ?? ""}"></div>
@@ -593,17 +618,19 @@ function receivingFormHtml(isReturn) {
         ${physicalDone ? '<span class="badge green">Recebimento físico concluído</span>' : '<span class="badge gray">Recebimento físico pendente</span>'}
       </div>
       <div class="photos">${receivingPhotos.map((p,i)=>`<a class="photo-link" target="_blank" href="${p}">Arquivo ${i+1}</a>`).join("")}</div>
+      ${samplePlanTable(r,isReturn?"Plano exato da nova tiragem de 10%":"Plano exato da tiragem de 10%")}
       ${sampleHtml(r, sampleDone, operate, isReturn)}
     </div>`;
 }
 
 function sampleHtml(r, sampleDone, operate, isReturn=false) {
   const timer = r.timer || { state:"NAO_INICIADA",business_seconds:0,paused_seconds:0,permanence_seconds:0 };
+  const operationTotal = (r.operation_items||[]).reduce((sum,item)=>sum+Number(item.expected_qty||0),0);
   return `
     <h3 class="section-heading">${isReturn ? "Nova tiragem de 10% do retorno" : "Tiragem de 10% + triagem inicial"}</h3>
     <div class="timer-card">
       <div class="form-grid">
-        <div class="field"><label>Quantidade esperada da compra</label><input class="readonly" readonly value="${cardData.expected_total}"></div>
+        <div class="field"><label>${isReturn && operationTotal ? "Quantidade prevista do retorno" : "Quantidade esperada da compra"}</label><input class="readonly" readonly value="${isReturn && operationTotal ? operationTotal : cardData.expected_total}"></div>
         <div class="field"><label>Quantidade mínima (10%)</label><input class="readonly" readonly value="${r.ten_percent_min}"></div>
         <div class="field"><label>Quantidade efetivamente separada</label><input id="sampleActual" type="number" min="0" ${operate && !sampleDone ? "" : "readonly"} value="${r.ten_percent_actual ?? ""}"></div>
       </div>
@@ -689,7 +716,7 @@ async function sampleAction(action) {
       })});
     }
     await api(`/api/receivings/${cardData.receiving.id}/timer/${action}`, { method:"POST", body:JSON.stringify({ user_id:currentUser.id }) });
-    toast("Atividade dos 10% atualizada.");
+    toast(cardData.receiving?.receiving_type === "COSTURA" ? "Controle de produção da Costura atualizado." : "Atividade dos 10% atualizada.");
     await openCard(currentCardId);
   } catch (error) { toast(error.message); }
 }
@@ -779,10 +806,19 @@ async function renderQualityTab() {
     return;
   }
   const q = cardData.quality;
-  if (cardData.source_snapshot_at && !q && cardData.current_sector !== "QUALIDADE") {
+  const importedQualityItems = (cardData.items||[]).filter((item)=>["QUALIDADE","QUALIDADE_RETRABALHO","QUALIDADE_REJEITADO"].includes(item.source_stage));
+  if (cardData.source_snapshot_at && (!q || q.status === "CONCLUIDA") && cardData.current_sector !== "QUALIDADE") {
+    if (importedQualityItems.length && canOperateQuality()) {
+      window.qualitySourceSubset = true;
+      $("cardTab").innerHTML = qualitySetupHtml(null, true);
+      toggleQualitySetupFields();
+      return;
+    }
     renderImportedSectorSnapshot("tabQualityBtn",["QUALIDADE","QUALIDADE_RETRABALHO","QUALIDADE_REJEITADO"],"Itens localizados na Qualidade");
+    if (importedQualityItems.length) $("cardTab").insertAdjacentHTML("afterbegin",'<div class="notice warn">Entre com um perfil da Qualidade, Supervisor ou Administrador para assumir estes itens e iniciar a inspeção.</div>');
     return;
   }
+  window.qualitySourceSubset = false;
   const needsNewInspection = cardData.current_sector === "QUALIDADE" && (!q || q.status === "CONCLUIDA");
   if (needsNewInspection) {
     if (!canOperateQuality()) {
@@ -800,10 +836,11 @@ async function renderQualityTab() {
   $("cardTab").innerHTML = qualityInspectionHtml(q);
 }
 
-function qualitySetupHtml(previousInspection=null) {
+function qualitySetupHtml(previousInspection=null, sourceSubset=false) {
   const defaultType = cardData.receiving_type === "RETORNO" ? 2 : 1;
   const defaultMode = cardData.purchase_mode || previousInspection?.purchase_mode || "";
   return `<div class="panel-body">
+    ${sourceSubset ? `<div class="notice success-box"><b>Controle dos itens importados na Qualidade</b><br>Somente os ${((cardData.items||[]).filter((item)=>["QUALIDADE","QUALIDADE_RETRABALHO","QUALIDADE_REJEITADO"].includes(item.source_stage))).length} item(ns) posicionados neste setor entrarão na inspeção. Os demais itens da compra não serão alterados.</div>` : ""}
     ${previousInspection ? `<div class="notice success-box">A Inspeção ${previousInspection.inspection_type} anterior foi concluída em ${fmtDateTime(previousInspection.completed_at)}. O Card retornou à Qualidade para uma nova rodada.</div>` : ""}
     <div class="notice"><b>Configuração da inspeção</b><br>O tipo da compra vem automaticamente da coluna <b>Tipo</b> do Excel: Private Label = Grade e Saldo = Saldo.</div>
     ${cardData.receiving_type === "RETORNO"
@@ -842,6 +879,7 @@ async function createQualityInspection() {
         destination: $("qualityDestination")?.value || null,
         development_required: requiredValue === "" ? null : requiredValue === "1",
         development_separated: requiredValue !== "1" ? null : (separatedValue === "" ? null : separatedValue === "1"),
+        source_subset: Boolean(window.qualitySourceSubset),
       }),
     });
     toast("Inspeção criada.");
@@ -1237,8 +1275,17 @@ async function renderProcessingTab() {
     return;
   }
   const p = cardData.processing;
+  const importedProcessingItems = (cardData.items||[]).filter((item)=>["AGUARDANDO_PROCESSAMENTO","PROCESSAMENTO"].includes(item.source_stage));
   if (cardData.source_snapshot_at && !p && cardData.current_sector !== "PROCESSAMENTO") {
-    renderImportedSectorSnapshot("tabProcessingBtn",["AGUARDANDO_PROCESSAMENTO","PROCESSAMENTO"],"Itens localizados no Processamento");
+    if (importedProcessingItems.length && canOperateProcessing()) {
+      $("cardTab").innerHTML = processingSetupHtml(importedProcessingItems);
+      toggleProcessingLabelField();
+    } else {
+      renderImportedSectorSnapshot("tabProcessingBtn",["AGUARDANDO_PROCESSAMENTO","PROCESSAMENTO"],"Itens localizados no Processamento");
+      if (importedProcessingItems.length) {
+        $("cardTab").insertAdjacentHTML("afterbegin",'<div class="notice warn"><b>Para produzir:</b> saia deste perfil e entre como operador do Processamento, Supervisor ou Administrador.</div>');
+      }
+    }
     return;
   }
   if (cardData.current_sector === "PROCESSAMENTO" && !p) {
@@ -1258,10 +1305,19 @@ async function renderProcessingTab() {
   toggleProcessingLabelField();
 }
 
-function processingSetupHtml() {
+function processingSetupHtml(importedItems=[]) {
   const modeLabel = cardData.purchase_mode === "GRADE" ? "Grade — importado como Private Label" : cardData.purchase_mode === "SALDO" ? "Saldo" : "Tipo não reconhecido";
+  const imported = importedItems.length > 0;
+  const importedQty = importedItems.reduce((sum,item)=>sum+Number(item.expected_qty||0),0);
+  const importedPicker = !imported ? "" : cardData.purchase_mode === "GRADE" ? `
+    <div class="notice success-box"><b>Selecione os tamanhos que entrarão nesta produção.</b><br>Somente os itens posicionados em Aguardando Processamento serão movimentados. Os demais permanecem nos setores atuais.</div>
+    <div class="table-wrap compact-picker"><table class="compact-table"><thead><tr><th class="check-col"><input id="processingImportedAll" type="checkbox" checked onchange="toggleImportedProcessingItems(this.checked)"></th><th>Produto</th><th>Cor</th><th>Tamanho</th><th>Quantidade</th></tr></thead><tbody>
+      ${importedItems.map((item)=>`<tr><td><input class="processing-import-item" type="checkbox" value="${item.id}" checked onchange="updateImportedProcessingSummary()"></td><td><b>${esc(item.product||'—')}</b><small>${esc(item.reference||item.sku||'')}</small></td><td>${esc(item.color||'—')}</td><td><span class="size-token">${esc(item.size||'—')}</span></td><td><b>${item.expected_qty}</b></td></tr>`).join("")}
+    </tbody></table></div><div id="processingImportedSummary" class="queue-counter"><b>${importedItems.length}</b> tamanho(s) • <b>${importedQty}</b> peça(s) selecionada(s)</div>` : `
+    <div class="notice success-box"><b>Saldo disponível para produção</b><br>${importedItems.length} linha(s), total de ${importedQty} peça(s). O apontamento continuará por quantidade geral.</div>`;
   return `<div class="panel-body">
-    <div class="notice"><b>Configuração inicial do Processamento</b><br>O tipo da compra vem automaticamente do Excel e não pode ser alterado neste setor.</div>
+    <div class="notice"><b>Configuração inicial do Processamento</b><br>O tipo da compra vem automaticamente do Excel e não pode ser alterado neste setor.${imported ? " O Card-mãe continuará no Recebimento porque esta compra possui itens em etapas diferentes." : ""}</div>
+    ${importedPicker}
     <div class="form-grid">
       <div class="field"><label>Tipo da compra</label><input class="readonly" readonly value="${esc(modeLabel)}"></div>
       <div class="field"><label>Marca</label><input id="processingBrand" value="${esc(cardData.brand||"")}" placeholder="Informe a marca"></div>
@@ -1285,6 +1341,9 @@ async function createProcessing() {
   try {
     const triage = $("processingNeedsTriage").value;
     const labeling = $("processingNeedsLabeling").value;
+    const importedChecks = [...document.querySelectorAll(".processing-import-item")];
+    const itemIds = importedChecks.filter((input)=>input.checked).map((input)=>Number(input.value));
+    if (importedChecks.length && !itemIds.length) throw new Error("Selecione pelo menos um tamanho para produzir.");
     await api(`/api/cards/${currentCardId}/processing`, {
       method: "POST",
       body: JSON.stringify({
@@ -1296,12 +1355,16 @@ async function createProcessing() {
         label_type: $("processingLabelType")?.value || null,
         quantity_deferred_to_storage: Boolean($("processingDeferQty")?.checked),
         notes: $("processingNotes").value,
+        item_ids: itemIds,
       }),
     });
     toast("Processamento configurado.");
     await openCard(currentCardId, "processing");
   } catch (error) { toast(error.message); }
 }
+
+function toggleImportedProcessingItems(checked){document.querySelectorAll(".processing-import-item").forEach((input)=>input.checked=checked);updateImportedProcessingSummary();}
+function updateImportedProcessingSummary(){const selected=[...document.querySelectorAll(".processing-import-item:checked")];const ids=new Set(selected.map((input)=>Number(input.value)));const items=(cardData.items||[]).filter((item)=>ids.has(item.id));const qty=items.reduce((sum,item)=>sum+Number(item.expected_qty||0),0);if($("processingImportedSummary"))$("processingImportedSummary").innerHTML=`<b>${items.length}</b> tamanho(s) • <b>${qty}</b> peça(s) selecionada(s)`;if($("processingImportedAll"))$("processingImportedAll").checked=selected.length===document.querySelectorAll(".processing-import-item").length;}
 
 function processingDetailHtml(p) {
   const isOpen = p.status === "ABERTO";
@@ -1482,12 +1545,11 @@ async function renderDownstreamTab(sector) {
   activateTab(tabId);
   try { if(!downstreamUsers[sector].length) downstreamUsers[sector]=await api(`/api/downstream/users?sector=${sector}`); } catch(e){$("cardTab").innerHTML=`<div class="notice error">${esc(e.message)}</div>`;return;}
   let op=cardData[key];
-  if(sector==="ESTOCAGEM"&&cardData.source_snapshot_at&&!op?.id&&cardData.current_sector!=="ESTOCAGEM"){
-    renderImportedSectorSnapshot(tabId,["ESTOCAGEM"],"Itens localizados na Estocagem"); return;
-  }
   const allowed=[sector.toLowerCase(),"supervisor","admin"].includes(currentUser.role);
+  const importedItems=(cardData.items||[]).filter((item)=>item.source_stage===sector);
   if(!op?.id){
-    $("cardTab").innerHTML=`<div class="panel-body"><div class="notice"><b>${sector==="ETIQUETAGEM"?"Etiquetagem":"Estocagem"}</b><br>${cardData.purchase_mode==="GRADE"?"Cada colaborador assume um tamanho completo por vez.":"Saldo é dividido por quantidade geral, sem separar tamanhos."}</div>${allowed?`<div class="actions"><button class="primary" onclick="startDownstream('${sector}')">Iniciar controle</button></div>`:'<div class="notice warn">Aguardando um operador do setor.</div>'}</div>`; return;
+    if(cardData.source_snapshot_at&&cardData.current_sector!==sector&&!importedItems.length){renderImportedSectorSnapshot(tabId,[sector],`Itens localizados em ${sector==="ETIQUETAGEM"?"Etiquetagem":"Estocagem"}`);return;}
+    $("cardTab").innerHTML=`<div class="panel-body"><div class="notice"><b>${sector==="ETIQUETAGEM"?"Etiquetagem":"Estocagem"}</b><br>${cardData.purchase_mode==="GRADE"?"Cada colaborador assume um tamanho completo por vez.":"Saldo é dividido por quantidade geral, sem separar tamanhos."}${importedItems.length?`<br><b>${importedItems.length}</b> item(ns) disponível(is) nesta etapa; os demais itens da compra não serão alterados.`:""}</div>${allowed?`<div class="actions"><button class="primary" onclick="startDownstream('${sector}')">Iniciar controle</button></div>`:'<div class="notice warn">Entre com um perfil deste setor, Supervisor ou Administrador para iniciar.</div>'}</div>`; return;
   }
   const grade=op.purchase_mode==="GRADE", open=op.status==="ABERTO";
   $("cardTab").innerHTML=`<div class="panel-body downstream-panel">
@@ -1562,103 +1624,43 @@ async function renderWarehouse() {
       <div class="panel-body compact-filter"><div class="queue-search"><span>⌕</span><input id="warehouseSearch" placeholder="Endereço, categoria ou estrutura" oninput="filterWarehouseRows()"></div><select id="warehouseZone" onchange="filterWarehouseRows()"><option value="">Todas as zonas</option>${data.zones.map(z=>`<option>${esc(z.code)}</option>`).join("")}</select></div>
       <div id="storeForm" class="panel-body hidden"></div>
       <div class="table-wrap warehouse-table"><table class="compact-table"><thead><tr><th>Endereço</th><th>Zona</th><th>Estrutura</th><th>Categoria</th><th>Ocupação</th><th>Disponível</th><th>Status</th></tr></thead><tbody id="warehouseTableBody"></tbody></table></div>
-      <div id="warehousePager" class="panel-body"></div>
+      <div id="warehousePager" class="panel-body warehouse-pager"></div>
     </div>`;
   renderWarehouseRows();
 }
 
-function warehouseRowHtml(l){return `<tr class="warehouse-row" data-zone="${esc(l.zone_code)}"><td><b>${esc(l.address)}</b></td><td>${esc(l.zone_code)}</td><td>${esc(l.structure_type||"—")}</td><td>${esc(l.category||"Livre")}</td><td><div class="inline-capacity"><i style="width:${Math.min(100,l.occupancy)}%"></i></div><small>${l.occupied_qty}/${l.capacity} • ${l.occupancy}%</small></td><td><b>${Math.max(0,l.capacity-l.occupied_qty)}</b></td><td>${statusBadge(l.status)}</td></tr>`;}
+function warehouseRowHtml(location){return `<tr class="warehouse-row"><td><b>${esc(location.address)}</b></td><td>${esc(location.zone_code)}</td><td>${esc(location.structure_type||"—")}</td><td>${esc(location.category||"Livre")}</td><td><div class="inline-capacity"><i style="width:${Math.min(100,location.occupancy)}%"></i></div><small>${location.occupied_qty}/${location.capacity} • ${location.occupancy}%</small></td><td><b>${Math.max(0,location.capacity-location.occupied_qty)}</b></td><td>${statusBadge(location.status)}</td></tr>`;}
 
-// Mostra os casulos em lotes (WAREHOUSE_PAGE_SIZE por vez) em vez de montar
-// a tabela inteira de uma só vez — com a estrutura física real (quase
-// 19.600 casulos), renderizar tudo junto travava o navegador. A lista
-// completa continua em memória (unifiedCache.warehouse), só a exibição é
-// que fica em lotes.
 function renderWarehouseRows(){
-  const data=unifiedCache.warehouse; if(!data) return;
-  const term=normalizeSearch($("warehouseSearch")?.value||"");
-  const zone=$("warehouseZone")?.value||"";
-  const filtrados=data.locations.filter(l=>{
-    const bateZona = !zone || l.zone_code===zone;
-    const bateBusca = !term || normalizeSearch([l.address,l.category,l.structure_type].join(' ')).includes(term);
-    return bateZona && bateBusca;
-  });
-  const visiveis=filtrados.slice(0,warehouseVisibleCount);
-  $("warehouseTableBody").innerHTML = visiveis.length ? visiveis.map(warehouseRowHtml).join("") : `<tr><td colspan="7" class="empty-cell">Nenhum casulo encontrado.</td></tr>`;
-  const restantes=filtrados.length-visiveis.length;
-  $("warehousePager").innerHTML = `<span class="muted">Mostrando ${visiveis.length.toLocaleString('pt-BR')} de ${filtrados.length.toLocaleString('pt-BR')} casulos</span>` +
-    (restantes>0 ? ` <button class="secondary small-btn" onclick="loadMoreWarehouseRows()">Carregar mais ${Math.min(restantes,WAREHOUSE_PAGE_SIZE).toLocaleString('pt-BR')}</button>` : "");
+  const data=unifiedCache.warehouse;if(!data)return;
+  const term=normalizeSearch($("warehouseSearch")?.value||""),zone=$("warehouseZone")?.value||"";
+  const filtered=data.locations.filter(location=>(!zone||location.zone_code===zone)&&(!term||normalizeSearch([location.address,location.category,location.structure_type].join(" ")).includes(term)));
+  const visible=filtered.slice(0,warehouseVisibleCount),remaining=filtered.length-visible.length;
+  $("warehouseTableBody").innerHTML=visible.length?visible.map(warehouseRowHtml).join(""):'<tr><td colspan="7" class="empty-cell">Nenhum casulo encontrado.</td></tr>';
+  $("warehousePager").innerHTML=`<span>Mostrando ${visible.length.toLocaleString("pt-BR")} de ${filtered.length.toLocaleString("pt-BR")} casulos</span>${remaining>0?`<button class="secondary small-btn" onclick="loadMoreWarehouseRows()">Carregar mais ${Math.min(remaining,WAREHOUSE_PAGE_SIZE).toLocaleString("pt-BR")}</button>`:""}`;
 }
+function loadMoreWarehouseRows(){warehouseVisibleCount+=WAREHOUSE_PAGE_SIZE;renderWarehouseRows();}
+function filterWarehouseRows(){warehouseVisibleCount=WAREHOUSE_PAGE_SIZE;renderWarehouseRows();}
 
-function loadMoreWarehouseRows(){warehouseVisibleCount += WAREHOUSE_PAGE_SIZE; renderWarehouseRows();}
-
-function filterWarehouseRows(){warehouseVisibleCount = WAREHOUSE_PAGE_SIZE; renderWarehouseRows();}
-
-// Mapa de calor por Rua/coluna — visual parecido com o Visualizador de
-// Casulos do OutLog-Distribox. Usa só o que já está no banco (estrutura
-// física real, já portada); não depende da API ID Brasil pra funcionar —
-// quando a integração ao vivo for ligada, os dados aqui refletem
-// automaticamente, sem precisar mexer nessa tela.
-function corPorOcupacaoHeatmap(pct) {
-  if (pct >= 90) return "#d92d20";
-  if (pct >= 60) return "#e98b08";
-  if (pct >= 25) return "#f5c400";
-  if (pct > 0) return "#16803c";
+function heatmapColor(percentage){
+  if(percentage>=90)return "#d92d20";
+  if(percentage>=60)return "#e98b08";
+  if(percentage>=25)return "#f5c400";
+  if(percentage>0)return "#16803c";
   return "#2a3646";
 }
 
-async function renderWarehouseHeatmap() {
-  setPage("Mapa de Calor", "Ocupação por Rua e coluna — a cor indica o quanto está ocupado");
-  const data = await api("/api/unified/warehouse/heatmap");
-  const blocoLado = (colunas, titulo) => {
-    if (!colunas.length) {
-      return `<div class="heatmap-lado"><div class="heatmap-lado-titulo">${titulo}</div><p class="empty-visual">Sem posições neste lado.</p></div>`;
-    }
-    return `<div class="heatmap-lado">
-      <div class="heatmap-lado-titulo">${titulo}</div>
-      <div class="heatmap-grid">
-        ${colunas.map((c) => `<div class="heatmap-box" style="background:${corPorOcupacaoHeatmap(c.ocupacao_pct)}" title="Coluna ${c.coluna} — ${c.ocupado}/${c.capacidade} peças (${c.ocupacao_pct}%), ${c.niveis} nível(is)">${c.coluna}</div>`).join("")}
-      </div>
-    </div>`;
-  };
-  // Mesma convenção física do OutLog-Distribox: coluna ímpar no lado
-  // esquerdo, par no lado direito. O trecho sequencial (hoje só a Rua 02,
-  // colunas 103-139) vem separado num terceiro bloco, de largura total,
-  // igual o original — não é nem ímpar nem par de verdade fisicamente.
-  const secoes = (data.ruas || []).map((r) => {
-    const impares = r.colunas.filter((c) => c.secao === "impar").sort((a, b) => a.coluna - b.coluna);
-    const pares = r.colunas.filter((c) => c.secao === "par").sort((a, b) => a.coluna - b.coluna);
-    const sequenciais = r.colunas.filter((c) => c.secao === "sequencial").sort((a, b) => a.coluna - b.coluna);
-    const blocoSeq = sequenciais.length ? `
-      <div class="heatmap-seq-divider"></div>
-      <div class="heatmap-lado heatmap-lado-seq">
-        <div class="heatmap-lado-titulo">Trecho Sequencial <small>(colunas ${sequenciais[0].coluna} a ${sequenciais[sequenciais.length - 1].coluna})</small></div>
-        <div class="heatmap-grid">
-          ${sequenciais.map((c) => `<div class="heatmap-box" style="background:${corPorOcupacaoHeatmap(c.ocupacao_pct)}" title="Coluna ${c.coluna} — ${c.ocupado}/${c.capacidade} peças (${c.ocupacao_pct}%), ${c.niveis} nível(is)">${c.coluna}</div>`).join("")}
-        </div>
-      </div>` : "";
-    return `<div class="panel heatmap-rua">
-      <div class="panel-header">${esc(r.rua)} <small>${r.colunas.length} coluna(s)</small></div>
-      <div class="panel-body">
-        <div class="heatmap-lados">
-          ${blocoLado(impares, "◀ Lado Ímpar")}
-          ${blocoLado(pares, "Lado Par ▶")}
-        </div>
-        ${blocoSeq}
-      </div>
-    </div>`;
+async function renderWarehouseHeatmap(){
+  setPage("Mapa de Calor","Ocupação por Rua e coluna");
+  const data=await api("/api/unified/warehouse/heatmap");
+  const sideBlock=(columns,title)=>`<div class="heatmap-side"><div class="heatmap-side-title">${title}</div><div class="heatmap-grid">${columns.map(column=>`<div class="heatmap-box" style="background:${heatmapColor(column.ocupacao_pct)}" title="Coluna ${column.coluna} — ${column.ocupado}/${column.capacidade} peças (${column.ocupacao_pct}%)">${column.coluna}</div>`).join("")||'<span class="empty-visual">Sem posições</span>'}</div></div>`;
+  const streets=(data.ruas||[]).map(street=>{
+    const odd=street.colunas.filter(column=>column.secao==="impar").sort((a,b)=>a.coluna-b.coluna);
+    const even=street.colunas.filter(column=>column.secao==="par").sort((a,b)=>a.coluna-b.coluna);
+    const sequential=street.colunas.filter(column=>column.secao==="sequencial").sort((a,b)=>a.coluna-b.coluna);
+    return `<section class="panel heatmap-street"><div class="panel-header">${esc(street.rua)} <small>${street.colunas.length} colunas</small></div><div class="panel-body"><div class="heatmap-sides">${sideBlock(odd,"◀ Lado ímpar")}${sideBlock(even,"Lado par ▶")}</div>${sequential.length?`<div class="heatmap-sequential"><div class="heatmap-side-title">Trecho sequencial</div><div class="heatmap-grid">${sequential.map(column=>`<div class="heatmap-box" style="background:${heatmapColor(column.ocupacao_pct)}" title="Coluna ${column.coluna} — ${column.ocupado}/${column.capacidade} peças (${column.ocupacao_pct}%)">${column.coluna}</div>`).join("")}</div></div>`:""}</div></section>`;
   }).join("");
-  $("mainContent").innerHTML = `
-    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse-heatmap")}
-    <div class="heatmap-legend">
-      <span><i style="background:#2a3646"></i> Vazio</span>
-      <span><i style="background:#16803c"></i> Baixa</span>
-      <span><i style="background:#f5c400"></i> Média</span>
-      <span><i style="background:#e98b08"></i> Média-alta</span>
-      <span><i style="background:#d92d20"></i> Quase cheio</span>
-    </div>
-    ${secoes || '<div class="empty-visual">Nenhum casulo cadastrado ainda.</div>'}
-  `;
+  $("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse-heatmap")}<div class="heatmap-legend"><span><i style="background:#2a3646"></i>Vazio</span><span><i style="background:#16803c"></i>Baixa</span><span><i style="background:#f5c400"></i>Média</span><span><i style="background:#e98b08"></i>Alta</span><span><i style="background:#d92d20"></i>Quase cheio</span></div>${streets||'<div class="empty-visual">Nenhum casulo cadastrado.</div>'}`;
 }
 
 function showStoreForm(){const data=unifiedCache.warehouse;const free=data.locations.filter(l=>l.status!=="BLOQUEADO"&&l.occupied_qty<l.capacity);$("storeForm").classList.remove("hidden");$("storeForm").innerHTML=`<div class="inline-form"><div class="field"><label>Endereço</label><select id="storeLocation"><option value="">Selecione</option>${free.map(l=>`<option value="${l.id}">${esc(l.address)} • livre ${l.capacity-l.occupied_qty}</option>`).join("")}</select></div><div class="field"><label>ID do Card</label><input id="storeCard" type="number" placeholder="Opcional"></div><div class="field"><label>Quantidade</label><input id="storeQty" type="number" min="1"></div><div class="field"><label>Marca / categoria</label><input id="storeBrand" placeholder="Marca ou grupo"></div><button class="success" onclick="storeMaterial()">Confirmar guarda</button></div>`;}
@@ -1676,11 +1678,44 @@ function showTaskForm(){$("taskForm").classList.remove("hidden");$("taskForm").i
 async function createTask(){try{await api("/api/unified/tasks",{method:"POST",body:JSON.stringify({user_id:currentUser.id,title:$("taskTitle").value,sector:$("taskSector").value,priority:$("taskPriority").value,description:$("taskDescription").value})});toast("Tarefa criada.");renderTasks();}catch(e){toast(e.message)}}
 async function advanceTask(id,status){try{await api(`/api/unified/tasks/${id}`,{method:"PATCH",body:JSON.stringify({user_id:currentUser.id,status})});renderTasks();}catch(e){toast(e.message)}}
 
-async function renderShipping(){setPage("Expedição","Romaneios e saída de mercadorias");const rows=await api("/api/unified/shipments");unifiedCache.shipments=rows;$("mainContent").innerHTML=`<div class="panel"><div class="panel-header"><span>Romaneios</span><div><button class="ghost small-btn" onclick="document.getElementById('shipmentPdf').click()">Importar PDF</button> <button class="primary small-btn" onclick="showShipmentForm()">+ Novo romaneio</button><input id="shipmentPdf" class="hidden" type="file" accept=".pdf" onchange="importShipmentPdf(this)"></div></div><div id="shipmentForm" class="panel-body hidden"></div><div class="table-wrap"><table><thead><tr><th>Documento</th><th>Destino</th><th>Quantidade</th><th>Criado em</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(s=>`<tr><td><b>${esc(s.document_no)}</b></td><td>${esc(s.destination||'—')}</td><td>${s.total_qty}</td><td>${fmtDateTime(s.created_at)}</td><td>${statusBadge(s.status)}</td><td>${s.status!=="EXPEDIDO"?`<button class="success small-btn" onclick="finishShipment(${s.id})">Confirmar saída</button>`:''}</td></tr>`).join("")||'<tr><td colspan="6">Nenhum romaneio.</td></tr>'}</tbody></table></div></div>`;}
-function showShipmentForm(){$("shipmentForm").classList.remove("hidden");$("shipmentForm").innerHTML=`<div class="inline-form"><div class="field"><label>Número do romaneio</label><input id="shipDoc"></div><div class="field"><label>Destino</label><input id="shipDest"></div><div class="field"><label>Quantidade total</label><input id="shipQty" type="number" min="1"></div><button class="primary" onclick="createShipment()">Criar romaneio</button></div>`;}
-async function createShipment(){try{await api("/api/unified/shipments",{method:"POST",body:JSON.stringify({user_id:currentUser.id,document_no:$("shipDoc").value,destination:$("shipDest").value,items:[{quantity:Number($("shipQty").value||0),description:"Lote do romaneio"}]})});toast("Romaneio criado.");renderShipping();}catch(e){toast(e.message)}}
+async function renderShipping(){
+  setPage("Expedição","Preenchimento, conferência e liberação da saída");
+  const rows=await api("/api/unified/shipments");unifiedCache.shipments=rows;
+  const allowed=["expedicao","estocagem","supervisor","admin"].includes(currentUser.role);
+  const preparing=rows.filter(s=>s.status!=="EXPEDIDO"&&s.status!=="PRONTO").length;
+  const ready=rows.filter(s=>s.status==="PRONTO").length;
+  const shipped=rows.filter(s=>s.status==="EXPEDIDO").length;
+  const checked=rows.reduce((a,s)=>a+Number(s.checked_qty||0),0),total=rows.reduce((a,s)=>a+Number(s.total_qty||0),0);
+  $("mainContent").innerHTML=`
+    <div class="kpi-grid compact-kpis shipping-kpis">
+      <div class="kpi"><div class="kpi-label">Em preenchimento</div><div class="kpi-value">${preparing}</div><div class="kpi-hint">Romaneios</div></div>
+      <div class="kpi"><div class="kpi-label">Prontos para saída</div><div class="kpi-value">${ready}</div><div class="kpi-hint">Conferidos</div></div>
+      <div class="kpi"><div class="kpi-label">Expedidos</div><div class="kpi-value">${shipped}</div><div class="kpi-hint">Concluídos</div></div>
+      <div class="kpi"><div class="kpi-label">Conferência geral</div><div class="kpi-value">${total?Math.round(checked*100/total):0}%</div><div class="kpi-hint">${checked.toLocaleString('pt-BR')} de ${total.toLocaleString('pt-BR')} peças</div></div>
+    </div>
+    <div class="panel shipping-panel">
+      <div class="panel-header"><span>Controle de romaneios</span><div>${allowed?`<button class="ghost small-btn" onclick="document.getElementById('shipmentPdf').click()">Importar PDF</button> <button class="primary small-btn" onclick="showShipmentForm()">+ Novo romaneio</button><input id="shipmentPdf" class="hidden" type="file" accept=".pdf" onchange="importShipmentPdf(this)">`:''}</div></div>
+      <div class="panel-body shipping-toolbar"><div class="queue-search"><span>⌕</span><input id="shipmentSearch" placeholder="Romaneio, destino, transportadora, placa ou motorista" oninput="filterShipmentRows()"></div><select id="shipmentStatus" onchange="filterShipmentRows()"><option value="">Todos os status</option><option>RASCUNHO</option><option>PREPARANDO</option><option>EM_CONFERENCIA</option><option>PRONTO</option><option>EXPEDIDO</option></select></div>
+      <div id="shipmentForm" class="panel-body hidden"></div>
+      <div class="table-wrap"><table class="compact-table"><thead><tr><th>Documento</th><th>Destino / transporte</th><th>Conferência</th><th>Volumes</th><th>Saída prevista</th><th>Status</th><th></th></tr></thead><tbody>
+        ${rows.map(s=>{const pct=s.total_qty?Math.min(100,Math.round(Number(s.checked_qty||0)*100/s.total_qty)):0;return `<tr class="shipment-row" data-status="${esc(s.status)}" data-search="${esc(normalizeSearch([s.document_no,s.destination,s.carrier,s.vehicle_plate,s.driver_name].join(' ')))}"><td><button class="link-button" onclick="openShipment(${s.id})"><b>${esc(s.document_no)}</b></button><small>${s.item_count||0} item(ns)</small></td><td><b>${esc(s.destination||'Pendente')}</b><small>${esc(s.carrier||'Transportadora não informada')} ${s.vehicle_plate?`• ${esc(s.vehicle_plate)}`:''}</small></td><td><div class="shipping-progress"><i style="width:${pct}%"></i></div><small>${Number(s.checked_qty||0).toLocaleString('pt-BR')} / ${Number(s.total_qty||0).toLocaleString('pt-BR')} peças • ${pct}%</small></td><td>${Number(s.volume_count||0)||'—'}</td><td>${s.scheduled_at?fmtDateTime(s.scheduled_at):'—'}</td><td>${statusBadge(s.status)}</td><td><button class="secondary small-btn" onclick="openShipment(${s.id})">Preencher</button></td></tr>`}).join("")||'<tr><td colspan="7">Nenhum romaneio cadastrado.</td></tr>'}
+      </tbody></table></div>
+    </div>`;
+}
+function filterShipmentRows(){const term=normalizeSearch($("shipmentSearch")?.value||""),status=$("shipmentStatus")?.value||"";document.querySelectorAll(".shipment-row").forEach(row=>row.classList.toggle("hidden",(term&&!row.dataset.search.includes(term))||(status&&row.dataset.status!==status)));}
+function showShipmentForm(){
+  $("shipmentForm").classList.remove("hidden");
+  $("shipmentForm").innerHTML=`<div class="shipping-form-title"><div><b>Novo romaneio</b><span>Preencha os dados conhecidos agora; o restante pode ser concluído depois.</span></div><button class="ghost small-btn" onclick="$('shipmentForm').classList.add('hidden')">Fechar</button></div>
+    <div class="shipping-form-grid"><div class="field"><label>Número do romaneio *</label><input id="shipDoc"></div><div class="field"><label>Destino</label><input id="shipDest"></div><div class="field"><label>Transportadora</label><input id="shipCarrier"></div><div class="field"><label>Placa</label><input id="shipPlate" maxlength="10"></div><div class="field"><label>Motorista</label><input id="shipDriver"></div><div class="field"><label>Saída prevista</label><input id="shipScheduled" type="datetime-local"></div><div class="field"><label>Volumes</label><input id="shipVolumes" type="number" min="0"></div><div class="field grow"><label>Observações</label><input id="shipNotes"></div></div>
+    <div class="shipping-items-head"><b>Itens do romaneio</b><button class="secondary small-btn" onclick="addShipmentItemRow()">+ Adicionar item</button></div><div id="shipmentNewItems"></div><div class="actions"><button class="primary" onclick="createShipment()">Salvar romaneio</button></div>`;
+  addShipmentItemRow();
+}
+function addShipmentItemRow(barcode="",description="",quantity=""){$("shipmentNewItems").insertAdjacentHTML("beforeend",`<div class="shipment-new-item"><div class="field"><label>Código de barras</label><input data-field="barcode" value="${esc(barcode)}"></div><div class="field grow"><label>Descrição</label><input data-field="description" value="${esc(description)}"></div><div class="field"><label>Quantidade *</label><input data-field="quantity" type="number" min="1" value="${esc(quantity)}"></div><button class="danger small-btn" onclick="this.parentElement.remove()">Remover</button></div>`);}
+async function createShipment(){try{const items=[...document.querySelectorAll(".shipment-new-item")].map(row=>({barcode:row.querySelector('[data-field=barcode]').value,description:row.querySelector('[data-field=description]').value,quantity:Number(row.querySelector('[data-field=quantity]').value||0)})).filter(i=>i.quantity>0);const d=await api("/api/unified/shipments",{method:"POST",body:JSON.stringify({user_id:currentUser.id,document_no:$("shipDoc").value,destination:$("shipDest").value,carrier:$("shipCarrier").value,vehicle_plate:$("shipPlate").value,driver_name:$("shipDriver").value,scheduled_at:$("shipScheduled").value,volume_count:Number($("shipVolumes").value||0),notes:$("shipNotes").value,items})});toast("Romaneio salvo. Continue a conferência.");await renderShipping();openShipment(d.shipment_id);}catch(e){toast(e.message)}}
 async function importShipmentPdf(input){if(!input.files?.[0])return;const form=new FormData();form.append("file",input.files[0]);try{const d=await api(`/api/unified/shipments/import-pdf?user_id=${currentUser.id}`,{method:"POST",body:form});toast(`${d.document_no}: ${d.total_qty} peças reconhecidas.`);renderShipping();}catch(e){toast(e.message)}}
-async function finishShipment(id){try{await api(`/api/unified/shipments/${id}`,{method:"PATCH",body:JSON.stringify({user_id:currentUser.id,status:"EXPEDIDO"})});renderShipping();}catch(e){toast(e.message)}}
+async function openShipment(id){try{const d=await api(`/api/unified/shipments/${id}`),s=d.shipment;const allowed=["expedicao","estocagem","supervisor","admin"].includes(currentUser.role)&&s.status!=="EXPEDIDO";const pct=s.total_qty?Math.min(100,Math.round(Number(s.checked_qty||0)*100/s.total_qty)):0;const missing=[["Destino",s.destination],["Transportadora",s.carrier],["Placa",s.vehicle_plate],["Motorista",s.driver_name],["Saída prevista",s.scheduled_at],["Volumes",s.volume_count]].filter(([,v])=>!v).map(([k])=>k);$("modalBody").innerHTML=`<div class="card-title"><div><h2>Romaneio ${esc(s.document_no)}</h2><div class="card-subtitle">Preenchimento e conferência da Expedição</div></div>${statusBadge(s.status)}</div><div class="shipping-completion"><div><span>Progresso da conferência</span><b>${pct}%</b></div><div class="shipping-progress large"><i style="width:${pct}%"></i></div><small>${Number(s.checked_qty||0).toLocaleString('pt-BR')} de ${Number(s.total_qty||0).toLocaleString('pt-BR')} peças conferidas</small></div>${missing.length?`<div class="notice warn"><b>Faltam dados obrigatórios:</b> ${missing.join(', ')}.</div>`:'<div class="notice success-box"><b>Dados do transporte completos.</b></div>'}<div class="shipping-form-grid"><div class="field"><label>Romaneio *</label><input id="shipEditDoc" value="${esc(s.document_no||'')}" ${allowed?'':'readonly'}></div><div class="field"><label>Destino *</label><input id="shipEditDest" value="${esc(s.destination||'')}" ${allowed?'':'readonly'}></div><div class="field"><label>Transportadora *</label><input id="shipEditCarrier" value="${esc(s.carrier||'')}" ${allowed?'':'readonly'}></div><div class="field"><label>Placa *</label><input id="shipEditPlate" value="${esc(s.vehicle_plate||'')}" ${allowed?'':'readonly'}></div><div class="field"><label>Motorista *</label><input id="shipEditDriver" value="${esc(s.driver_name||'')}" ${allowed?'':'readonly'}></div><div class="field"><label>Saída prevista *</label><input id="shipEditScheduled" type="datetime-local" value="${esc((s.scheduled_at||'').slice(0,16))}" ${allowed?'':'readonly'}></div><div class="field"><label>Volumes *</label><input id="shipEditVolumes" type="number" min="1" value="${Number(s.volume_count||0)||''}" ${allowed?'':'readonly'}></div><div class="field grow"><label>Observações</label><input id="shipEditNotes" value="${esc(s.notes||'')}" ${allowed?'':'readonly'}></div></div><h3 class="section-heading">Conferência por item</h3><div class="table-wrap shipping-items"><table class="compact-table"><thead><tr><th>Código</th><th>Descrição</th><th>Prevista</th><th>Conferida</th><th>Pendente</th><th>Observação</th></tr></thead><tbody>${d.items.map(i=>`<tr class="shipment-edit-item" data-id="${i.id}"><td>${esc(i.barcode||'—')}</td><td><b>${esc(i.description||'Item sem descrição')}</b></td><td>${i.quantity}</td><td><input class="table-input" data-field="checked" type="number" min="0" max="${i.quantity}" value="${i.checked_qty}" ${allowed?'':'readonly'}></td><td><b class="${i.quantity-i.checked_qty?'text-danger':'text-success'}">${i.quantity-i.checked_qty}</b></td><td><input data-field="notes" value="${esc(i.notes||'')}" ${allowed?'':'readonly'}></td></tr>`).join('')||'<tr><td colspan="6">Nenhum item informado.</td></tr>'}</tbody></table></div>${allowed?`<div class="actions"><button class="primary" onclick="saveShipmentFilling(${id})">Salvar preenchimento</button>${s.status==='PRONTO'?`<button class="success" onclick="finishShipment(${id})">Confirmar saída</button>`:''}</div>`:''}`;$("modal").classList.remove("hidden");}catch(e){toast(e.message)}}
+async function saveShipmentFilling(id){try{const items=[...document.querySelectorAll('.shipment-edit-item')].map(row=>({id:Number(row.dataset.id),checked_qty:Number(row.querySelector('[data-field=checked]').value||0),notes:row.querySelector('[data-field=notes]').value}));const d=await api(`/api/unified/shipments/${id}/filling`,{method:'PATCH',body:JSON.stringify({user_id:currentUser.id,document_no:$("shipEditDoc").value,destination:$("shipEditDest").value,carrier:$("shipEditCarrier").value,vehicle_plate:$("shipEditPlate").value,driver_name:$("shipEditDriver").value,scheduled_at:$("shipEditScheduled").value,volume_count:Number($("shipEditVolumes").value||0),notes:$("shipEditNotes").value,items})});toast(d.status==='PRONTO'?'Conferência completa. Romaneio liberado para saída.':'Preenchimento salvo. Ainda existem pendências.');await renderShipping();openShipment(id);}catch(e){toast(e.message)}}
+async function finishShipment(id){try{await api(`/api/unified/shipments/${id}`,{method:"PATCH",body:JSON.stringify({user_id:currentUser.id,status:"EXPEDIDO"})});closeModal();toast("Saída confirmada e romaneio concluído.");renderShipping();}catch(e){toast(e.message)}}
 
 async function renderReturns(){setPage("Devoluções","Conferência Loja × CD × Anápolis, pendências e tratativas");const rows=await api("/api/unified/returns");unifiedCache.returns=rows;const open=rows.filter(r=>r.status!=="CONCLUIDA");$("mainContent").innerHTML=`<div class="kpi-grid compact-kpis"><div class="kpi"><div class="kpi-label">Registradas</div><div class="kpi-value">${rows.length}</div></div><div class="kpi"><div class="kpi-label">Abertas</div><div class="kpi-value">${open.length}</div></div><div class="kpi"><div class="kpi-label">Divergentes</div><div class="kpi-value">${rows.filter(r=>r.status==='DIVERGENTE').length}</div></div><div class="kpi"><div class="kpi-label">Peças em Anápolis</div><div class="kpi-value">${rows.reduce((a,r)=>a+Number(r.total_anapolis||0),0)}</div></div></div><div class="panel" style="margin-top:14px"><div class="panel-header"><span>Devoluções</span><div><button class="ghost small-btn" onclick="showReturnPdfForm()">Comparar PDFs</button> <button class="primary small-btn" onclick="showReturnForm()">+ Registrar devolução</button></div></div><div id="returnForm" class="panel-body hidden"></div><div class="table-wrap"><table><thead><tr><th>Documento</th><th>Loja / cliente</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td><button class="link-button" onclick="openReturn(${r.id})"><b>${esc(r.document_no)}</b></button></td><td>${esc(r.store||r.customer||'—')}</td><td>${r.total_store}</td><td>${r.total_cd}</td><td>${r.total_anapolis}</td><td><b class="${r.difference?'text-danger':''}">${r.difference}</b></td><td>${statusBadge(r.status)}</td><td>${r.status!=="CONCLUIDA"?`<button class="success small-btn" onclick="finishReturn(${r.id})">Concluir</button>`:''}</td></tr>`).join("")||'<tr><td colspan="8">Nenhuma devolução.</td></tr>'}</tbody></table></div></div>`;}
 function showReturnForm(){$("returnForm").classList.remove("hidden");$("returnForm").innerHTML=`<div class="return-form-grid"><div class="field"><label>Documento</label><input id="returnDoc"></div><div class="field"><label>Loja</label><input id="returnStore"></div><div class="field"><label>Código de barras</label><input id="returnBarcode"></div><div class="field"><label>Descrição</label><input id="returnDescription"></div><div class="field"><label>Quantidade Loja</label><input id="returnStoreQty" type="number" min="0"></div><div class="field"><label>Quantidade CD</label><input id="returnCdQty" type="number" min="0"></div><div class="field"><label>Quantidade Anápolis</label><input id="returnAnaQty" type="number" min="0"></div><button class="primary" onclick="createReturn()">Conferir e registrar</button></div>`;}
@@ -1736,16 +1771,16 @@ function qualityTable(rows){return `<table class="dash-table"><thead><tr><th>Com
 function processingTable(rows){return `<table class="dash-table"><thead><tr><th>Compra / SGO</th><th>Tipo</th><th>Peças</th><th>Status</th></tr></thead><tbody>${rows.map(c=>`<tr onclick="openCard(${c.id},'processing')"><td>${esc(c.purchase_id)}</td><td><span class="type-tag">${c.purchase_mode==='GRADE'?'Grade':'Saldo'}</span></td><td>${c.expected_total}</td><td>${statusBadge(c.status_label)}</td></tr>`).join('')||emptyRows(4)}</tbody></table><button class="panel-link" onclick="goTo('processing')">Ver todos ›</button>`;}
 function returnsTable(rows){return `<table class="dash-table"><thead><tr><th>Devolução</th><th>Loja</th><th>Motivo</th><th>Status</th></tr></thead><tbody>${rows.map(r=>`<tr onclick="openReturn(${r.id})"><td>${esc(r.document_no)}</td><td>${esc(r.store||'—')}</td><td>${r.difference?'Divergência':'Conferência'}</td><td>${statusBadge(r.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table><button class="panel-link" onclick="goTo('returns-hub')">Ver todas ›</button>`;}
 
-async function renderStorageHub(){setPage("Estocagem","");const [cards,warehouse,analytics]=await Promise.all([safeApi('/api/cards?scope=storage',[]),safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const occupied=warehouse.locations.filter(l=>l.occupied_qty>0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}<div class="hero-kpis storage-kpis">${heroKpi("Aguardando estocagem",cards.length,"Cards","⌂","blue","storage")}${heroKpi("Endereços ocupados",occupied.length,"Casulos","▦","teal","warehouse")}${heroKpi("Endereços livres",warehouse.locations.filter(l=>l.status==='DISPONIVEL').length,"Casulos","◇","blue","warehouse")}<div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${warehouse.zones.length?Math.round(warehouse.zones.reduce((a,z)=>a+z.occupancy,0)/warehouse.zones.length):0}%</strong><small>Capacidade cadastrada</small></div></div></div><div class="dash-row storage-layout">${dashboardPanel("▦","Visualizador de casulos","",zonesTable(warehouse.zones))}${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Digite endereço, marca ou categoria" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.slice(0,12).map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}</div><section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;}
-function moduleTabs(items,current){return `<div class="module-tabs">${items.map(([label,view])=>`<button class="${view===current?'active':''}" onclick="goTo('${view}')">${label}</button>`).join('')}</div>`;}
+async function renderStorageHub(){setPage("Estocagem","");const [cards,warehouse,analytics]=await Promise.all([safeApi('/api/cards?scope=storage',[]),safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const occupied=warehouse.locations.filter(l=>l.occupied_qty>0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}<div class="hero-kpis storage-kpis">${heroKpi("Aguardando estocagem",cards.length,"Cards","⌂","blue","storage")}${heroKpi("Endereços ocupados",occupied.length,"Casulos","▦","teal","warehouse")}${heroKpi("Endereços livres",warehouse.locations.filter(l=>l.status==='DISPONIVEL').length,"Casulos","◇","blue","warehouse")}<div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${warehouse.zones.length?Math.round(warehouse.zones.reduce((a,z)=>a+z.occupancy,0)/warehouse.zones.length):0}%</strong><small>Capacidade cadastrada</small></div></div></div><div class="dash-row storage-layout">${dashboardPanel("▦","Visualizador de casulos","",zonesTable(warehouse.zones))}${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Digite endereço, marca ou categoria" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.slice(0,12).map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}</div><section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;}
+function moduleTabs(items,current){if(items.some(([,view])=>view==="warehouse")&&!items.some(([,view])=>view==="warehouse-heatmap")){const position=items.findIndex(([,view])=>view==="warehouse")+1;items=[...items.slice(0,position),["Mapa de Calor","warehouse-heatmap"],...items.slice(position)];}return `<div class="module-tabs">${items.map(([label,view])=>`<button class="${view===current?'active':''}" onclick="goTo('${view}')">${label}</button>`).join('')}</div>`;}
 function filterStockQuick(){const t=normalizeSearch($("stockQuickSearch")?.value||'');document.querySelectorAll('.stock-quick-row').forEach(r=>r.classList.toggle('hidden',t&&!r.dataset.search.includes(t)));}
 async function importStockGroupReport(input){if(!input.files?.[0])return;const form=new FormData();form.append('file',input.files[0]);try{const d=await api(`/api/unified/warehouse/import-group-report?user_id=${currentUser.id}`,{method:'POST',body:form});toast(`${d.groups} grupos e ${d.total_qty} peças importados.`);renderStorageHub();}catch(e){toast(e.message)}}
 
-async function renderStockStatistics(){setPage("Estatísticas de Casulos","");const [warehouse,a]=await Promise.all([safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const cap=warehouse.locations.reduce((s,l)=>s+Number(l.capacity),0),occ=warehouse.locations.reduce((s,l)=>s+Number(l.occupied_qty),0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"stock-stats")}<div class="hero-kpis">${heroKpi("Total de casulos",warehouse.locations.length,"Estrutura física","▦","blue","warehouse")}${heroKpi("Capacidade estimada",cap.toLocaleString('pt-BR'),"Peças","⌂","teal","storage-hub")}${heroKpi("Ocupação real",occ.toLocaleString('pt-BR'),"Peças","◇","blue","storage-hub")}${heroKpi("Disponibilidade",Math.max(0,cap-occ).toLocaleString('pt-BR'),"Peças","＋","teal","capacity-simulator")}</div><div class="dash-row analytics-grid">${analyticsBars("Estruturas",a.structures.map(x=>({label:x.label,value:x.locations,hint:`${x.occupied}/${x.capacity}`})))}${analyticsBars("Estoque por categoria",a.categories.map(x=>({label:x.label,value:x.quantity})))}${analyticsBars("Estoque por marca",a.brands.map(x=>({label:x.label,value:x.quantity})))}</div>${a.groups?.length?dashboardPanel("▣","Último relatório por grupo",`<span>${esc(a.latest_report?.filename||'')}</span>`,analyticsBarsBody(a.groups.map(x=>({label:x.group_name,value:x.quantity,hint:x.gender})))):''}`;}
+async function renderStockStatistics(){setPage("Estatísticas de Casulos","");const [warehouse,a]=await Promise.all([safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const cap=warehouse.locations.reduce((s,l)=>s+Number(l.capacity),0),occ=warehouse.locations.reduce((s,l)=>s+Number(l.occupied_qty),0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"stock-stats")}<div class="hero-kpis">${heroKpi("Total de casulos",warehouse.locations.length,"Estrutura física","▦","blue","warehouse")}${heroKpi("Capacidade estimada",cap.toLocaleString('pt-BR'),"Peças","⌂","teal","storage-hub")}${heroKpi("Ocupação real",occ.toLocaleString('pt-BR'),"Peças","◇","blue","storage-hub")}${heroKpi("Disponibilidade",Math.max(0,cap-occ).toLocaleString('pt-BR'),"Peças","＋","teal","capacity-simulator")}</div><div class="dash-row analytics-grid">${analyticsBars("Estruturas",a.structures.map(x=>({label:x.label,value:x.locations,hint:`${x.occupied}/${x.capacity}`})))}${analyticsBars("Estoque por categoria",a.categories.map(x=>({label:x.label,value:x.quantity})))}${analyticsBars("Estoque por marca",a.brands.map(x=>({label:x.label,value:x.quantity})))}</div>${a.groups?.length?dashboardPanel("▣","Último relatório por grupo",`<span>${esc(a.latest_report?.filename||'')}</span>`,analyticsBarsBody(a.groups.map(x=>({label:x.group_name,value:x.quantity,hint:x.gender})))):''}`;}
 function analyticsBars(title,rows){return dashboardPanel("▥",title,"",analyticsBarsBody(rows));}
 function analyticsBarsBody(rows){const max=Math.max(1,...rows.map(r=>Number(r.value)||0));return `<div class="analytics-bars">${rows.slice(0,15).map(r=>`<div><span>${esc(r.label)}</span><i><b style="width:${Number(r.value)*100/max}%"></b></i><strong>${Number(r.value).toLocaleString('pt-BR')}</strong><small>${esc(r.hint||'')}</small></div>`).join('')||'<div class="empty-visual">Sem dados para exibir.</div>'}</div>`;}
 
-async function renderCapacitySimulator(){setPage("Simulador de Capacidade","");const w=await safeApi('/api/unified/warehouse',{locations:[],zones:[]});$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"capacity-simulator")}<section class="dash-panel simulator-panel"><header><b>⌁</b><strong>Teste uma entrada sem alterar o estoque</strong></header><div class="dash-panel-body simulator-form"><div class="field"><label>Endereço</label><select id="simLocation" onchange="calculateCapacitySimulation()"><option value="">Selecione</option>${w.locations.map(l=>`<option value="${l.id}" data-cap="${l.capacity}" data-occ="${l.occupied_qty}">${esc(l.address)} • livre ${Math.max(0,l.capacity-l.occupied_qty)}</option>`).join('')}</select></div><div class="field"><label>Quantidade a armazenar</label><input id="simQty" type="number" min="0" value="10" oninput="calculateCapacitySimulation()"></div><div id="simResult" class="simulation-result"><span>Selecione um endereço para simular.</span></div></div></section>`;unifiedCache.warehouse=w;}
+async function renderCapacitySimulator(){setPage("Simulador de Capacidade","");const w=await safeApi('/api/unified/warehouse',{locations:[],zones:[]});$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"capacity-simulator")}<section class="dash-panel simulator-panel"><header><b>⌁</b><strong>Teste uma entrada sem alterar o estoque</strong></header><div class="dash-panel-body simulator-form"><div class="field"><label>Endereço</label><select id="simLocation" onchange="calculateCapacitySimulation()"><option value="">Selecione</option>${w.locations.map(l=>`<option value="${l.id}" data-cap="${l.capacity}" data-occ="${l.occupied_qty}">${esc(l.address)} • livre ${Math.max(0,l.capacity-l.occupied_qty)}</option>`).join('')}</select></div><div class="field"><label>Quantidade a armazenar</label><input id="simQty" type="number" min="0" value="10" oninput="calculateCapacitySimulation()"></div><div id="simResult" class="simulation-result"><span>Selecione um endereço para simular.</span></div></div></section>`;unifiedCache.warehouse=w;}
 function calculateCapacitySimulation(){const option=$("simLocation")?.selectedOptions?.[0],qty=Number($("simQty")?.value||0);if(!option?.value)return;const cap=Number(option.dataset.cap),occ=Number(option.dataset.occ),after=occ+qty,pct=cap?Math.round(after*100/cap):0,excess=Math.max(0,after-cap);$("simResult").innerHTML=`<div class="capacity-gauge"><i style="width:${Math.min(100,pct)}%" class="${excess?'danger-fill':pct>80?'warn-fill':''}"></i></div><strong>${pct}% após a entrada</strong><span>${occ} atuais + ${qty} novas = ${after} de ${cap}</span>${excess?`<b class="text-danger">Excede a capacidade em ${excess} peças.</b>`:'<b class="text-success">Entrada compatível com a capacidade.</b>'}`;}
 
 async function renderSgoIndicators(){setPage("SGO e Indicadores","");const [rows,tasks]=await Promise.all([safeApi('/api/unified/sgo',[]),safeApi('/api/unified/tasks',[])]);const total=rows.reduce((a,r)=>a+Number(r.quantity||0),0),late=rows.filter(r=>r.forecast_date&&new Date(r.forecast_date)<new Date()&&r.status!=='CONCLUIDO');const byStatus=Object.entries(rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+Number(r.quantity||0),a),{})).map(([label,value])=>({label,value}));$("mainContent").innerHTML=`${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}<div class="hero-kpis">${heroKpi("Entradas previstas",rows.length,"Compras / lotes","⇩","blue","sgo")}${heroKpi("Peças previstas",total.toLocaleString('pt-BR'),"Quantidade SGO","▣","teal","sgo")}${heroKpi("Previsões atrasadas",late.length,"Requer atenção","!","blue","sgo")}${heroKpi("Tarefas abertas",tasks.filter(t=>t.status!=='CONCLUIDA').length,"Operação","☑","teal","tasks")}</div><div class="dash-row indicators-layout">${analyticsBars("Distribuição por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${rows.length}</span>`,awaitingTable(rows.slice(0,10),[]))}</div>`;}
@@ -1764,4 +1799,3 @@ async function renderSettings(){setPage("Configurações","");$("mainContent").i
 
 setInterval(() => { if ($("clock")) $("clock").textContent = new Date().toLocaleString("pt-BR"); }, 1000);
 if (currentUser) enterApp();
-
