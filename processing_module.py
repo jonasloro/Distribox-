@@ -96,6 +96,7 @@ def init_processing_db() -> None:
             processed_qty_general INTEGER NOT NULL DEFAULT 0,
             stored_qty_general INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
+            source_subset INTEGER NOT NULL DEFAULT 0,
             created_by INTEGER NOT NULL,
             completed_by INTEGER,
             created_at TEXT NOT NULL,
@@ -140,6 +141,9 @@ def init_processing_db() -> None:
         );
         """
     )
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(processing_records)").fetchall()}
+    if "source_subset" not in columns:
+        con.execute("ALTER TABLE processing_records ADD COLUMN source_subset INTEGER NOT NULL DEFAULT 0")
     con.commit()
     con.close()
 
@@ -206,6 +210,10 @@ def worker_timer_summary(con: sqlite3.Connection, worker_id: int) -> dict[str, A
 def refresh_processing_card_status(con: sqlite3.Connection, processing_id: int) -> None:
     record = con.execute("SELECT * FROM processing_records WHERE id=?", (processing_id,)).fetchone()
     if not record or record["status"] != "ABERTO":
+        return
+    if "source_subset" in record.keys() and record["source_subset"]:
+        # Uma compra importada pode ter tamanhos em setores diferentes. Nesse caso,
+        # o status-mãe continua no Recebimento e somente os itens selecionados avançam.
         return
     workers = con.execute(
         "SELECT status FROM processing_workers WHERE processing_id=?", (processing_id,)
@@ -304,9 +312,12 @@ def processing_card_data(con: sqlite3.Connection, card_id: int) -> Optional[dict
         worker["timer"] = worker_timer_summary(con, row["id"])
         workers.append(worker)
     data["workers"] = workers
-    expected_total = con.execute(
-        "SELECT COALESCE(SUM(expected_qty),0) total FROM items WHERE card_id=?", (card_id,)
-    ).fetchone()["total"]
+    if data.get("source_subset"):
+        expected_total = sum(int(row["expected_qty"] or 0) for row in item_rows)
+    else:
+        expected_total = con.execute(
+            "SELECT COALESCE(SUM(expected_qty),0) total FROM items WHERE card_id=?", (card_id,)
+        ).fetchone()["total"]
     processed_total = (
         int(record["processed_qty_general"] or 0)
         if record["purchase_mode"] == "SALDO"
@@ -348,6 +359,7 @@ async def create_processing(card_id: int, request: Request):
     label_type = str(payload.get("label_type") or "").strip().upper() or None
     defer = bool(payload.get("quantity_deferred_to_storage"))
     notes = str(payload.get("notes") or "").strip()
+    requested_item_ids = {int(value) for value in (payload.get("item_ids") or []) if str(value).isdigit()}
     if not brand:
         raise HTTPException(400, "Informe a Marca.")
     if profile not in {"CADASTRO_ENTRADA", "SOMENTE_ENTRADA"}:
@@ -367,7 +379,24 @@ async def create_processing(card_id: int, request: Request):
     if not card:
         con.close()
         raise HTTPException(404, "Card não encontrado.")
-    if card["current_sector"] != "PROCESSAMENTO":
+    source_subset = bool(card["source_snapshot_at"] and card["current_sector"] != "PROCESSAMENTO")
+    eligible_items = []
+    if source_subset:
+        eligible_items = con.execute(
+            """SELECT id,expected_qty FROM items WHERE card_id=?
+               AND source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO') ORDER BY id""",
+            (card_id,),
+        ).fetchall()
+        eligible_ids = {int(row["id"]) for row in eligible_items}
+        if requested_item_ids:
+            if not requested_item_ids.issubset(eligible_ids):
+                con.close()
+                raise HTTPException(400, "Um ou mais itens selecionados não estão disponíveis para o Processamento.")
+            eligible_items = [row for row in eligible_items if int(row["id"]) in requested_item_ids]
+        if not eligible_items:
+            con.close()
+            raise HTTPException(400, "Não há itens importados disponíveis para o Processamento.")
+    elif card["current_sector"] != "PROCESSAMENTO":
         con.close()
         raise HTTPException(400, "O Card não está no Processamento.")
     mode = str(card["purchase_mode"] or "").upper()
@@ -384,8 +413,8 @@ async def create_processing(card_id: int, request: Request):
         raise HTTPException(400, "Já existe um Processamento aberto para este Card.")
     cur = con.execute(
         """INSERT INTO processing_records(card_id,status,purchase_mode,brand,operation_profile,needs_triage,
-           needs_labeling,label_type,quantity_deferred_to_storage,notes,created_by,created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+           needs_labeling,label_type,quantity_deferred_to_storage,notes,source_subset,created_by,created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             card_id,
             "ABERTO",
@@ -397,29 +426,39 @@ async def create_processing(card_id: int, request: Request):
             label_type,
             1 if defer else 0,
             notes,
+            1 if source_subset else 0,
             user_id,
             iso_now(),
         ),
     )
     processing_id = cur.lastrowid
-    if mode == "GRADE":
-        items = con.execute("SELECT id FROM items WHERE card_id=? ORDER BY id", (card_id,)).fetchall()
+    if mode == "GRADE" or source_subset:
+        items = eligible_items if source_subset else con.execute(
+            "SELECT id FROM items WHERE card_id=? ORDER BY id", (card_id,)
+        ).fetchall()
         for item in items:
             con.execute(
                 "INSERT INTO processing_item_quantities(processing_id,item_id) VALUES(?,?)",
                 (processing_id, item["id"]),
             )
-    con.execute(
-        "UPDATE cards SET brand=?,status='AGUARDANDO_INICIO_PROCESSAMENTO',updated_at=? WHERE id=?",
-        (brand, iso_now(), card_id),
-    )
+    if source_subset:
+        item_ids = [int(row["id"]) for row in eligible_items]
+        marks = ",".join("?" for _ in item_ids)
+        con.execute(f"UPDATE items SET source_stage='PROCESSAMENTO' WHERE id IN ({marks})", item_ids)
+        con.execute("UPDATE cards SET brand=?,updated_at=? WHERE id=?", (brand, iso_now(), card_id))
+    else:
+        con.execute(
+            "UPDATE cards SET brand=?,status='AGUARDANDO_INICIO_PROCESSAMENTO',updated_at=? WHERE id=?",
+            (brand, iso_now(), card_id),
+        )
     defer_text = " Quantidade final será confirmada na Estocagem." if defer else ""
     add_history(
         con,
         card_id,
         "PROCESSAMENTO_CONFIGURADO",
         f"{actor['name']} configurou o Processamento: tipo {mode}, perfil {profile.replace('_', ' + ')}, "
-        f"Triagem {'Sim' if needs_triage else 'Não'}, Etiquetagem {'Sim' if needs_labeling else 'Não'}." + defer_text,
+        f"Triagem {'Sim' if needs_triage else 'Não'}, Etiquetagem {'Sim' if needs_labeling else 'Não'}."
+        + (f" {len(eligible_items)} item(ns) importado(s) selecionado(s)." if source_subset else "") + defer_text,
         user_id,
     )
     con.commit()
@@ -705,10 +744,21 @@ async def complete_processing(processing_id: int, request: Request):
         "UPDATE processing_records SET status='CONCLUIDO',completed_by=?,completed_at=? WHERE id=?",
         (user_id, now, processing_id),
     )
-    con.execute(
-        "UPDATE cards SET current_sector=?,status=?,updated_at=? WHERE id=?",
-        (next_sector, next_status, now, record["card_id"]),
-    )
+    if "source_subset" in record.keys() and record["source_subset"]:
+        stage = "TRIAGEM" if record["needs_triage"] else "ETIQUETAGEM" if record["needs_labeling"] else "ESTOCAGEM"
+        item_ids = [row["item_id"] for row in con.execute(
+            "SELECT item_id FROM processing_item_quantities WHERE processing_id=?", (processing_id,)
+        ).fetchall()]
+        if item_ids:
+            marks = ",".join("?" for _ in item_ids)
+            con.execute(f"UPDATE items SET source_stage=? WHERE id IN ({marks})", (stage, *item_ids))
+        con.execute("UPDATE cards SET updated_at=? WHERE id=?", (now, record["card_id"]))
+        route_text = f"Itens selecionados encaminhados a {stage.title()}; o Card-mãe permanece no Recebimento."
+    else:
+        con.execute(
+            "UPDATE cards SET current_sector=?,status=?,updated_at=? WHERE id=?",
+            (next_sector, next_status, now, record["card_id"]),
+        )
     add_history(con, record["card_id"], "PROCESSAMENTO_CONCLUIDO", f"{actor['name']} concluiu o Processamento. {route_text}", user_id)
     con.commit()
     detail = processing_card_data(con, record["card_id"])
