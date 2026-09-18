@@ -1,4 +1,3 @@
-# Redeploy forcado em 2026-09-01 apos Railway ter deployado um commit antigo por engano
 from __future__ import annotations
 
 import io
@@ -14,7 +13,7 @@ from fastapi import File, HTTPException, Request, UploadFile
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
-from warehouse_structure import gerar_todos_casulos, ESTRUTURA_CD
+from warehouse_structure import ESTRUTURA_CD, gerar_todos_casulos
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -238,87 +237,88 @@ def init_unified_db() -> None:
         );
         """
     )
-
-    # Migração automática: bancos criados antes dessa versão já têm
-    # warehouse_zones populada com as 4 zonas fictícias antigas (códigos
-    # "A"/"B"/"C"/"D"), então a checagem "tabela vazia?" logo abaixo nunca
-    # dispararia sozinha nesse banco — a estrutura física real nunca entraria.
-    # Detecta esse caso específico (qualquer zona com código que não comece
-    # com "Rua ") e limpa a estrutura antiga pra estrutura real ser recriada
-    # do zero a seguir. Junto, remove também qualquer estoque já lançado
-    # nesses casulos fictícios (não faz sentido preservar algo apontando
-    # pra uma zona que vai deixar de existir) — não mexe em nada além disso:
-    # tarefas, devoluções, expedição etc. continuam intactos.
-    zona_antiga = con.execute(
-        "SELECT 1 FROM warehouse_zones WHERE code NOT LIKE 'Rua %' LIMIT 1"
-    ).fetchone()
-    if zona_antiga:
-        con.execute("DELETE FROM stock_entries WHERE location_id IN (SELECT id FROM warehouse_locations)")
-        con.execute("DELETE FROM warehouse_locations")
-        con.execute("DELETE FROM warehouse_zones")
-        con.commit()
-
+    shipment_columns = {row["name"] for row in con.execute("PRAGMA table_info(shipments)").fetchall()}
+    for name, definition in {
+        "carrier": "TEXT",
+        "vehicle_plate": "TEXT",
+        "driver_name": "TEXT",
+        "scheduled_at": "TEXT",
+        "volume_count": "INTEGER NOT NULL DEFAULT 0",
+        "notes": "TEXT",
+        "updated_at": "TEXT",
+    }.items():
+        if name not in shipment_columns:
+            con.execute(f"ALTER TABLE shipments ADD COLUMN {name} {definition}")
+    shipment_item_columns = {row["name"] for row in con.execute("PRAGMA table_info(shipment_items)").fetchall()}
+    for name, definition in {
+        "checked_qty": "INTEGER NOT NULL DEFAULT 0",
+        "notes": "TEXT",
+    }.items():
+        if name not in shipment_item_columns:
+            con.execute(f"ALTER TABLE shipment_items ADD COLUMN {name} {definition}")
     if not con.execute("SELECT 1 FROM warehouse_zones LIMIT 1").fetchone():
-        # Estrutura física REAL do CD (ESTRUTURA_CD/CAPACIDADE_FIXA_POR_RUA
-        # portados de app.py) — substitui o antigo placeholder de 4 zonas
-        # fictícias (A/B/C/D). Uma "zona" aqui é uma Rua real; cada
-        # warehouse_location é um casulo físico real (rua+coluna+lado+nível).
-        casulos = gerar_todos_casulos()
-
-        ruas_presentes = sorted(
-            {c["rua"] for c in casulos},
-            key=lambda r: int(r.split()[1]),
-        )
-        zone_capacity = {}
-        zone_gender = {}
-        for c in casulos:
-            zone_capacity[c["rua"]] = zone_capacity.get(c["rua"], 0) + c["capacidade"]
-            zone_gender[c["rua"]] = c["genero"]
-
+        zones = [
+            ("A", "Zona A — Giro alto", "Misto", 5000),
+            ("B", "Zona B — Grade", "Grade", 4500),
+            ("C", "Zona C — Saldo", "Saldo", 3500),
+            ("D", "Zona D — Reserva", "Misto", 2500),
+        ]
         con.executemany(
             "INSERT INTO warehouse_zones(code,name,gender,capacity,created_at) VALUES(?,?,?,?,?)",
-            [
-                (rua, rua, zone_gender[rua], zone_capacity[rua], now())
-                for rua in ruas_presentes
-            ],
+            [(code, name, gender, capacity, now()) for code, name, gender, capacity in zones],
         )
         zone_ids = {r["code"]: r["id"] for r in con.execute("SELECT id,code FROM warehouse_zones")}
-
-        locations = [
-            (
-                zone_ids[c["rua"]],
-                c["address"],
-                c["rua"],
-                c["lado"],
-                c["coluna"],
-                c["nivel"],
-                c["tipo_estrutural"],
-                c["capacidade"],
-                now(),
-            )
-            for c in casulos
-        ]
+        locations = []
+        for zone in "ABCD":
+            for column in range(1, 9):
+                for level in ("A", "B", "C"):
+                    address = f"{zone}-{column:03d}-{level}"
+                    locations.append((zone_ids[zone], address, zone, "UNICO", column, level, "CASULO", 100, now()))
         con.executemany(
             """INSERT INTO warehouse_locations(zone_id,address,aisle,side,column_no,level_no,structure_type,capacity,updated_at)
                VALUES(?,?,?,?,?,?,?,?,?)""",
             locations,
         )
-
-        # Sinaliza (fora do schema, via unified_movements) quantos casulos
-        # ainda dependem do fallback genérico de capacidade (20), por não
-        # terem densidade fixa cadastrada para aquela combinação rua/tipo —
-        # mesmo comportamento documentado no app original, não um dado
-        # inventado por este script.
-        com_fallback = sum(1 for c in casulos if c["capacidade_estimada"])
-        if com_fallback:
-            add_movement(
-                con, "ESTOQUE", None, "SEED_ESTRUTURA_REAL",
-                f"Estrutura física real do CD carregada: {len(casulos)} casulos em "
-                f"{len(ruas_presentes)} ruas. {com_fallback} casulos ainda usam capacidade "
-                f"estimada (20) por falta de densidade fixa cadastrada para a combinação "
-                f"rua/tipo — revisar CAPACIDADE_FIXA_POR_RUA quando os dados reais chegarem.",
-                None,
-            )
+    # Integração segura da estrutura física real do CD. Os endereços antigos
+    # são preservados no banco (inclusive seus lançamentos de estoque), mas
+    # ficam inativos quando a estrutura real está pronta. Nenhum registro é
+    # apagado durante a migração.
+    casulos = gerar_todos_casulos()
+    real_location_count = con.execute(
+        """SELECT COUNT(*) n FROM warehouse_locations l
+           JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.code LIKE 'Rua %'"""
+    ).fetchone()["n"]
+    if real_location_count < len(casulos):
+        ruas_presentes = sorted({c["rua"] for c in casulos}, key=lambda r: int(r.split()[1]))
+        zone_capacity: dict[str, int] = {}
+        zone_gender: dict[str, str] = {}
+        for casulo in casulos:
+            zone_capacity[casulo["rua"]] = zone_capacity.get(casulo["rua"], 0) + int(casulo["capacidade"])
+            zone_gender[casulo["rua"]] = casulo["genero"]
+        con.executemany(
+            """INSERT OR IGNORE INTO warehouse_zones(code,name,gender,capacity,created_at)
+               VALUES(?,?,?,?,?)""",
+            [(rua, rua, zone_gender[rua], zone_capacity[rua], now()) for rua in ruas_presentes],
+        )
+        zone_ids = {r["code"]: r["id"] for r in con.execute(
+            "SELECT id,code FROM warehouse_zones WHERE code LIKE 'Rua %'"
+        )}
+        con.executemany(
+            """INSERT OR IGNORE INTO warehouse_locations(
+               zone_id,address,aisle,side,column_no,level_no,structure_type,capacity,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            [(
+                zone_ids[c["rua"]], c["address"], c["rua"], c["lado"], c["coluna"],
+                c["nivel"], c["tipo_estrutural"], c["capacidade"], now(),
+            ) for c in casulos],
+        )
+        con.execute("UPDATE warehouse_zones SET active=0 WHERE code NOT LIKE 'Rua %'")
+        con.execute("UPDATE warehouse_zones SET active=1 WHERE code LIKE 'Rua %'")
+        add_movement(
+            con, "ESTOQUE", None, "SEED_ESTRUTURA_REAL_SEGURA",
+            f"Estrutura real carregada com {len(casulos)} casulos; endereços legados preservados e inativados.",
+            None,
+        )
     con.commit()
     con.close()
 
@@ -336,7 +336,8 @@ def register_unified_routes(app) -> None:
         con = db_connect()
         sectors = {r["current_sector"]: r["n"] for r in con.execute("SELECT current_sector,COUNT(*) n FROM cards GROUP BY current_sector")}
         warehouse = con.execute(
-            "SELECT COALESCE(SUM(capacity),0) capacity,COALESCE(SUM(occupied_qty),0) occupied,COUNT(*) locations FROM warehouse_locations"
+            """SELECT COALESCE(SUM(l.capacity),0) capacity,COALESCE(SUM(l.occupied_qty),0) occupied,COUNT(*) locations
+               FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active=1"""
         ).fetchone()
         task_counts = {r["status"]: r["n"] for r in con.execute("SELECT status,COUNT(*) n FROM operational_tasks GROUP BY status")}
         return_counts = {r["status"]: r["n"] for r in con.execute("SELECT status,COUNT(*) n FROM returns GROUP BY status")}
@@ -362,7 +363,7 @@ def register_unified_routes(app) -> None:
         con = db_connect()
         sql = """SELECT l.*,z.code zone_code,z.name zone_name,
                  CASE WHEN l.capacity>0 THEN ROUND(l.occupied_qty*100.0/l.capacity,1) ELSE 0 END occupancy
-                 FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE 1=1"""
+                 FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active=1"""
         args: list[Any] = []
         if search:
             sql += " AND (l.address LIKE ? OR l.category LIKE ? OR l.structure_type LIKE ?)"
@@ -376,7 +377,8 @@ def register_unified_routes(app) -> None:
         zones = [dict(r) for r in con.execute(
             """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) occupied,
                CASE WHEN z.capacity>0 THEN ROUND(COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity,1) ELSE 0 END occupancy
-               FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id GROUP BY z.id ORDER BY z.code"""
+               FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+               WHERE z.active=1 GROUP BY z.id ORDER BY z.code"""
         ).fetchall()]
         con.close()
         return {"zones": zones, "locations": locations}
@@ -550,7 +552,24 @@ def register_unified_routes(app) -> None:
 
     @app.get("/api/unified/shipments")
     def list_shipments():
-        con=db_connect();rows=[dict(r) for r in con.execute("SELECT * FROM shipments ORDER BY id DESC").fetchall()];con.close();return rows
+        con=db_connect();rows=[dict(r) for r in con.execute(
+            """SELECT s.*,
+                      COALESCE((SELECT SUM(si.checked_qty) FROM shipment_items si WHERE si.shipment_id=s.id),0) checked_qty,
+                      COALESCE((SELECT COUNT(*) FROM shipment_items si WHERE si.shipment_id=s.id),0) item_count
+               FROM shipments s ORDER BY s.id DESC"""
+        ).fetchall()];con.close();return rows
+
+    @app.get("/api/unified/shipments/{shipment_id}")
+    def shipment_detail(shipment_id:int):
+        con=db_connect();shipment=con.execute(
+            """SELECT s.*,
+                      COALESCE((SELECT SUM(si.checked_qty) FROM shipment_items si WHERE si.shipment_id=s.id),0) checked_qty,
+                      COALESCE((SELECT COUNT(*) FROM shipment_items si WHERE si.shipment_id=s.id),0) item_count
+               FROM shipments s WHERE s.id=?""",(shipment_id,)
+        ).fetchone()
+        if not shipment: con.close();raise HTTPException(404,"Romaneio não encontrado.")
+        items=[dict(r) for r in con.execute("SELECT * FROM shipment_items WHERE shipment_id=? ORDER BY id",(shipment_id,)).fetchall()]
+        result={"shipment":dict(shipment),"items":items};con.close();return result
 
     @app.post("/api/unified/shipments")
     async def create_shipment(request: Request):
@@ -558,16 +577,68 @@ def register_unified_routes(app) -> None:
         doc=str(data.get("document_no","")).strip();items=data.get("items") or []
         if not doc: con.close();raise HTTPException(400,"Informe o número do romaneio.")
         total=sum(max(0,as_int(i.get("quantity"))) for i in items)
-        cur=con.execute("INSERT INTO shipments(document_no,destination,status,total_qty,created_by,created_at) VALUES(?,?,?,?,?,?)",(doc,str(data.get("destination","")),"PREPARANDO",total,user_id,now()))
+        status="EM_CONFERENCIA" if total>0 else "RASCUNHO"
+        cur=con.execute(
+            """INSERT INTO shipments(document_no,destination,status,total_qty,created_by,created_at,
+               carrier,vehicle_plate,driver_name,scheduled_at,volume_count,notes,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (doc,str(data.get("destination","")).strip(),status,total,user_id,now(),str(data.get("carrier","")).strip(),
+             str(data.get("vehicle_plate","")).strip().upper(),str(data.get("driver_name","")).strip(),
+             str(data.get("scheduled_at","")).strip(),max(0,as_int(data.get("volume_count"))),str(data.get("notes","")).strip(),now())
+        )
         for item in items:
-            con.execute("INSERT INTO shipment_items(shipment_id,stock_entry_id,barcode,description,quantity) VALUES(?,?,?,?,?)",(cur.lastrowid,as_int(item.get("stock_entry_id")) or None,str(item.get("barcode","")),str(item.get("description","")),as_int(item.get("quantity"))))
+            qty=max(0,as_int(item.get("quantity")))
+            if qty<=0: continue
+            con.execute("INSERT INTO shipment_items(shipment_id,stock_entry_id,barcode,description,quantity,checked_qty,notes) VALUES(?,?,?,?,?,?,?)",(cur.lastrowid,as_int(item.get("stock_entry_id")) or None,str(item.get("barcode","")).strip(),str(item.get("description","")).strip(),qty,min(qty,max(0,as_int(item.get("checked_qty")))),str(item.get("notes","")).strip()))
         add_movement(con,"EXPEDICAO",cur.lastrowid,"ROMANEIO_CRIADO",f"Romaneio {doc} criado com {total} peça(s).",user_id)
         con.commit();con.close();return {"ok":True,"shipment_id":cur.lastrowid}
+
+    @app.patch("/api/unified/shipments/{shipment_id}/filling")
+    async def update_shipment_filling(shipment_id:int,request:Request):
+        data=await request.json();user_id=as_int(data.get("user_id"));con=db_connect();require_user(con,user_id,{"admin","supervisor","estocagem","expedicao"})
+        shipment=con.execute("SELECT * FROM shipments WHERE id=?",(shipment_id,)).fetchone()
+        if not shipment: con.close();raise HTTPException(404,"Romaneio não encontrado.")
+        if shipment["status"]=="EXPEDIDO": con.close();raise HTTPException(400,"Um romaneio expedido não pode mais ser alterado.")
+        fields={
+            "document_no":str(data.get("document_no",shipment["document_no"] or "")).strip(),
+            "destination":str(data.get("destination",shipment["destination"] or "")).strip(),
+            "carrier":str(data.get("carrier",shipment["carrier"] or "")).strip(),
+            "vehicle_plate":str(data.get("vehicle_plate",shipment["vehicle_plate"] or "")).strip().upper(),
+            "driver_name":str(data.get("driver_name",shipment["driver_name"] or "")).strip(),
+            "scheduled_at":str(data.get("scheduled_at",shipment["scheduled_at"] or "")).strip(),
+            "volume_count":max(0,as_int(data.get("volume_count",shipment["volume_count"]))),
+            "notes":str(data.get("notes",shipment["notes"] or "")).strip(),
+        }
+        if not fields["document_no"]: con.close();raise HTTPException(400,"Informe o número do romaneio.")
+        for item in data.get("items") or []:
+            item_id=as_int(item.get("id"));row=con.execute("SELECT quantity FROM shipment_items WHERE id=? AND shipment_id=?",(item_id,shipment_id)).fetchone()
+            if not row: continue
+            checked=max(0,as_int(item.get("checked_qty")))
+            if checked>row["quantity"]: con.close();raise HTTPException(400,"A quantidade conferida não pode superar a prevista.")
+            con.execute("UPDATE shipment_items SET checked_qty=?,notes=? WHERE id=?",(checked,str(item.get("notes","")).strip(),item_id))
+        total=con.execute("SELECT COALESCE(SUM(quantity),0) n FROM shipment_items WHERE shipment_id=?",(shipment_id,)).fetchone()["n"]
+        checked=con.execute("SELECT COALESCE(SUM(checked_qty),0) n FROM shipment_items WHERE shipment_id=?",(shipment_id,)).fetchone()["n"]
+        required_complete=bool(fields["destination"] and fields["carrier"] and fields["vehicle_plate"] and fields["driver_name"] and fields["scheduled_at"] and fields["volume_count"]>0)
+        status="PRONTO" if required_complete and total>0 and checked==total else ("EM_CONFERENCIA" if total>0 else "RASCUNHO")
+        con.execute(
+            """UPDATE shipments SET document_no=?,destination=?,carrier=?,vehicle_plate=?,driver_name=?,scheduled_at=?,
+               volume_count=?,notes=?,total_qty=?,status=?,updated_at=? WHERE id=?""",
+            (fields["document_no"],fields["destination"],fields["carrier"],fields["vehicle_plate"],fields["driver_name"],fields["scheduled_at"],fields["volume_count"],fields["notes"],total,status,now(),shipment_id)
+        )
+        add_movement(con,"EXPEDICAO",shipment_id,"PREENCHIMENTO",f"Preenchimento salvo: {checked}/{total} peça(s), status {status}.",user_id)
+        con.commit();con.close();return {"ok":True,"status":status,"checked_qty":checked,"total_qty":total}
 
     @app.patch("/api/unified/shipments/{shipment_id}")
     async def update_shipment(shipment_id:int,request:Request):
         data=await request.json();user_id=as_int(data.get("user_id"));con=db_connect();require_user(con,user_id,{"admin","supervisor","estocagem","expedicao"})
-        status=str(data.get("status","EXPEDIDO")).upper();con.execute("UPDATE shipments SET status=?,completed_at=? WHERE id=?",(status,now() if status=="EXPEDIDO" else None,shipment_id))
+        status=str(data.get("status","EXPEDIDO")).upper();shipment=con.execute("SELECT * FROM shipments WHERE id=?",(shipment_id,)).fetchone()
+        if not shipment: con.close();raise HTTPException(404,"Romaneio não encontrado.")
+        if status=="EXPEDIDO":
+            checked=con.execute("SELECT COALESCE(SUM(checked_qty),0) n FROM shipment_items WHERE shipment_id=?",(shipment_id,)).fetchone()["n"]
+            missing=[label for label,value in [("destino",shipment["destination"]),("transportadora",shipment["carrier"]),("placa",shipment["vehicle_plate"]),("motorista",shipment["driver_name"]),("previsão de saída",shipment["scheduled_at"]),("volumes",shipment["volume_count"])] if not value]
+            if missing or shipment["total_qty"]<=0 or checked!=shipment["total_qty"]:
+                con.close();raise HTTPException(400,"Preenchimento incompleto. Revise dados do transporte e conferência de todas as peças.")
+        con.execute("UPDATE shipments SET status=?,completed_at=?,updated_at=? WHERE id=?",(status,now() if status=="EXPEDIDO" else None,now(),shipment_id))
         add_movement(con,"EXPEDICAO",shipment_id,"STATUS",f"Expedição atualizada para {status}.",user_id);con.commit();con.close();return {"ok":True}
 
     @app.post("/api/unified/shipments/import-pdf")
@@ -672,53 +743,50 @@ def register_unified_routes(app) -> None:
 
     @app.get("/api/unified/warehouse/heatmap")
     def warehouse_heatmap():
-        """Mapa de calor por Rua/coluna, no mesmo espírito visual do
-        Visualizador de Casulos do OutLog-Distribox — agrupa os níveis de
-        cada coluna e calcula a ocupação (%) pra colorir o quadradinho.
-        Usa só o que já está no banco (estrutura física real, já portada);
-        não depende da API ID Brasil pra funcionar.
-
-        Detalhe importante recuperado do app original: algumas ruas (hoje
-        só a Rua 02) têm um TRECHO SEQUENCIAL além do ímpar/par de verdade
-        (colunas 103-139, sem lado definido — internamente gravadas como
-        "impar" só pra resolver o tipo de estrutura, igual o app original
-        já fazia). Aqui a gente separa isso de novo pra exibição, usando
-        ESTRUTURA_CD como fonte da verdade de quais colunas são cols_seq
-        — sem mexer no dado gravado, só na cara da resposta."""
+        """Ocupação por Rua/coluna, sem alterar os lançamentos de estoque."""
         con = db_connect()
         rows = con.execute(
-            """SELECT aisle,column_no,side,SUM(capacity) capacity,SUM(occupied_qty) occupied,COUNT(*) niveis
-               FROM warehouse_locations GROUP BY aisle,column_no,side ORDER BY aisle,column_no"""
+            """SELECT l.aisle,l.column_no,l.side,SUM(l.capacity) capacity,
+                      SUM(l.occupied_qty) occupied,COUNT(*) niveis
+               FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
+               WHERE z.active=1
+               GROUP BY l.aisle,l.column_no,l.side ORDER BY l.aisle,l.column_no"""
         ).fetchall()
         con.close()
-
-        colunas_seq_por_rua = {
+        sequential_columns = {
             rua: set(config.get("cols_seq", [])) for rua, config in ESTRUTURA_CD.items()
         }
-
-        ruas: dict[str, list[dict]] = {}
-        for r in rows:
-            cap = r["capacity"] or 0
-            occ = r["occupied"] or 0
-            pct = round(occ * 100 / cap, 1) if cap else 0.0
-            eh_sequencial = r["column_no"] in colunas_seq_por_rua.get(r["aisle"], set())
-            secao = "sequencial" if eh_sequencial else r["side"]
-            ruas.setdefault(r["aisle"], []).append({
-                "coluna": r["column_no"], "lado": r["side"], "secao": secao, "niveis": r["niveis"],
-                "capacidade": cap, "ocupado": occ, "ocupacao_pct": pct,
+        ruas: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            capacity = int(row["capacity"] or 0)
+            occupied = int(row["occupied"] or 0)
+            section = (
+                "sequencial"
+                if row["column_no"] in sequential_columns.get(row["aisle"], set())
+                else row["side"]
+            )
+            ruas.setdefault(row["aisle"], []).append({
+                "coluna": row["column_no"], "lado": row["side"], "secao": section,
+                "niveis": row["niveis"], "capacidade": capacity, "ocupado": occupied,
+                "ocupacao_pct": round(occupied * 100 / capacity, 1) if capacity else 0.0,
             })
-        return {"ruas": [{"rua": rua, "colunas": cols} for rua, cols in sorted(ruas.items())]}
+        return {
+            "ruas": [
+                {"rua": rua, "colunas": columns}
+                for rua, columns in sorted(ruas.items(), key=lambda item: int(item[0].split()[1]))
+            ]
+        }
 
     @app.post("/api/unified/warehouse/id-brasil-preview")
     async def aplicar_snapshot_id_brasil(request: Request):
         """Reconhece e aplica um snapshot de casulos no MESMO formato que a
-        API ID Brasil devolveria — uma lista de {rua, linha, coluna,
-        quantidade} — resolvendo o endereço interno (Rua NN-CCC-lado-NIVEL,
+        API ID Brasil devolveria -- uma lista de {rua, linha, coluna,
+        quantidade} -- resolvendo o endereco interno (Rua NN-CCC-lado-NIVEL,
         igual ao warehouse_structure.py) e atualizando occupied_qty.
 
-        IMPORTANTE: isso ainda NÃO chama a API de verdade — o JSON precisa
-        ser colado/enviado manualmente no corpo da requisição. É só pra
-        validar que o reconhecimento do formato e a atualização dos
+        IMPORTANTE: isso ainda NAO chama a API de verdade -- o JSON precisa
+        ser colado/enviado manualmente no corpo da requisicao. E so pra
+        validar que o reconhecimento do formato e a atualizacao dos
         casulos batem certinho, antes de plugar a chamada HTTP real
         (GET-only) mais pra frente."""
         data = await request.json()
@@ -750,9 +818,8 @@ def register_unified_routes(app) -> None:
         con.commit()
         add_movement(
             con, "ESTOQUE", None, "SNAPSHOT_ID_BRASIL_MANUAL",
-            f"{aplicados} casulos atualizados via JSON colado manualmente ({len(nao_encontrados)} não encontrados).",
+            f"{aplicados} casulos atualizados via JSON colado manualmente ({len(nao_encontrados)} nao encontrados).",
             user_id,
         )
         con.close()
         return {"aplicados": aplicados, "nao_encontrados": len(nao_encontrados), "total_recebido": len(itens)}
-
