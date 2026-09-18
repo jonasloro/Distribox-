@@ -21,7 +21,8 @@ from quality_module import init_quality_db, quality_card_data, register_quality_
 from processing_module import init_processing_db, processing_card_data, register_processing_routes
 from downstream_module import downstream_card_data, init_downstream_db, register_downstream_routes
 from unified_module import init_unified_db, register_unified_routes
-from supabase_module import verificar_login_supabase, seed_usuarios_supabase
+from supabase_module import verificar_login_supabase, seed_usuarios_supabase, seed_warehouse_supabase
+from warehouse_structure import gerar_todos_casulos
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("OUTLOG_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -902,6 +903,14 @@ def startup() -> None:
         ])
     except Exception as e:
         print(f"[aviso] não consegui popular usuarios no Supabase ainda: {e}")
+
+    # Popula os 19.582 casulos no Supabase (só na primeira vez — se a
+    # estrutura já existir lá, não mexe em nada). Mesma proteção contra
+    # Supabase indisponível: não derruba o app inteiro.
+    try:
+        seed_warehouse_supabase(gerar_todos_casulos)
+    except Exception as e:
+        print(f"[aviso] não consegui popular a estrutura de casulos no Supabase ainda: {e}")
 
 
 @app.get("/", response_class=HTMLResponse)
