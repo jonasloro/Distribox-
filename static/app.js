@@ -119,6 +119,7 @@ async function goTo(view) {
     if (view === "capacity-simulator") await renderCapacitySimulator();
     if (view === "sgo") await renderSgo();
     if (view === "sgo-indicators") await renderSgoIndicators();
+    if (view === "production") await renderProduction();
     if (view === "tasks") await renderTasks();
     if (view === "shipping") await renderShipping();
     if (view === "returns") await renderReturnsV3();
@@ -1770,6 +1771,30 @@ function zonesTable(zones){return `<table class="dash-table"><thead><tr><th>Zona
 function qualityTable(rows){return `<table class="dash-table"><thead><tr><th>Compra / SGO</th><th>Itens</th><th>Lotes</th><th>Status</th></tr></thead><tbody>${rows.map(c=>`<tr onclick="openCard(${c.id},'quality')"><td>${esc(c.purchase_id)}</td><td>${c.expected_total}</td><td>${c.item_count}</td><td>${statusBadge(c.status_label)}</td></tr>`).join('')||emptyRows(4)}</tbody></table><button class="panel-link" onclick="goTo('quality')">Ver todos ›</button>`;}
 function processingTable(rows){return `<table class="dash-table"><thead><tr><th>Compra / SGO</th><th>Tipo</th><th>Peças</th><th>Status</th></tr></thead><tbody>${rows.map(c=>`<tr onclick="openCard(${c.id},'processing')"><td>${esc(c.purchase_id)}</td><td><span class="type-tag">${c.purchase_mode==='GRADE'?'Grade':'Saldo'}</span></td><td>${c.expected_total}</td><td>${statusBadge(c.status_label)}</td></tr>`).join('')||emptyRows(4)}</tbody></table><button class="panel-link" onclick="goTo('processing')">Ver todos ›</button>`;}
 function returnsTable(rows){return `<table class="dash-table"><thead><tr><th>Devolução</th><th>Loja</th><th>Motivo</th><th>Status</th></tr></thead><tbody>${rows.map(r=>`<tr onclick="openReturn(${r.id})"><td>${esc(r.document_no)}</td><td>${esc(r.store||'—')}</td><td>${r.difference?'Divergência':'Conferência'}</td><td>${statusBadge(r.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table><button class="panel-link" onclick="goTo('returns-hub')">Ver todas ›</button>`;}
+
+async function renderProduction(){
+  setPage("Produção por Pessoa","Ranking de produtividade por setor e colaborador");
+  const data=await safeApi('/api/production/by-person',{sectors:{},totals:{}});
+  const order=["Recebimento","Qualidade","Processamento","Etiquetagem","Estocagem","Expedição"];
+  const sectors=order.filter(s=>data.sectors[s]);
+  const totalTasks=Object.values(data.totals).reduce((a,t)=>a+t.tasks,0);
+  const totalQty=Object.values(data.totals).reduce((a,t)=>a+t.qty,0);
+  const allPeople={};
+  Object.values(data.sectors).flat().forEach(p=>{allPeople[p.name]=(allPeople[p.name]||0)+p.qty;});
+  const topPerson=Object.entries(allPeople).sort((a,b)=>b[1]-a[1])[0];
+  $("mainContent").innerHTML=`
+    <div class="hero-kpis">
+      ${heroKpi("Tarefas concluídas",totalTasks.toLocaleString('pt-BR'),"Todos os setores","☑","blue","production")}
+      ${heroKpi("Peças produzidas",totalQty.toLocaleString('pt-BR'),"Todos os setores","▣","teal","production")}
+      ${heroKpi("Setores com apontamento",sectors.length,"De "+order.length,"⌁","blue","production")}
+      <div class="hero-card static-card"><div><span>Destaque geral</span><strong style="font-size:22px">${topPerson?esc(topPerson[0]):'—'}</strong><small>${topPerson?topPerson[1].toLocaleString('pt-BR')+' peças':'Sem registros ainda'}</small></div><span class="avatar" style="width:48px;height:48px;font-size:15px">${topPerson?esc(topPerson[0].split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase()):'—'}</span></div>
+    </div>
+    <div class="dash-row analytics-grid" style="grid-template-columns:repeat(3,1fr)">
+      ${sectors.map(s=>analyticsBars(s,data.sectors[s].map(p=>({label:p.name,value:p.qty,hint:`${p.tasks} tarefa${p.tasks===1?'':'s'}`})))).join('')}
+    </div>
+    ${!sectors.length?'<div class="state-panel"><b>Ainda sem apontamentos concluídos.</b><span>O ranking aparece aqui assim que os setores começarem a concluir tarefas com colaborador atribuído.</span></div>':''}
+  `;
+}
 
 async function renderStorageHub(){setPage("Estocagem","");const [cards,warehouse,analytics]=await Promise.all([safeApi('/api/cards?scope=storage',[]),safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const occupied=warehouse.locations.filter(l=>l.occupied_qty>0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}<div class="hero-kpis storage-kpis">${heroKpi("Aguardando estocagem",cards.length,"Cards","⌂","blue","storage")}${heroKpi("Endereços ocupados",occupied.length,"Casulos","▦","teal","warehouse")}${heroKpi("Endereços livres",warehouse.locations.filter(l=>l.status==='DISPONIVEL').length,"Casulos","◇","blue","warehouse")}<div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${warehouse.zones.length?Math.round(warehouse.zones.reduce((a,z)=>a+z.occupancy,0)/warehouse.zones.length):0}%</strong><small>Capacidade cadastrada</small></div></div></div><div class="dash-row storage-layout">${dashboardPanel("▦","Visualizador de casulos","",zonesTable(warehouse.zones))}${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Digite endereço, marca ou categoria" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.slice(0,12).map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}</div><section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;}
 function moduleTabs(items,current){if(items.some(([,view])=>view==="warehouse")&&!items.some(([,view])=>view==="warehouse-heatmap")){const position=items.findIndex(([,view])=>view==="warehouse")+1;items=[...items.slice(0,position),["Mapa de Calor","warehouse-heatmap"],...items.slice(position)];}return `<div class="module-tabs">${items.map(([label,view])=>`<button class="${view===current?'active':''}" onclick="goTo('${view}')">${label}</button>`).join('')}</div>`;}
