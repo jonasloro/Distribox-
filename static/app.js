@@ -120,6 +120,7 @@ async function goTo(view) {
     if (view === "sgo") await renderSgo();
     if (view === "sgo-indicators") await renderSgoIndicators();
     if (view === "production") await renderProduction();
+    if (view === "goat-indicators") await renderGoatIndicators();
     if (view === "tasks") await renderTasks();
     if (view === "shipping") await renderShipping();
     if (view === "returns") await renderReturnsV3();
@@ -159,7 +160,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 function showQuickHelp() {
-  $("modalBody").innerHTML = `<div class="card-title"><div><h2>Ajuda rápida</h2><div class="card-subtitle">OutLog One — fluxo operacional</div></div></div><div class="help-grid"><button onclick="closeModal();goTo('receiving')"><b>Recebimento</b><span>Físico, tiragem de 10% e triagem.</span></button><button onclick="closeModal();goTo('quality')"><b>Qualidade</b><span>Inspeções, amostras e resultados.</span></button><button onclick="closeModal();goTo('storage-hub')"><b>Estocagem</b><span>Fila, mapa, consulta e capacidade.</span></button><button onclick="closeModal();goTo('returns-hub')"><b>Devoluções</b><span>Conferência, pendências e indicadores.</span></button></div>`;
+  $("modalBody").innerHTML = `<div class="card-title"><div><h2>Ajuda rápida</h2><div class="card-subtitle">DistriLog — fluxo operacional</div></div></div><div class="help-grid"><button onclick="closeModal();goTo('receiving')"><b>Recebimento</b><span>Físico, tiragem de 10% e triagem.</span></button><button onclick="closeModal();goTo('quality')"><b>Qualidade</b><span>Inspeções, amostras e resultados.</span></button><button onclick="closeModal();goTo('storage-hub')"><b>Estocagem</b><span>Fila, mapa, consulta e capacidade.</span></button><button onclick="closeModal();goTo('returns-hub')"><b>Devoluções</b><span>Conferência, pendências e indicadores.</span></button></div>`;
   $("modal").classList.remove("hidden");
 }
 
@@ -1783,6 +1784,46 @@ const PROD_FIELDS={
 };
 let prodSector="Triagem", prodTab="apontamento", prodRunning={};
 
+async function renderGoatIndicators(){
+  setPage("Indicadores (GOAT)","Compras, fornecedores, perdas e divergências — importado do relatório de operações do GOAT");
+  const status=await safeApi('/api/goat/status',{last_import:null,sheets:[]});
+  const summary=await safeApi('/api/goat/summary',{totals:{},top_rejeitados_fornecedor:[],top_perdas_responsavel:[],fornecedores_criticos:[]});
+  const t=summary.totals||{};
+  $("mainContent").innerHTML=`
+    <div class="hero-kpis">
+      ${heroKpi("Peças rejeitadas",(t.rejeitados_pecas||0).toLocaleString('pt-BR'),`R$ ${(t.rejeitados_valor||0).toLocaleString('pt-BR')}`,"⚠","blue","goat-indicators")}
+      ${heroKpi("Peças em perda",(t.perdas_pecas||0).toLocaleString('pt-BR'),"Registradas pela equipe","▣","teal","goat-indicators")}
+      ${heroKpi("Entregas atrasadas",t.entregas_atrasadas||0,"Compras em atraso","⏱","blue","goat-indicators")}
+      ${heroKpi("Divergências",(t.divergencias_compra||0)+(t.divergencias_estoque||0),"Compra x recebido + estoque","≠","teal","goat-indicators")}
+    </div>
+    <div class="dash-row" style="grid-template-columns:1fr 1fr;gap:18px">
+      ${analyticsBars("Rejeitados por fornecedor",summary.top_rejeitados_fornecedor.map(f=>({label:f.name,value:f.pecas,hint:`R$ ${f.valor.toLocaleString('pt-BR')}`})))}
+      ${analyticsBars("Perdas por responsável",summary.top_perdas_responsavel.map(p=>({label:p.name,value:p.pecas})))}
+    </div>
+    <section class="dash-panel" style="margin-bottom:14px"><header><b>⚑</b><strong>Fornecedores críticos hoje</strong><span class="panel-count">${summary.fornecedores_criticos.length}</span></header>
+      <div class="dash-panel-body"><table class="dash-table"><tbody>
+        ${summary.fornecedores_criticos.map(f=>`<tr><td><b>${esc(f.name||'—')}</b></td><td>${f.atrasadas_hoje} atrasadas hoje</td><td>${f.acerto_pct}% de acerto no prazo</td></tr>`).join('')||emptyRows(3)}
+      </tbody></table></div></section>
+    <section class="dash-panel"><header><b>⇧</b><strong>Importar relatório do GOAT</strong><span class="panel-count">${status.last_import?fmtDateTime(status.last_import.imported_at):'nunca importado'}</span></header>
+      <div class="dash-panel-body" style="padding:14px 16px">
+        <p style="color:#9caec4;font-size:12px;margin:0 0 10px">Sobe o arquivo com todas as abas (Rejeitados, Perdas, Desempenho de fornecedores etc.) — cada importação substitui o snapshot anterior.</p>
+        <label class="primary" style="display:inline-block;cursor:pointer">Escolher arquivo .xlsx
+          <input type="file" accept=".xlsx,.xlsm" class="hidden" onchange="goatImport(this)"></label>
+        <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+          ${status.sheets.map(s=>`<span class="type-tag">${esc(s.label)} · ${s.rows}</span>`).join('')}
+        </div>
+      </div></section>`;
+}
+async function goatImport(input){
+  if(!input.files?.[0])return;
+  const form=new FormData();form.append('file',input.files[0]);
+  try{
+    const d=await api('/api/goat/import',{method:'POST',body:form});
+    toast(`${d.rows} registros importados em ${d.sheets} abas.`);
+    renderGoatIndicators();
+  }catch(e){toast(e.message);}
+}
+
 async function renderProduction(){
   setPage("Controle de Produção","Apontamento, produção por pessoa e importação — por setor");
   $("mainContent").innerHTML=`
@@ -1876,7 +1917,27 @@ async function prodPause(id){try{await api(`/api/production/entries/${id}/pause`
 async function prodResume(id){try{await api(`/api/production/entries/${id}/resume`,{method:'POST'});renderProdBody();}catch(e){toast(e.message);}}
 async function prodComplete(id){
   const qty=Number($("prodQtyFinal")?.value||0);
-  try{await api(`/api/production/entries/${id}/complete`,{method:'POST',body:JSON.stringify({quantidade:qty}),headers:{'Content-Type':'application/json'}});toast("Tarefa concluída.");renderProdBody();}catch(e){toast(e.message);}
+  try{await api(`/api/production/entries/${id}/complete`,{method:'POST',body:JSON.stringify({quantidade:qty}),headers:{'Content-Type':'application/json'}});toast("Tarefa concluída.");showTaskFeedback(id);renderProdBody();}catch(e){toast(e.message);}
+}
+function showTaskFeedback(entryId){
+  $("modalBody").innerHTML=`<div class="card-title"><div><h2>Como foi essa tarefa?</h2><div class="card-subtitle">Você encontrou dificuldades ao executar essa tarefa? Se sim, conta pra nós melhorarmos o processo.</div></div></div>
+    <div class="actions" style="margin-top:14px">
+      <button class="secondary" onclick="closeModal()">Não, correu tudo bem</button>
+      <button class="primary" onclick="prodFeedbackDetail(${entryId})">Sim, tive dificuldade</button>
+    </div>`;
+  $("modal").classList.remove("hidden");
+}
+function prodFeedbackDetail(entryId){
+  $("modalBody").innerHTML=`<div class="card-title"><div><h2>O que dificultou?</h2><div class="card-subtitle">Conta em poucas palavras — isso vai direto pra quem cuida do processo.</div></div></div>
+    <div class="field full"><textarea id="prodFeedbackText" placeholder="Ex.: etiqueta errada, falta de espaço no casulo, sistema travando..."></textarea></div>
+    <div class="actions" style="margin-top:10px"><button class="primary" onclick="prodFeedbackSend(${entryId})">Enviar</button></div>`;
+}
+async function prodFeedbackSend(entryId){
+  try{
+    await api(`/api/production/entries/${entryId}/feedback`,{method:'POST',body:JSON.stringify({teve_dificuldade:true,comentario:$("prodFeedbackText")?.value||""}),headers:{'Content-Type':'application/json'}});
+    toast("Obrigado pelo retorno!");
+    closeModal();
+  }catch(e){toast(e.message);}
 }
 async function prodImport(input){
   if(!input.files?.[0])return;
@@ -1936,7 +1997,7 @@ async function renderReturnHistory(){setPage("Histórico de Devoluções","");co
 
 async function renderRegistrations(){setPage("Cadastros","");const [users,w,a]=await Promise.all([safeApi('/api/users',[]),safeApi('/api/unified/warehouse',{zones:[]}),safeApi('/api/unified/warehouse/analytics',{groups:[]})]);$("mainContent").innerHTML=`<div class="dash-row registrations-grid">${dashboardPanel("♙","Usuários e perfis",`<span class="panel-count">${users.length}</span>`,`<table class="dash-table"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${statusBadge(u.role)}</td></tr>`).join('')}</tbody></table>`)}${dashboardPanel("▦","Zonas do CD",`<span class="panel-count">${w.zones.length}</span>`,`<table class="dash-table"><thead><tr><th>Zona</th><th>Descrição</th><th>Capacidade</th></tr></thead><tbody>${w.zones.map(z=>`<tr><td>${esc(z.code)}</td><td>${esc(z.name)}</td><td>${Number(z.capacity).toLocaleString('pt-BR')}</td></tr>`).join('')}</tbody></table>`)}${dashboardPanel("▣","Grupos do último relatório","",analyticsBarsBody((a.groups||[]).map(g=>({label:g.group_name,value:g.quantity,hint:g.gender}))))}</div>`;}
 
-async function renderSettings(){setPage("Configurações","");$("mainContent").innerHTML=`<div class="settings-grid"><button onclick="goTo('import')"><b>⇧</b><strong>Importar compras</strong><span>Atualizar Cards a partir do relatório Excel.</span></button><button onclick="goTo('tasks')"><b>☑</b><strong>Quadro de tarefas</strong><span>Responsáveis, prioridades e andamento.</span></button><button onclick="goTo('test')"><b>⚙</b><strong>Administração e testes</strong><span>Ferramentas controladas para validação.</span></button><button onclick="goTo('history')"><b>◷</b><strong>Histórico global</strong><span>Rastreabilidade das movimentações.</span></button></div><div class="state-panel"><b>OutLog One V3</b><span>Uma interface, um backend e uma base SQLite. As regras congeladas de Recebimento, Qualidade e Processamento permanecem no motor operacional.</span></div>`;}
+async function renderSettings(){setPage("Configurações","");$("mainContent").innerHTML=`<div class="settings-grid"><button onclick="goTo('import')"><b>⇧</b><strong>Importar compras</strong><span>Atualizar Cards a partir do relatório Excel.</span></button><button onclick="goTo('tasks')"><b>☑</b><strong>Quadro de tarefas</strong><span>Responsáveis, prioridades e andamento.</span></button><button onclick="goTo('test')"><b>⚙</b><strong>Administração e testes</strong><span>Ferramentas controladas para validação.</span></button><button onclick="goTo('history')"><b>◷</b><strong>Histórico global</strong><span>Rastreabilidade das movimentações.</span></button></div><div class="state-panel"><b>DistriLog V3</b><span>Uma interface, um backend e uma base SQLite. As regras congeladas de Recebimento, Qualidade e Processamento permanecem no motor operacional.</span></div>`;}
 
 setInterval(() => { if ($("clock")) $("clock").textContent = new Date().toLocaleString("pt-BR"); }, 1000);
 if (currentUser) enterApp();

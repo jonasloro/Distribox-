@@ -21,6 +21,7 @@ from quality_module import init_quality_db, quality_card_data, register_quality_
 from processing_module import init_processing_db, processing_card_data, register_processing_routes
 from downstream_module import downstream_card_data, init_downstream_db, register_downstream_routes
 from production_module import init_production_db, register_production_routes
+from goat_module import init_goat_db, register_goat_routes
 from unified_module import init_unified_db, register_unified_routes
 from supabase_module import verificar_login_supabase, seed_usuarios_supabase, seed_warehouse_supabase
 from warehouse_structure import gerar_todos_casulos
@@ -31,7 +32,7 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "controle_logistica.db"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="OutLog One - Operação Logística Integrada", version="3.1.0")
+app = FastAPI(title="DistriLog - Operação Logística Integrada", version="3.1.0")
 
 
 @app.middleware("http")
@@ -878,6 +879,7 @@ def startup() -> None:
     init_processing_db()
     init_downstream_db()
     init_production_db()
+    init_goat_db()
     init_unified_db()
 
     # Popula os 16 usuários padrão no Supabase (só na primeira vez — se já
@@ -1630,6 +1632,7 @@ register_quality_routes(app)
 register_processing_routes(app)
 register_downstream_routes(app)
 register_production_routes(app)
+register_goat_routes(app)
 register_unified_routes(app)
 
 @app.post("/api/test/cards/{card_id}/send-processing")

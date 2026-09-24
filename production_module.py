@@ -60,6 +60,14 @@ def init_production_db() -> None:
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_production_sector ON production_entries(sector, status);
+        CREATE TABLE IF NOT EXISTS production_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER NOT NULL,
+            sector TEXT NOT NULL,
+            teve_dificuldade INTEGER NOT NULL,
+            comentario TEXT,
+            created_at TEXT NOT NULL
+        );
         """
     )
     con.commit()
@@ -275,6 +283,19 @@ async def import_sheet(sector: str, file: UploadFile = File(...)) -> dict[str, A
     con.commit()
     con.close()
     return {"sector": sector, "imported": imported, "skipped": skipped}
+
+
+@router.post("/entries/{entry_id}/feedback")
+def submit_feedback(entry_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    con = db_connect()
+    entry = _get_entry(con, entry_id)
+    con.execute(
+        "INSERT INTO production_feedback(entry_id,sector,teve_dificuldade,comentario,created_at) VALUES(?,?,?,?,?)",
+        (entry_id, entry["sector"], 1 if payload.get("teve_dificuldade") else 0, (payload.get("comentario") or "").strip() or None, iso_now()),
+    )
+    con.commit()
+    con.close()
+    return {"ok": True}
 
 
 def register_production_routes(app: FastAPI) -> None:

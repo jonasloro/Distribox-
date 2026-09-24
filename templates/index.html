@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OutLog One — Operação Logística Integrada</title>
+  <title>DistriLog — Operação Logística Integrada</title>
   <link rel="stylesheet" href="/static/style.css?v=3.1.0">
 </head>
 <body>
   <section id="loginScreen" class="login-screen">
     <div class="login-panel">
-      <div class="login-logo">O1</div>
-      <h1>OUTLOG ONE</h1>
+      <div class="login-logo">DL</div>
+      <h1>DISTRILOG</h1>
       <p>Produção, estoque, expedição e devoluções em um só lugar</p>
       <label>Usuário</label>
       <input id="loginUsername" autocomplete="username">
@@ -24,8 +24,8 @@
   <div id="appShell" class="app-shell hidden">
     <aside class="sidebar">
       <div class="brand-block">
-        <div class="brand-logo">O1</div>
-        <div><strong>OUTLOG</strong><br>ONE <small>V3.1</small></div>
+        <div class="brand-logo">DL</div>
+        <div><strong>DISTRI</strong><br>LOG <small>V3.1</small></div>
       </div>
       <nav>
         <div class="nav-group">Operação</div>
@@ -39,6 +39,7 @@
         <button class="nav-item" data-view="shipping" onclick="goTo('shipping')"><span class="nav-icon">♧</span>Expedição</button>
         <button class="nav-item" data-view="returns-hub" onclick="goTo('returns-hub')"><span class="nav-icon">↩</span>Devoluções</button>
         <div class="nav-group">Gestão</div>
+        <button class="nav-item" data-view="goat-indicators" onclick="goTo('goat-indicators')"><span class="nav-icon">☑</span>Indicadores (GOAT)</button>
         <button class="nav-item" data-view="production" onclick="goTo('production')"><span class="nav-icon">★</span>Produção por Pessoa</button>
         <button class="nav-item" data-view="registrations" onclick="goTo('registrations')"><span class="nav-icon">▦</span>Cadastros</button>
         <button class="nav-item" data-view="settings" onclick="goTo('settings')"><span class="nav-icon">⚙</span>Configurações</button>
