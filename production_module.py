@@ -28,8 +28,10 @@ SKIP_HEADERS = {"pausas", "inicio 2", "termino 2", "duracao 2", "duracao", "tota
 
 
 def db_connect() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=10)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 

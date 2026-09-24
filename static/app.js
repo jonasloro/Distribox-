@@ -1839,22 +1839,26 @@ async function prodRenderApontamento(body){
 }
 
 function prodFormCard(fields){
-  return `<div class="field"><label>Responsável</label><input id="prodResp" placeholder="Nome do colaborador"></div>
-    <div class="field"><label>Quantidade</label><input id="prodQty" type="number" placeholder="0"></div>
-    ${fields.map((f,i)=>`<div class="field"><label>${esc(f[0])}</label>${f[1]==='select'?`<select id="prodField${i}">${f[2].map(o=>`<option>${esc(o)}</option>`).join('')}</select>`:`<input id="prodField${i}" type="${f[1]}" placeholder="—">`}</div>`).join('')}
-    <button class="primary" style="margin-top:10px;width:100%" onclick="prodStart()">▶ Iniciar tarefa</button>`;
+  return `<div class="prod-form">
+    <div class="field-row"><div class="field"><label>Responsável</label><input id="prodResp" placeholder="Nome do colaborador"></div>
+    <div class="field"><label>Quantidade</label><input id="prodQty" type="number" placeholder="0"></div></div>
+    <div class="field-row">${fields.map((f,i)=>`<div class="field"><label>${esc(f[0])}</label>${f[1]==='select'?`<select id="prodField${i}">${f[2].map(o=>`<option>${esc(o)}</option>`).join('')}</select>`:`<input id="prodField${i}" type="${f[1]}" placeholder="—">`}</div>`).join('')}</div>
+    <button class="primary" style="margin-top:4px;width:100%" onclick="prodStart()">▶ Iniciar tarefa</button>
+  </div>`;
 }
 
 function prodRunningCard(entry){
   const paused=entry.status==='PAUSADO';
-  return `<div class="summary-box" style="margin-bottom:12px"><span>Responsável</span><strong>${esc(entry.responsavel)}</strong></div>
-    <div class="summary-box" style="margin-bottom:12px"><span>Início</span><strong>${new Date(entry.inicio).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</strong></div>
+  return `<div class="prod-form">
+    <div class="field-row"><div class="summary-box"><span>Responsável</span><strong>${esc(entry.responsavel)}</strong></div>
+    <div class="summary-box"><span>Início</span><strong>${new Date(entry.inicio).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</strong></div></div>
     <div class="field"><label>Quantidade concluída</label><input id="prodQtyFinal" type="number" value="${entry.quantidade||0}"></div>
-    <div style="display:flex;gap:8px;margin-top:10px">
+    <div style="display:flex;gap:8px">
       ${paused?`<button class="primary" style="flex:1" onclick="prodResume(${entry.id})">▶ Retomar</button>`:`<button class="secondary" style="flex:1" onclick="prodPause(${entry.id})">⏸ Pausa</button>`}
       <button class="danger" style="flex:1" onclick="prodComplete(${entry.id})">■ Concluir</button>
     </div>
-    <div class="empty-visual" style="margin-top:10px">${paused?'Tarefa pausada':'Cronômetro em andamento'}</div>`;
+    <div class="empty-visual" style="padding:8px!important">${paused?'Tarefa pausada':'Cronômetro em andamento'}</div>
+  </div>`;
 }
 
 async function prodStart(){
@@ -1899,12 +1903,12 @@ async function prodRenderQuadro(body){
   const entries=await safeApi(`/api/production/entries?sector=${encodeURIComponent(prodSector)}&limit=30`,[]);
   const running=entries.filter(e=>e.status!=='CONCLUIDO');
   const done=entries.filter(e=>e.status==='CONCLUIDO').slice(0,10);
-  const card=e=>`<div class="task"><b>${esc(e.responsavel)}</b><br><small>${e.quantidade||0} pçs${e.status==='PAUSADO'?' · pausada':''}</small></div>`;
+  const card=e=>`<div class="prod-task"><b>${esc(e.responsavel)}</b><small>${e.quantidade||0} pçs${e.status==='PAUSADO'?' · pausada':''}</small></div>`;
   body.innerHTML=`<div class="dash-row" style="grid-template-columns:1fr 1fr;gap:18px">
     <section class="dash-panel"><header><b>◷</b><strong>Em execução</strong><span class="panel-count">${running.length}</span></header>
-      <div class="dash-panel-body">${running.map(card).join('')||'<div class="empty-visual">Nada em andamento agora.</div>'}</div></section>
+      <div class="dash-panel-body prod-tasks">${running.map(card).join('')||'<div class="empty-visual">Nada em andamento agora.</div>'}</div></section>
     <section class="dash-panel"><header><b>✓</b><strong>Concluído recentemente</strong><span class="panel-count">${done.length}</span></header>
-      <div class="dash-panel-body">${done.map(card).join('')||'<div class="empty-visual">Sem tarefas concluídas ainda.</div>'}</div></section>
+      <div class="dash-panel-body prod-tasks">${done.map(card).join('')||'<div class="empty-visual">Sem tarefas concluídas ainda.</div>'}</div></section>
   </div>`;
 }
 
