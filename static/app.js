@@ -96,7 +96,7 @@ function setPage(title, subtitle) {
 }
 
 function activeNav(view) {
-  const parent = ({storage:"storage-hub",warehouse:"storage-hub","warehouse-heatmap":"storage-hub","stock-stats":"storage-hub","capacity-simulator":"storage-hub",returns:"returns-hub","return-indicators":"returns-hub","return-history":"returns-hub",sgo:"sgo-indicators",tasks:"sgo-indicators",import:"sgo-indicators",test:"settings"})[view] || view;
+  const parent = ({storage:"storage-hub",warehouse:"storage-hub","warehouse-heatmap":"storage-hub","stock-stats":"storage-hub","capacity-simulator":"storage-hub",returns:"returns-hub","return-indicators":"returns-hub","return-history":"returns-hub",sgo:"settings",tasks:"settings",import:"settings",test:"settings"})[view] || view;
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === parent);
   });
@@ -1758,7 +1758,7 @@ async function renderDashboard() {
       ${dashboardPanel("⚙","Processamento",`<span class="panel-count">${processing.length}</span>`,processingTable(processing.slice(0,5)))}
       ${dashboardPanel("↩","Devoluções",`<span class="panel-count red-count">${returns.filter(r=>r.status!=="CONCLUIDA").length}</span>`,returnsTable(returns.slice(0,5)))}
     </div>
-    <div class="flow-strip">${[["🛒","Compra / SGO","sgo-indicators"],["⇩","Recebimento","receiving"],["◇","Qualidade","quality"],["⚙","Processamento","processing"],["♢","Etiquetagem","labeling"],["⌂","Estocagem","storage-hub"],["▣","Expedição / Devolução","returns-hub"]].map(([icon,label,view],i)=>`${i?'<i>→</i>':''}<button onclick="goTo('${view}')"><b>${icon}</b><span>${label}</span>${i===1?'<small>+ 10%</small>':''}</button>`).join("")}</div>
+    <div class="flow-strip">${[["🛒","Compras","import"],["⇩","Recebimento","receiving"],["◇","Qualidade","quality"],["⚙","Processamento","processing"],["♢","Etiquetagem","labeling"],["⌂","Estocagem","storage-hub"],["▣","Expedição / Devolução","returns-hub"]].map(([icon,label,view],i)=>`${i?'<i>→</i>':''}<button onclick="goTo('${view}')"><b>${icon}</b><span>${label}</span>${i===1?'<small>+ 10%</small>':''}</button>`).join("")}</div>
   </div>`;
 }
 
@@ -1772,28 +1772,140 @@ function qualityTable(rows){return `<table class="dash-table"><thead><tr><th>Com
 function processingTable(rows){return `<table class="dash-table"><thead><tr><th>Compra / SGO</th><th>Tipo</th><th>Peças</th><th>Status</th></tr></thead><tbody>${rows.map(c=>`<tr onclick="openCard(${c.id},'processing')"><td>${esc(c.purchase_id)}</td><td><span class="type-tag">${c.purchase_mode==='GRADE'?'Grade':'Saldo'}</span></td><td>${c.expected_total}</td><td>${statusBadge(c.status_label)}</td></tr>`).join('')||emptyRows(4)}</tbody></table><button class="panel-link" onclick="goTo('processing')">Ver todos ›</button>`;}
 function returnsTable(rows){return `<table class="dash-table"><thead><tr><th>Devolução</th><th>Loja</th><th>Motivo</th><th>Status</th></tr></thead><tbody>${rows.map(r=>`<tr onclick="openReturn(${r.id})"><td>${esc(r.document_no)}</td><td>${esc(r.store||'—')}</td><td>${r.difference?'Divergência':'Conferência'}</td><td>${statusBadge(r.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table><button class="panel-link" onclick="goTo('returns-hub')">Ver todas ›</button>`;}
 
+const PROD_SECTORS=["Triagem","Qualidade","Processamento","Etiquetagem","Estocagem","Expedição"];
+const PROD_FIELDS={
+  "Triagem":[["Grupo","select",["Calça","Blusa","Vestido","Bermuda","Sueter","Jaqueta","Acessório"]],["Gênero","select",["Feminino","Masculino"]],["Compra Por","select",["Grade","Saldo"]],["NF","text"]],
+  "Qualidade":[["Grupo","text"],["Marca","text"],["Fornecedor","text"],["NF-e","text"],["Status do Lote","select",["Aprovado","Reprovado","Parcial"]]],
+  "Processamento":[["Processo","select",["Entrada","Reprocesso"]],["Grupo","text"],["Gênero","select",["Feminino","Masculino"]],["Fornecedor","text"],["NF-e","text"]],
+  "Etiquetagem":[["Grupo","text"],["Gênero","select",["Feminino","Masculino"]],["Tipo de Etiqueta","select",["Personalizada","Padrão"]]],
+  "Estocagem":[["Marca","text"],["Grupo","text"],["Rua","text"],["Tamanho","text"],["Cor","text"]],
+  "Expedição":[["Procedimento","select",["Envio de Material","Separação de Pedido"]],["Qtd. Volumes","number"],["Qtd. NF-e","number"],["Observação","text"]],
+};
+let prodSector="Triagem", prodTab="apontamento", prodRunning={};
+
 async function renderProduction(){
-  setPage("Produção por Pessoa","Ranking de produtividade por setor e colaborador");
-  const data=await safeApi('/api/production/by-person',{sectors:{},totals:{}});
-  const order=["Recebimento","Qualidade","Processamento","Etiquetagem","Estocagem","Expedição"];
-  const sectors=order.filter(s=>data.sectors[s]);
-  const totalTasks=Object.values(data.totals).reduce((a,t)=>a+t.tasks,0);
-  const totalQty=Object.values(data.totals).reduce((a,t)=>a+t.qty,0);
-  const allPeople={};
-  Object.values(data.sectors).flat().forEach(p=>{allPeople[p.name]=(allPeople[p.name]||0)+p.qty;});
-  const topPerson=Object.entries(allPeople).sort((a,b)=>b[1]-a[1])[0];
+  setPage("Controle de Produção","Apontamento, produção por pessoa e importação — por setor");
   $("mainContent").innerHTML=`
+    <div class="module-tabs">${PROD_SECTORS.map(s=>`<button class="${s===prodSector?'active':''}" onclick="prodSetSector('${s}')">${esc(s)}</button>`).join('')}</div>
+    <div class="tabs" id="prodSubTabs" style="margin:14px 0 18px">
+      <button class="${prodTab==='apontamento'?'active':''}" onclick="prodSetTab('apontamento')">Apontamento</button>
+      <button class="${prodTab==='pessoa'?'active':''}" onclick="prodSetTab('pessoa')">Produção por pessoa</button>
+      <button class="${prodTab==='quadro'?'active':''}" onclick="prodSetTab('quadro')">Quadro de tarefas</button>
+    </div>
+    <div id="prodBody"></div>`;
+  await renderProdBody();
+}
+function prodSetSector(s){prodSector=s;renderProduction();}
+function prodSetTab(t){prodTab=t;renderProdBody();}
+
+async function renderProdBody(){
+  const body=$("prodBody");
+  if(!body)return;
+  if(prodTab==="apontamento") return prodRenderApontamento(body);
+  if(prodTab==="pessoa") return prodRenderPessoa(body);
+  return prodRenderQuadro(body);
+}
+
+async function prodRenderApontamento(body){
+  const [entries,ranking]=await Promise.all([
+    safeApi(`/api/production/entries?sector=${encodeURIComponent(prodSector)}&limit=6`,[]),
+    safeApi(`/api/production/by-person?sector=${encodeURIComponent(prodSector)}`,{sectors:{},totals:{}}),
+  ]);
+  const running=entries.find(e=>e.status!=='CONCLUIDO');
+  if(running) prodRunning[prodSector]=running; else delete prodRunning[prodSector];
+  const top=(ranking.sectors[prodSector]||[]).slice(0,4);
+  const fields=PROD_FIELDS[prodSector];
+  const kpi=ranking.totals[prodSector]||{tasks:0,qty:0};
+  body.innerHTML=`
     <div class="hero-kpis">
-      ${heroKpi("Tarefas concluídas",totalTasks.toLocaleString('pt-BR'),"Todos os setores","☑","blue","production")}
-      ${heroKpi("Peças produzidas",totalQty.toLocaleString('pt-BR'),"Todos os setores","▣","teal","production")}
-      ${heroKpi("Setores com apontamento",sectors.length,"De "+order.length,"⌁","blue","production")}
-      <div class="hero-card static-card"><div><span>Destaque geral</span><strong style="font-size:22px">${topPerson?esc(topPerson[0]):'—'}</strong><small>${topPerson?topPerson[1].toLocaleString('pt-BR')+' peças':'Sem registros ainda'}</small></div><span class="avatar" style="width:48px;height:48px;font-size:15px">${topPerson?esc(topPerson[0].split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase()):'—'}</span></div>
+      ${heroKpi("Tarefas concluídas",kpi.tasks.toLocaleString('pt-BR'),prodSector,"☑","blue","production")}
+      ${heroKpi("Peças processadas",kpi.qty.toLocaleString('pt-BR'),prodSector,"▣","teal","production")}
+      ${heroKpi("Peças / tarefa (média)",kpi.tasks?Math.round(kpi.qty/kpi.tasks).toLocaleString('pt-BR'):'0',"Média do setor","⌁","blue","production")}
+      ${heroKpi("Colaboradores",(ranking.sectors[prodSector]||[]).length,"No setor","☺","teal","production")}
     </div>
-    <div class="dash-row analytics-grid" style="grid-template-columns:repeat(3,1fr)">
-      ${sectors.map(s=>analyticsBars(s,data.sectors[s].map(p=>({label:p.name,value:p.qty,hint:`${p.tasks} tarefa${p.tasks===1?'':'s'}`})))).join('')}
+    <div class="dash-row" style="grid-template-columns:1.1fr 1.5fr;gap:18px">
+      <section class="dash-panel"><header><b>✎</b><strong>${running?'Tarefa em andamento':'Novo registro'}</strong><span class="panel-count">${esc(prodSector)}</span></header>
+        <div class="dash-panel-body">
+          ${running?prodRunningCard(running):prodFormCard(fields)}
+        </div>
+      </section>
+      <section class="dash-panel"><header><b>☰</b><strong>Últimos registros</strong><span class="panel-count">hoje</span></header>
+        <div class="dash-panel-body">${analyticsBarsBody(top.map(p=>({label:p.name,value:p.qty,hint:`${p.tasks} tarefa${p.tasks===1?'':'s'}`})))}
+        <label class="panel-link" style="display:inline-block;margin-top:12px;cursor:pointer">Importar planilha do setor
+          <input type="file" accept=".xlsx,.xlsm" class="hidden" onchange="prodImport(this)"></label>
+        </div>
+      </section>
+    </div>`;
+}
+
+function prodFormCard(fields){
+  return `<div class="field"><label>Responsável</label><input id="prodResp" placeholder="Nome do colaborador"></div>
+    <div class="field"><label>Quantidade</label><input id="prodQty" type="number" placeholder="0"></div>
+    ${fields.map((f,i)=>`<div class="field"><label>${esc(f[0])}</label>${f[1]==='select'?`<select id="prodField${i}">${f[2].map(o=>`<option>${esc(o)}</option>`).join('')}</select>`:`<input id="prodField${i}" type="${f[1]}" placeholder="—">`}</div>`).join('')}
+    <button class="primary" style="margin-top:10px;width:100%" onclick="prodStart()">▶ Iniciar tarefa</button>`;
+}
+
+function prodRunningCard(entry){
+  const paused=entry.status==='PAUSADO';
+  return `<div class="summary-box" style="margin-bottom:12px"><span>Responsável</span><strong>${esc(entry.responsavel)}</strong></div>
+    <div class="summary-box" style="margin-bottom:12px"><span>Início</span><strong>${new Date(entry.inicio).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</strong></div>
+    <div class="field"><label>Quantidade concluída</label><input id="prodQtyFinal" type="number" value="${entry.quantidade||0}"></div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      ${paused?`<button class="primary" style="flex:1" onclick="prodResume(${entry.id})">▶ Retomar</button>`:`<button class="secondary" style="flex:1" onclick="prodPause(${entry.id})">⏸ Pausa</button>`}
+      <button class="danger" style="flex:1" onclick="prodComplete(${entry.id})">■ Concluir</button>
     </div>
-    ${!sectors.length?'<div class="state-panel"><b>Ainda sem apontamentos concluídos.</b><span>O ranking aparece aqui assim que os setores começarem a concluir tarefas com colaborador atribuído.</span></div>':''}
-  `;
+    <div class="empty-visual" style="margin-top:10px">${paused?'Tarefa pausada':'Cronômetro em andamento'}</div>`;
+}
+
+async function prodStart(){
+  const resp=$("prodResp")?.value?.trim();
+  if(!resp){toast("Informe o responsável.");return;}
+  const fields=PROD_FIELDS[prodSector];
+  const campos={};
+  fields.forEach((f,i)=>{const v=$(`prodField${i}`)?.value;if(v)campos[f[0]]=v;});
+  try{
+    await api('/api/production/entries',{method:'POST',body:JSON.stringify({sector:prodSector,responsavel:resp,quantidade:Number($("prodQty")?.value||0),campos}),headers:{'Content-Type':'application/json'}});
+    renderProdBody();
+  }catch(e){toast(e.message);}
+}
+async function prodPause(id){try{await api(`/api/production/entries/${id}/pause`,{method:'POST'});renderProdBody();}catch(e){toast(e.message);}}
+async function prodResume(id){try{await api(`/api/production/entries/${id}/resume`,{method:'POST'});renderProdBody();}catch(e){toast(e.message);}}
+async function prodComplete(id){
+  const qty=Number($("prodQtyFinal")?.value||0);
+  try{await api(`/api/production/entries/${id}/complete`,{method:'POST',body:JSON.stringify({quantidade:qty}),headers:{'Content-Type':'application/json'}});toast("Tarefa concluída.");renderProdBody();}catch(e){toast(e.message);}
+}
+async function prodImport(input){
+  if(!input.files?.[0])return;
+  const form=new FormData();form.append('file',input.files[0]);
+  try{
+    const d=await api(`/api/production/import?sector=${encodeURIComponent(prodSector)}`,{method:'POST',body:form});
+    toast(`${d.imported} registros importados (${d.skipped} ignorados).`);
+    renderProdBody();
+  }catch(e){toast(e.message);}
+}
+
+async function prodRenderPessoa(body){
+  const data=await safeApi(`/api/production/by-person?sector=${encodeURIComponent(prodSector)}`,{sectors:{},totals:{}});
+  const rows=data.sectors[prodSector]||[];
+  const max=Math.max(1,...rows.map(r=>r.qty));
+  body.innerHTML=`<section class="dash-panel"><header><b>▥</b><strong>Produção por pessoa</strong><span class="panel-count">${esc(prodSector)} · peças totais</span></header>
+    <div class="dash-panel-body">
+      ${rows.length?`<div class="analytics-bars">${rows.map(r=>`<div><span>${esc(r.name)}</span><i><b style="width:${r.qty*100/max}%"></b></i><strong>${r.qty.toLocaleString('pt-BR')}</strong><small>${r.tasks} tarefa${r.tasks===1?'':'s'}</small></div>`).join('')}</div>`
+      :'<div class="empty-visual">Ainda sem tarefas concluídas neste setor.</div>'}
+    </div></section>`;
+}
+
+async function prodRenderQuadro(body){
+  const entries=await safeApi(`/api/production/entries?sector=${encodeURIComponent(prodSector)}&limit=30`,[]);
+  const running=entries.filter(e=>e.status!=='CONCLUIDO');
+  const done=entries.filter(e=>e.status==='CONCLUIDO').slice(0,10);
+  const card=e=>`<div class="task"><b>${esc(e.responsavel)}</b><br><small>${e.quantidade||0} pçs${e.status==='PAUSADO'?' · pausada':''}</small></div>`;
+  body.innerHTML=`<div class="dash-row" style="grid-template-columns:1fr 1fr;gap:18px">
+    <section class="dash-panel"><header><b>◷</b><strong>Em execução</strong><span class="panel-count">${running.length}</span></header>
+      <div class="dash-panel-body">${running.map(card).join('')||'<div class="empty-visual">Nada em andamento agora.</div>'}</div></section>
+    <section class="dash-panel"><header><b>✓</b><strong>Concluído recentemente</strong><span class="panel-count">${done.length}</span></header>
+      <div class="dash-panel-body">${done.map(card).join('')||'<div class="empty-visual">Sem tarefas concluídas ainda.</div>'}</div></section>
+  </div>`;
 }
 
 async function renderStorageHub(){setPage("Estocagem","");const [cards,warehouse,analytics]=await Promise.all([safeApi('/api/cards?scope=storage',[]),safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const occupied=warehouse.locations.filter(l=>l.occupied_qty>0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}<div class="hero-kpis storage-kpis">${heroKpi("Aguardando estocagem",cards.length,"Cards","⌂","blue","storage")}${heroKpi("Endereços ocupados",occupied.length,"Casulos","▦","teal","warehouse")}${heroKpi("Endereços livres",warehouse.locations.filter(l=>l.status==='DISPONIVEL').length,"Casulos","◇","blue","warehouse")}<div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${warehouse.zones.length?Math.round(warehouse.zones.reduce((a,z)=>a+z.occupancy,0)/warehouse.zones.length):0}%</strong><small>Capacidade cadastrada</small></div></div></div><div class="dash-row storage-layout">${dashboardPanel("▦","Visualizador de casulos","",zonesTable(warehouse.zones))}${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Digite endereço, marca ou categoria" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.slice(0,12).map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}</div><section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;}

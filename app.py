@@ -20,6 +20,7 @@ from openpyxl import load_workbook
 from quality_module import init_quality_db, quality_card_data, register_quality_routes
 from processing_module import init_processing_db, processing_card_data, register_processing_routes
 from downstream_module import downstream_card_data, init_downstream_db, register_downstream_routes
+from production_module import init_production_db, register_production_routes
 from unified_module import init_unified_db, register_unified_routes
 from supabase_module import verificar_login_supabase, seed_usuarios_supabase, seed_warehouse_supabase
 from warehouse_structure import gerar_todos_casulos
@@ -874,6 +875,7 @@ def startup() -> None:
     init_quality_db()
     init_processing_db()
     init_downstream_db()
+    init_production_db()
     init_unified_db()
 
     # Popula os 16 usuários padrão no Supabase (só na primeira vez — se já
@@ -1625,6 +1627,7 @@ async def simulate_costura_return(card_id: int, request: Request):
 register_quality_routes(app)
 register_processing_routes(app)
 register_downstream_routes(app)
+register_production_routes(app)
 register_unified_routes(app)
 
 @app.post("/api/test/cards/{card_id}/send-processing")
@@ -1651,69 +1654,6 @@ async def simulate_send_processing(card_id: int, request: Request):
     con.commit()
     con.close()
     return {"ok": True}
-
-@app.get("/api/production/by-person")
-def production_by_person():
-    """Ranking de produção por colaborador, agregando os apontamentos já
-    registrados em cada setor (Qualidade, Processamento, Etiquetagem/
-    Estocagem/Expedição via downstream_assignments e Recebimento)."""
-    con = db_connect()
-    sectors: dict[str, list[dict[str, Any]]] = {}
-
-    def add(sector: str, rows: list[sqlite3.Row]) -> None:
-        agg: dict[str, dict[str, Any]] = {}
-        for r in rows:
-            name = r["name"] or "—"
-            entry = agg.setdefault(name, {"name": name, "tasks": 0, "qty": 0})
-            entry["tasks"] += 1
-            entry["qty"] += int(r["qty"] or 0)
-        sectors[sector] = sorted(agg.values(), key=lambda x: -x["qty"])
-
-    add("Qualidade", con.execute(
-        """SELECT u.name name, COALESCE(SUM(qa.inspected_qty),0) qty
-           FROM quality_workers qw
-           JOIN users u ON u.id=qw.inspector_id
-           LEFT JOIN quality_assignments qa ON qa.worker_id=qw.id
-           WHERE qw.status='CONCLUIDA'
-           GROUP BY qw.id, u.name""").fetchall())
-
-    add("Processamento", con.execute(
-        """SELECT u.name name, pw.produced_qty qty
-           FROM processing_workers pw
-           JOIN users u ON u.id=pw.user_id
-           WHERE pw.status='CONCLUIDA'""").fetchall())
-
-    add("Etiquetagem", con.execute(
-        """SELECT u.name name, da.completed_qty qty
-           FROM downstream_assignments da
-           JOIN downstream_operations op ON op.id=da.operation_id
-           JOIN users u ON u.id=da.worker_user_id
-           WHERE op.sector='ETIQUETAGEM' AND da.status='CONCLUIDA'""").fetchall())
-
-    add("Estocagem", con.execute(
-        """SELECT u.name name, da.completed_qty qty
-           FROM downstream_assignments da
-           JOIN downstream_operations op ON op.id=da.operation_id
-           JOIN users u ON u.id=da.worker_user_id
-           WHERE op.sector='ESTOCAGEM' AND da.status='CONCLUIDA'""").fetchall())
-
-    add("Expedição", con.execute(
-        """SELECT u.name name, da.completed_qty qty
-           FROM downstream_assignments da
-           JOIN downstream_operations op ON op.id=da.operation_id
-           JOIN users u ON u.id=da.worker_user_id
-           WHERE op.sector='EXPEDICAO' AND da.status='CONCLUIDA'""").fetchall())
-
-    add("Recebimento", con.execute(
-        """SELECT u.name name, COALESCE(r.received_qty,0) qty
-           FROM receivings r
-           JOIN users u ON u.id=r.physical_completed_by
-           WHERE r.physical_status='CONCLUIDO'""").fetchall())
-
-    con.close()
-    totals = {s: {"tasks": sum(p["tasks"] for p in rows), "qty": sum(p["qty"] for p in rows)} for s, rows in sectors.items()}
-    return {"sectors": sectors, "totals": totals}
-
 
 @app.get("/api/history")
 def global_history(limit: int = 300):
