@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
 from datetime import date, datetime, time as dtime
 from pathlib import Path
 from typing import Any, Optional
@@ -10,15 +8,13 @@ from typing import Any, Optional
 from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from openpyxl import load_workbook
 
+from supabase_module import pg_connect
+
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.getenv("OUTLOG_DATA_DIR", str(BASE_DIR / "data"))).resolve() / "controle_logistica.db"
 router = APIRouter(prefix="/api/production", tags=["Produção"])
 
 SECTORS = ["Triagem", "Qualidade", "Processamento", "Etiquetagem", "Estocagem", "Expedição"]
 
-# Cabeçalhos reconhecidos ao importar as planilhas antigas (AppSheet). Tudo que não
-# cair nessas chaves vira campo extra (guardado em `campos`), então qualquer coluna
-# a mais da planilha do usuário não quebra a importação.
 QTY_HEADERS = {"quantidade", "quantidade feita", "quantidade total", "quantidade de volumes"}
 RESP_HEADERS = {"responsavel"}
 DATA_HEADERS = {"data"}
@@ -27,54 +23,49 @@ TERMINO_HEADERS = {"termino"}
 SKIP_HEADERS = {"pausas", "inicio 2", "termino 2", "duracao 2", "duracao", "total"}
 
 
-def db_connect() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH, timeout=10)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    return con
-
-
 def iso_now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
 def init_production_db() -> None:
-    con = db_connect()
-    con.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS production_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sector TEXT NOT NULL,
-            responsavel TEXT NOT NULL,
-            campos TEXT,
-            quantidade INTEGER NOT NULL DEFAULT 0,
-            data TEXT,
-            inicio TEXT,
-            termino TEXT,
-            pausas_seconds INTEGER NOT NULL DEFAULT 0,
-            pause_started_at TEXT,
-            duracao_seconds INTEGER,
-            status TEXT NOT NULL DEFAULT 'EM_ANDAMENTO',
-            source TEXT NOT NULL DEFAULT 'APP',
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_production_sector ON production_entries(sector, status);
-        CREATE TABLE IF NOT EXISTS production_feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id INTEGER NOT NULL,
-            sector TEXT NOT NULL,
-            teve_dificuldade INTEGER NOT NULL,
-            comentario TEXT,
-            created_at TEXT NOT NULL
-        );
-        """
-    )
-    con.commit()
-    con.close()
+    try:
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS production_entries (
+                        id SERIAL PRIMARY KEY,
+                        sector TEXT NOT NULL,
+                        responsavel TEXT NOT NULL,
+                        campos TEXT,
+                        quantidade INTEGER NOT NULL DEFAULT 0,
+                        data TEXT,
+                        inicio TEXT,
+                        termino TEXT,
+                        pausas_seconds INTEGER NOT NULL DEFAULT 0,
+                        pause_started_at TEXT,
+                        duracao_seconds INTEGER,
+                        status TEXT NOT NULL DEFAULT 'EM_ANDAMENTO',
+                        source TEXT NOT NULL DEFAULT 'APP',
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_production_sector ON production_entries(sector, status);
+                    CREATE TABLE IF NOT EXISTS production_feedback (
+                        id SERIAL PRIMARY KEY,
+                        entry_id INTEGER NOT NULL,
+                        sector TEXT NOT NULL,
+                        teve_dificuldade INTEGER NOT NULL,
+                        comentario TEXT,
+                        created_at TEXT NOT NULL
+                    );
+                    """
+                )
+            con.commit()
+    except RuntimeError as e:
+        print(f"[aviso] Produção: {e}")
 
 
-def _row(r: sqlite3.Row) -> dict[str, Any]:
+def _row(r: dict[str, Any]) -> dict[str, Any]:
     d = dict(r)
     d["campos"] = json.loads(d["campos"]) if d.get("campos") else {}
     return d
@@ -88,22 +79,26 @@ def start_entry(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(400, "Setor inválido.")
     if not responsavel:
         raise HTTPException(400, "Informe o responsável.")
-    con = db_connect()
     now = iso_now()
-    cur = con.execute(
-        """INSERT INTO production_entries(sector,responsavel,campos,quantidade,data,inicio,status,created_at)
-           VALUES(?,?,?,?,?,?, 'EM_ANDAMENTO',?)""",
-        (sector, responsavel, json.dumps(payload.get("campos") or {}, ensure_ascii=False),
-         int(payload.get("quantidade") or 0), date.today().isoformat(), now, now),
-    )
-    con.commit()
-    entry = con.execute("SELECT * FROM production_entries WHERE id=?", (cur.lastrowid,)).fetchone()
-    con.close()
+    try:
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO production_entries(sector,responsavel,campos,quantidade,data,inicio,status,created_at)
+                       VALUES(%s,%s,%s,%s,%s,%s,'EM_ANDAMENTO',%s) RETURNING *""",
+                    (sector, responsavel, json.dumps(payload.get("campos") or {}, ensure_ascii=False),
+                     int(payload.get("quantidade") or 0), date.today().isoformat(), now, now),
+                )
+                entry = cur.fetchone()
+            con.commit()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
     return _row(entry)
 
 
-def _get_entry(con: sqlite3.Connection, entry_id: int) -> sqlite3.Row:
-    entry = con.execute("SELECT * FROM production_entries WHERE id=?", (entry_id,)).fetchone()
+def _get_entry(cur, entry_id: int) -> dict[str, Any]:
+    cur.execute("SELECT * FROM production_entries WHERE id=%s", (entry_id,))
+    entry = cur.fetchone()
     if not entry:
         raise HTTPException(404, "Registro não encontrado.")
     return entry
@@ -111,90 +106,100 @@ def _get_entry(con: sqlite3.Connection, entry_id: int) -> sqlite3.Row:
 
 @router.post("/entries/{entry_id}/pause")
 def pause_entry(entry_id: int) -> dict[str, Any]:
-    con = db_connect()
-    entry = _get_entry(con, entry_id)
-    if entry["status"] != "EM_ANDAMENTO":
-        con.close()
-        raise HTTPException(400, "Só é possível pausar uma tarefa em andamento.")
-    con.execute("UPDATE production_entries SET status='PAUSADO', pause_started_at=? WHERE id=?", (iso_now(), entry_id))
-    con.commit()
-    entry = con.execute("SELECT * FROM production_entries WHERE id=?", (entry_id,)).fetchone()
-    con.close()
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            entry = _get_entry(cur, entry_id)
+            if entry["status"] != "EM_ANDAMENTO":
+                raise HTTPException(400, "Só é possível pausar uma tarefa em andamento.")
+            cur.execute(
+                "UPDATE production_entries SET status='PAUSADO', pause_started_at=%s WHERE id=%s RETURNING *",
+                (iso_now(), entry_id),
+            )
+            entry = cur.fetchone()
+        con.commit()
     return _row(entry)
 
 
 @router.post("/entries/{entry_id}/resume")
 def resume_entry(entry_id: int) -> dict[str, Any]:
-    con = db_connect()
-    entry = _get_entry(con, entry_id)
-    if entry["status"] != "PAUSADO":
-        con.close()
-        raise HTTPException(400, "Essa tarefa não está pausada.")
-    elapsed = (datetime.fromisoformat(iso_now()) - datetime.fromisoformat(entry["pause_started_at"])).total_seconds()
-    con.execute(
-        "UPDATE production_entries SET status='EM_ANDAMENTO', pausas_seconds=pausas_seconds+?, pause_started_at=NULL WHERE id=?",
-        (int(elapsed), entry_id),
-    )
-    con.commit()
-    entry = con.execute("SELECT * FROM production_entries WHERE id=?", (entry_id,)).fetchone()
-    con.close()
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            entry = _get_entry(cur, entry_id)
+            if entry["status"] != "PAUSADO":
+                raise HTTPException(400, "Essa tarefa não está pausada.")
+            elapsed = (datetime.fromisoformat(iso_now()) - datetime.fromisoformat(entry["pause_started_at"])).total_seconds()
+            cur.execute(
+                """UPDATE production_entries SET status='EM_ANDAMENTO', pausas_seconds=pausas_seconds+%s,
+                   pause_started_at=NULL WHERE id=%s RETURNING *""",
+                (int(elapsed), entry_id),
+            )
+            entry = cur.fetchone()
+        con.commit()
     return _row(entry)
 
 
 @router.post("/entries/{entry_id}/complete")
 def complete_entry(entry_id: int, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
-    con = db_connect()
-    entry = _get_entry(con, entry_id)
-    if entry["status"] == "CONCLUIDO":
-        con.close()
-        raise HTTPException(400, "Essa tarefa já foi concluída.")
-    pausas = entry["pausas_seconds"]
-    if entry["status"] == "PAUSADO" and entry["pause_started_at"]:
-        pausas += int((datetime.fromisoformat(iso_now()) - datetime.fromisoformat(entry["pause_started_at"])).total_seconds())
-    termino = iso_now()
-    total = int((datetime.fromisoformat(termino) - datetime.fromisoformat(entry["inicio"])).total_seconds())
-    duracao = max(0, total - pausas)
-    quantidade = payload.get("quantidade")
-    con.execute(
-        """UPDATE production_entries SET status='CONCLUIDO', termino=?, pausas_seconds=?, pause_started_at=NULL,
-           duracao_seconds=?, quantidade=COALESCE(?,quantidade) WHERE id=?""",
-        (termino, pausas, duracao, quantidade, entry_id),
-    )
-    con.commit()
-    entry = con.execute("SELECT * FROM production_entries WHERE id=?", (entry_id,)).fetchone()
-    con.close()
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            entry = _get_entry(cur, entry_id)
+            if entry["status"] == "CONCLUIDO":
+                raise HTTPException(400, "Essa tarefa já foi concluída.")
+            pausas = entry["pausas_seconds"]
+            if entry["status"] == "PAUSADO" and entry["pause_started_at"]:
+                pausas += int((datetime.fromisoformat(iso_now()) - datetime.fromisoformat(entry["pause_started_at"])).total_seconds())
+            termino = iso_now()
+            total = int((datetime.fromisoformat(termino) - datetime.fromisoformat(entry["inicio"])).total_seconds())
+            duracao = max(0, total - pausas)
+            quantidade = payload.get("quantidade")
+            cur.execute(
+                """UPDATE production_entries SET status='CONCLUIDO', termino=%s, pausas_seconds=%s,
+                   pause_started_at=NULL, duracao_seconds=%s, quantidade=COALESCE(%s,quantidade)
+                   WHERE id=%s RETURNING *""",
+                (termino, pausas, duracao, quantidade, entry_id),
+            )
+            entry = cur.fetchone()
+        con.commit()
     return _row(entry)
 
 
 @router.get("/entries")
 def list_entries(sector: Optional[str] = None, status: Optional[str] = None, limit: int = 20) -> list[dict[str, Any]]:
-    con = db_connect()
-    query = "SELECT * FROM production_entries WHERE 1=1"
-    params: list[Any] = []
-    if sector:
-        query += " AND sector=?"
-        params.append(sector)
-    if status:
-        query += " AND status=?"
-        params.append(status)
-    query += " ORDER BY id DESC LIMIT ?"
-    params.append(max(1, min(limit, 200)))
-    rows = con.execute(query, params).fetchall()
-    con.close()
+    try:
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                query = "SELECT * FROM production_entries WHERE 1=1"
+                params: list[Any] = []
+                if sector:
+                    query += " AND sector=%s"
+                    params.append(sector)
+                if status:
+                    query += " AND status=%s"
+                    params.append(status)
+                query += " ORDER BY id DESC LIMIT %s"
+                params.append(max(1, min(limit, 200)))
+                cur.execute(query, params)
+                rows = cur.fetchall()
+    except RuntimeError:
+        return []
     return [_row(r) for r in rows]
 
 
 @router.get("/by-person")
 def production_by_person(sector: Optional[str] = None) -> dict[str, Any]:
-    con = db_connect()
-    query = "SELECT sector, responsavel, quantidade FROM production_entries WHERE status='CONCLUIDO'"
-    params: list[Any] = []
-    if sector:
-        query += " AND sector=?"
-        params.append(sector)
-    rows = con.execute(query, params).fetchall()
-    con.close()
+    try:
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                query = "SELECT sector, responsavel, quantidade FROM production_entries WHERE status='CONCLUIDO'"
+                params: list[Any] = []
+                if sector:
+                    query += " AND sector=%s"
+                    params.append(sector)
+                cur.execute(query, params)
+                rows = cur.fetchall()
+    except RuntimeError:
+        rows = []
     sectors: dict[str, dict[str, dict[str, Any]]] = {}
     for r in rows:
         agg = sectors.setdefault(r["sector"], {})
@@ -204,6 +209,21 @@ def production_by_person(sector: Optional[str] = None) -> dict[str, Any]:
     result = {s: sorted(people.values(), key=lambda x: -x["qty"]) for s, people in sectors.items()}
     totals = {s: {"tasks": sum(p["tasks"] for p in people), "qty": sum(p["qty"] for p in people)} for s, people in result.items()}
     return {"sectors": result, "totals": totals}
+
+
+@router.post("/entries/{entry_id}/feedback")
+def submit_feedback(entry_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            entry = _get_entry(cur, entry_id)
+            cur.execute(
+                """INSERT INTO production_feedback(entry_id,sector,teve_dificuldade,comentario,created_at)
+                   VALUES(%s,%s,%s,%s,%s)""",
+                (entry_id, entry["sector"], 1 if payload.get("teve_dificuldade") else 0,
+                 (payload.get("comentario") or "").strip() or None, iso_now()),
+            )
+        con.commit()
+    return {"ok": True}
 
 
 def _cell_to_text(value: Any) -> Any:
@@ -231,9 +251,9 @@ async def import_sheet(sector: str, file: UploadFile = File(...)) -> dict[str, A
     headers = [str(h).strip() if h else "" for h in raw_headers]
     norm = [h.lower() for h in headers]
 
-    con = db_connect()
     imported = 0
     skipped = 0
+    batch: list[tuple] = []
     for row in rows_iter:
         if not any(v is not None for v in row):
             continue
@@ -273,29 +293,25 @@ async def import_sheet(sector: str, file: UploadFile = File(...)) -> dict[str, A
             if k not in RESP_HEADERS | QTY_HEADERS | DATA_HEADERS | INICIO_HEADERS | TERMINO_HEADERS | SKIP_HEADERS
             and v not in (None, "")
         }
-        con.execute(
-            """INSERT INTO production_entries(sector,responsavel,campos,quantidade,data,inicio,termino,duracao_seconds,status,source,created_at)
-               VALUES(?,?,?,?,?,?,?,?, 'CONCLUIDO','IMPORTACAO',?)""",
-            (sector, str(responsavel).strip(), json.dumps(campos, ensure_ascii=False), qty,
-             data_iso, inicio_iso, termino_iso, duracao, iso_now()),
-        )
+        batch.append((
+            sector, str(responsavel).strip(), json.dumps(campos, ensure_ascii=False), qty,
+            data_iso, inicio_iso, termino_iso, duracao, iso_now(),
+        ))
         imported += 1
-    con.commit()
-    con.close()
+
+    try:
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                if batch:
+                    cur.executemany(
+                        """INSERT INTO production_entries(sector,responsavel,campos,quantidade,data,inicio,termino,duracao_seconds,status,source,created_at)
+                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'CONCLUIDO','IMPORTACAO',%s)""",
+                        batch,
+                    )
+            con.commit()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
     return {"sector": sector, "imported": imported, "skipped": skipped}
-
-
-@router.post("/entries/{entry_id}/feedback")
-def submit_feedback(entry_id: int, payload: dict[str, Any]) -> dict[str, Any]:
-    con = db_connect()
-    entry = _get_entry(con, entry_id)
-    con.execute(
-        "INSERT INTO production_feedback(entry_id,sector,teve_dificuldade,comentario,created_at) VALUES(?,?,?,?,?)",
-        (entry_id, entry["sector"], 1 if payload.get("teve_dificuldade") else 0, (payload.get("comentario") or "").strip() or None, iso_now()),
-    )
-    con.commit()
-    con.close()
-    return {"ok": True}
 
 
 def register_production_routes(app: FastAPI) -> None:
