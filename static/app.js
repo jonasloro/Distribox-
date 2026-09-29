@@ -507,6 +507,7 @@ function renderReceivingTab() {
   if (cardData.status === "AGUARDANDO_RECEBIMENTO_RETORNO") {
     $("cardTab").innerHTML = receivingFormHtml(true);
     window.setTimeout(refreshTimerDisplay, 500);
+    loadPositionAllocator(cardData.id, "RM");
     return;
   }
   if (cardData.status === "EM_COSTURA_CD01" || cardData.receiving?.receiving_type === "COSTURA") {
@@ -516,6 +517,36 @@ function renderReceivingTab() {
   const isReturn = cardData.receiving?.receiving_type === "RETORNO" || cardData.receiving_type === "RETORNO";
   $("cardTab").innerHTML = receivingFormHtml(isReturn);
   window.setTimeout(refreshTimerDisplay, 500);
+  if (cardData.receiving?.physical_status !== "CONCLUIDO") loadPositionAllocator(cardData.id, "RM");
+}
+
+async function loadPositionAllocator(cardId, setor){
+  const box=$("posAllocBox");
+  if(!box)return;
+  const [status,suggestion]=await Promise.all([
+    safeApi(`/api/positions/cards/${cardId}/status?setor=${setor}`,{total_alocado:0,posicoes:[]}),
+    safeApi(`/api/positions/suggest?setor=${setor}`,null),
+  ]);
+  const positions=await safeApi(`/api/positions?setor=${setor}`,[]);
+  box.innerHTML=`
+    <div class="notice">Total alocado: <b>${status.total_alocado}</b> peças${suggestion?` · sugestão: <b>${esc(suggestion.address)}</b>`:''}</div>
+    ${status.posicoes.length?`<table class="dash-table"><tbody>${status.posicoes.map(p=>`<tr><td>${esc(p.address)}</td><td>${p.quantidade} pçs</td></tr>`).join('')}</tbody></table>`:''}
+    <div class="form-grid">
+      <div class="field"><label>Posição</label><select id="posAddress">${positions.map(p=>`<option value="${esc(p.address)}" ${suggestion&&p.address===suggestion.address?'selected':''}>${esc(p.address)} (${p.ocupado} ocupado)</option>`).join('')}</select></div>
+      <div class="field"><label>Quantidade nessa posição</label><input id="posQty" type="number" min="1" placeholder="ex: 30"></div>
+    </div>
+    <div class="actions"><button class="primary" onclick="submitAllocation(${cardId},'${setor}')">+ Adicionar posição</button></div>`;
+}
+
+async function submitAllocation(cardId,setor){
+  const address=$("posAddress")?.value;
+  const qty=Number($("posQty")?.value||0);
+  if(!address||qty<=0){toast("Escolha a posição e informe a quantidade.");return;}
+  try{
+    await api(`/api/positions/cards/${cardId}/allocate`,{method:'POST',body:JSON.stringify({setor,responsavel:currentUser?.name,allocations:[{address,quantidade:qty}]}),headers:{'Content-Type':'application/json'}});
+    toast("Posição alocada.");
+    loadPositionAllocator(cardId,setor);
+  }catch(e){toast(e.message);}
 }
 
 function sourceLocationHtml() {
@@ -619,6 +650,7 @@ function receivingFormHtml(isReturn) {
         ${operate && !physicalDone ? `<button class="secondary" onclick="saveReceiving()">Salvar dados</button><button class="success" onclick="completePhysical()">Concluir recebimento físico</button><label class="primary small-btn" style="cursor:pointer">Adicionar fotos<input id="receivingFiles" type="file" multiple hidden onchange="uploadReceivingPhotos()"></label>` : ""}
         ${physicalDone ? '<span class="badge green">Recebimento físico concluído</span>' : '<span class="badge gray">Recebimento físico pendente</span>'}
       </div>
+      ${!physicalDone ? `<h3 class="section-heading">Endereçamento no Recebimento (RM)</h3><div id="posAllocBox" class="notice">Carregando posições…</div>` : ""}
       <div class="photos">${receivingPhotos.map((p,i)=>`<a class="photo-link" target="_blank" href="${p}">Arquivo ${i+1}</a>`).join("")}</div>
       ${samplePlanTable(r,isReturn?"Plano exato da nova tiragem de 10%":"Plano exato da tiragem de 10%")}
       ${sampleHtml(r, sampleDone, operate, isReturn)}

@@ -22,6 +22,7 @@ from processing_module import init_processing_db, processing_card_data, register
 from downstream_module import downstream_card_data, init_downstream_db, register_downstream_routes
 from production_module import init_production_db, register_production_routes
 from goat_module import init_goat_db, register_goat_routes
+from positions_module import init_positions_db, register_positions_routes, total_allocated
 from unified_module import init_unified_db, register_unified_routes
 from supabase_module import verificar_login_supabase, seed_usuarios_supabase, seed_warehouse_supabase
 from warehouse_structure import gerar_todos_casulos
@@ -880,6 +881,7 @@ def startup() -> None:
     init_downstream_db()
     init_production_db()
     init_goat_db()
+    init_positions_db()
     init_unified_db()
 
     # Popula os 16 usuários padrão no Supabase (só na primeira vez — se já
@@ -1411,6 +1413,13 @@ async def complete_physical(receiving_id: int, request: Request):
     if rec["has_damage"] and not (rec["damage_description"] or "").strip():
         con.close()
         raise HTTPException(400, "Descreva os danos ou avarias.")
+    alocado = total_allocated("RM", rec["card_id"])
+    if alocado < rec["received_qty"]:
+        con.close()
+        raise HTTPException(
+            400,
+            f"Aloque o endereço físico (casulo) antes de concluir — {alocado}/{rec['received_qty']} peças alocadas no Recebimento.",
+        )
     con.execute(
         """UPDATE receivings SET physical_status='CONCLUIDO',physical_completed_by=?,physical_completed_at=?
            WHERE id=?""",
@@ -1633,6 +1642,7 @@ register_processing_routes(app)
 register_downstream_routes(app)
 register_production_routes(app)
 register_goat_routes(app)
+register_positions_routes(app)
 register_unified_routes(app)
 
 @app.post("/api/test/cards/{card_id}/send-processing")
