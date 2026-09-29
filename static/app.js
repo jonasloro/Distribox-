@@ -1734,14 +1734,13 @@ const progressFor = card => card.status?.includes("FINAL")||card.status?.include
 
 async function renderDashboard() {
   setPage("Central de Operações", "");
-  const [data,unified,warehouse,sgo,quality,processing,returns] = await Promise.all([
+  const [data,unified,warehouseSummary,quality,processing,returns] = await Promise.all([
     safeApi("/api/dashboard",{totals:{receiving:0,quality:0,processing:0,storage:0},recent:[],status_counts:[]}),
     safeApi("/api/unified/overview",{warehouse:{percentage:0},tasks:{},returns:{},sgo:{},recent_movements:[]}),
-    safeApi("/api/unified/warehouse",{zones:[],locations:[]}),safeApi("/api/unified/sgo",[]),
+    safeApi("/api/unified/warehouse/summary",{genders:[]}),
     safeApi("/api/cards?scope=quality",[]),safeApi("/api/cards?scope=processing",[]),safeApi("/api/unified/returns",[])
   ]);
   const active=[...processing,...data.recent.filter(c=>["QUALIDADE","PROCESSAMENTO","ETIQUETAGEM"].includes(c.current_sector))].filter((c,i,a)=>a.findIndex(x=>x.id===c.id)===i).slice(0,5);
-  const awaiting=sgo.filter(x=>x.status==="EM_TRANSITO").slice(0,5);
   $("mainContent").innerHTML=`<div class="reference-dashboard">
     <div class="hero-kpis">
       ${heroKpi("Aguardando recebimento",data.totals.receiving,"Pedidos","▣","blue","receiving")}
@@ -1751,8 +1750,8 @@ async function renderDashboard() {
     </div>
     <div class="dash-row dash-row-main">
       ${dashboardPanel("⌁","Produção ativa",`<span class="live-indicator">◷ ${new Date().toLocaleTimeString('pt-BR')}</span>`,compactProductionTable(active))}
-      ${dashboardPanel("⇩","Aguardando recebimento",`<span class="panel-count">${awaiting.length||data.totals.receiving}</span>`,awaitingTable(awaiting,data.recent))}
-      ${dashboardPanel("⌁","Estoque conectado",`<span class="online-pill">Online</span>`,zonesTable(warehouse.zones))}
+      ${dashboardPanel("⇩","Aguardando recebimento",`<span class="panel-count">${data.totals.receiving}</span>`,awaitingTable([],data.recent))}
+      ${dashboardPanel("⌁","Estoque conectado",`<span class="online-pill">Online</span>`,gendersTable(warehouseSummary.genders))}
     </div>
     <div class="dash-row dash-row-secondary">
       ${dashboardPanel("◇","Qualidade",`<span class="panel-count">${quality.length}</span>`,qualityTable(quality.slice(0,5)))}
@@ -1762,6 +1761,7 @@ async function renderDashboard() {
     <div class="flow-strip">${[["🛒","Compras","import"],["⇩","Recebimento","receiving"],["◇","Qualidade","quality"],["⚙","Processamento","processing"],["♢","Etiquetagem","labeling"],["⌂","Estocagem","storage-hub"],["▣","Expedição / Devolução","returns-hub"]].map(([icon,label,view],i)=>`${i?'<i>→</i>':''}<button onclick="goTo('${view}')"><b>${icon}</b><span>${label}</span>${i===1?'<small>+ 10%</small>':''}</button>`).join("")}</div>
   </div>`;
 }
+function gendersTable(genders){return `<table class="dash-table"><thead><tr><th>Zona</th><th>Ocupação</th><th>Status</th></tr></thead><tbody>${(genders||[]).map(g=>`<tr><td>${esc(g.gender)}</td><td><div class="tiny-progress"><i class="${g.occupancy>90?'warn-bar':''}" style="width:${Math.min(100,g.occupancy)}%"></i></div><small>${g.occupancy}%</small></td><td><span class="dot-status ${g.occupancy>90?'attention':''}">${g.occupancy>90?'Atenção':'Normal'}</span></td></tr>`).join('')||emptyRows(3)}</tbody></table><small style="color:#6b7280;display:block;margin:4px 0 2px">Rua 01 é fora de estoque (porta-palete) — não entra nesse total.</small><button class="panel-link" onclick="goTo('warehouse')">Ver endereçamento ›</button>`;}
 
 function heroKpi(title,value,hint,icon,tone,view){return `<button class="hero-card" onclick="goTo('${view}')"><div><span>${title}</span><strong>${value||0}</strong><small>${hint}</small><em>Ver ${title.replace('Em ','').toLowerCase()} ›</em></div><b class="hero-icon ${tone}">${icon}</b></button>`;}
 function dashboardPanel(icon,title,action,body){return `<section class="dash-panel"><header><b>${icon}</b><strong>${title}</strong>${action}</header><div class="dash-panel-body">${body}</div></section>`;}

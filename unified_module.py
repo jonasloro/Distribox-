@@ -301,6 +301,36 @@ def register_unified_routes(app) -> None:
             "recent_movements": [dict(r) for r in recent],
         }
 
+    @app.get("/api/unified/warehouse/summary")
+    def warehouse_summary():
+        """Versão leve do endereçamento, só com os totais por gênero — usada no
+        Central de Operações pra não precisar baixar o CD inteiro (milhares de
+        casulos) só pra mostrar um resumo."""
+        try:
+            with pg_connect() as con:
+                with con.cursor() as cur:
+                    cur.execute(
+                        """SELECT COALESCE(z.gender,'Sem gênero') AS gender,
+                           COALESCE(SUM(z.capacity),0) AS capacity,
+                           COALESCE(SUM(l.occupied_qty),0) AS occupied
+                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                           WHERE z.active GROUP BY z.gender ORDER BY z.gender"""
+                    )
+                    rows = cur.fetchall()
+        except RuntimeError:
+            return {"genders": []}
+        genders = []
+        for r in rows:
+            cap = int(r["capacity"] or 0)
+            occ = int(r["occupied"] or 0)
+            genders.append({
+                "gender": r["gender"],
+                "capacity": cap,
+                "occupied": occ,
+                "occupancy": round(occ * 100 / cap, 1) if cap else 0,
+            })
+        return {"genders": genders}
+
     @app.get("/api/unified/warehouse")
     def warehouse(search: str = "", zone: str = "", status: str = ""):
         with pg_connect() as con:
