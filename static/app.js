@@ -393,7 +393,7 @@ async function renderTestTools() {
       <thead><tr><th>Compra</th><th>Fornecedor</th><th>Tipo</th><th>Setor atual</th><th>Status</th><th>Ações</th></tr></thead>
       <tbody>${processingCandidates.map((card) => `
         <tr><td><b>${esc(card.purchase_id)}</b></td><td>${esc(card.supplier||"—")}</td><td>${esc(card.purchase_mode === "GRADE" ? "Grade" : card.purchase_mode === "SALDO" ? "Saldo" : "Não reconhecido")}</td><td>${esc(card.current_sector)}</td><td><span class="badge ${statusClass(card.status)}">${esc(card.status_label)}</span></td>
-        <td><button class="primary small-btn" onclick="simulateSendProcessing(${card.id})">Enviar ao Processamento</button></td></tr>
+        <td><select id="testMode${card.id}" class="small-btn"><option value="GRADE">Grade</option><option value="SALDO">Saldo</option></select> <button class="primary small-btn" onclick="simulateSendProcessing(${card.id})">Enviar ao Processamento</button></td></tr>
       `).join("") || '<tr><td colspan="6">Nenhum Card disponível.</td></tr>'}</tbody>
     </table></div></div>`;
 }
@@ -409,7 +409,7 @@ async function simulateReturn(cardId) {
 async function simulateSendProcessing(cardId) {
   if (!confirm("Enviar este Card diretamente ao Processamento somente para teste?")) return;
   try {
-    await api(`/api/test/cards/${cardId}/send-processing`, { method: "POST", body: JSON.stringify({ user_id: currentUser.id }) });
+    await api(`/api/test/cards/${cardId}/send-processing`, { method: "POST", body: JSON.stringify({ user_id: currentUser.id, purchase_mode: document.getElementById("testMode"+cardId)?.value }) });
     toast("Card enviado ao Processamento para teste.");
     renderTestTools();
   } catch (error) { toast(error.message); }

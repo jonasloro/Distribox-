@@ -1793,12 +1793,15 @@ async def simulate_send_processing(card_id: int, request: Request):
     if card["status"] == "DESPACHO_CD02":
         con.close()
         raise HTTPException(400, "Cards CD02 permanecem fora do fluxo interno.")
-    if card["purchase_mode"] not in ("GRADE", "SALDO"):
-        con.close()
-        raise HTTPException(400, "O tipo da compra não foi reconhecido na importação.")
+    mode = str(card["purchase_mode"] or "").upper()
+    if mode not in ("GRADE", "SALDO"):
+        # Ferramenta de teste: aceita o tipo informado ou assume Grade, para não travar o teste.
+        mode = str(data.get("purchase_mode") or "GRADE").strip().upper()
+        if mode not in ("GRADE", "SALDO"):
+            mode = "GRADE"
     con.execute(
-        "UPDATE cards SET current_sector='PROCESSAMENTO',status='AGUARDANDO_PROCESSAMENTO',updated_at=? WHERE id=?",
-        (iso_now(), card_id),
+        "UPDATE cards SET current_sector='PROCESSAMENTO',status='AGUARDANDO_PROCESSAMENTO',purchase_mode=?,updated_at=? WHERE id=?",
+        (mode, iso_now(), card_id),
     )
     add_history(con, card_id, "SIMULACAO_PROCESSAMENTO", "Ferramenta de teste: Card encaminhado diretamente ao Processamento.", user_id)
     con.commit()
