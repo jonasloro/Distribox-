@@ -37,7 +37,6 @@ def db_connect() -> sqlite3.Connection:
 
 
 def init_goat_db() -> None:
-    # 1. Tenta inicializar PostgreSQL / Supabase
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -63,7 +62,6 @@ def init_goat_db() -> None:
     except Exception as e:
         print(f"[aviso] GOAT PG init fallback to SQLite: {e}")
 
-    # 2. Garante inicialização no SQLite local
     try:
         con = db_connect()
         con.executescript(
@@ -109,7 +107,6 @@ def _num(v: Any) -> float:
 
 
 def _get_sheet_records(sheet_name: str) -> list[dict[str, Any]]:
-    # Tenta Supabase primeiro
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -126,7 +123,6 @@ def _get_sheet_records(sheet_name: str) -> list[dict[str, Any]]:
     except Exception:
         pass
 
-    # Fallback para SQLite
     try:
         con = db_connect()
         rows = con.execute("SELECT data FROM goat_records WHERE sheet=?", (sheet_name,)).fetchall()
@@ -155,7 +151,6 @@ async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
     now = datetime.now().replace(microsecond=0).isoformat()
     total_rows = 0
 
-    # Gravação no Postgres / Supabase se disponível
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -182,9 +177,8 @@ async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
                 )
             con.commit()
     except Exception as e:
-        print(f"[aviso] Falha ao importar no Supabase, usando SQLite local: {e}")
+        print(f"[aviso] Falha ao importar no Supabase: {e}")
 
-    # Gravação no SQLite local (garante que dados sempre existem)
     try:
         con = db_connect()
         con.execute("DELETE FROM goat_records")
@@ -224,7 +218,6 @@ async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @router.get("/status")
 def status() -> dict[str, Any]:
-    # Try Supabase
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -244,11 +237,10 @@ def status() -> dict[str, Any]:
                     }
 
                 sheets_list = [{"sheet": s[0], "label": SHEET_LABELS.get(s[0], s[0]), "rows": s[1]} for s in sheets if s]
-                return {"last_import": last_dict, "sheets": sheets_list, "imports": [last_dict] if last_dict else []}
+                return {"last_import": last_dict, "sheets": sheets_list}
     except Exception:
         pass
 
-    # Fallback SQLite
     try:
         con = db_connect()
         last = con.execute("SELECT * FROM goat_imports ORDER BY id DESC LIMIT 1").fetchone()
@@ -257,10 +249,10 @@ def status() -> dict[str, Any]:
 
         last_dict = dict(last) if last else None
         sheets_list = [{"sheet": s["sheet"], "label": SHEET_LABELS.get(s["sheet"], s["sheet"]), "rows": s["c"]} for s in sheets if s]
-        return {"last_import": last_dict, "sheets": sheets_list, "imports": [last_dict] if last_dict else []}
+        return {"last_import": last_dict, "sheets": sheets_list}
     except Exception as e:
         print(f"[aviso] GOAT status error: {e}")
-        return {"last_import": None, "sheets": [], "imports": []}
+        return {"last_import": None, "sheets": []}
 
 
 @router.get("/sheet/{sheet}")
@@ -278,6 +270,7 @@ def summary() -> dict[str, Any]:
     divergencia_compra = _get_sheet_records("Compra x recebido")
     divergencia_estoque = _get_sheet_records("Estocagem x esperado")
 
+    # Rejeitados por fornecedor
     por_fornecedor: dict[str, dict[str, Any]] = {}
     for r in rejeitados:
         if isinstance(r, dict):
@@ -287,6 +280,7 @@ def summary() -> dict[str, Any]:
             entry["valor"] += _num(r.get("Valor"))
     top_rejeitados = sorted(por_fornecedor.values(), key=lambda x: -x["pecas"])[:8]
 
+    # Perdas por responsável
     por_responsavel: dict[str, dict[str, Any]] = {}
     for r in perdas:
         if isinstance(r, dict):
@@ -295,39 +289,32 @@ def summary() -> dict[str, Any]:
             entry["pecas"] += int(_num(r.get("Peças")))
     top_perdas = sorted(por_responsavel.values(), key=lambda x: -x["pecas"])[:8]
 
+    # Fornecedores críticos (desempenho)
     desempenho_filtrado = [d for d in desempenho if isinstance(d, dict)]
     top_desempenho = sorted(desempenho_filtrado, key=lambda x: -_num(x.get("Atrasadas hoje")) if isinstance(x, dict) else 0)[:8]
 
-    desempenho_lista = [
+    fornecedores_criticos = [
         {
-            "fornecedor": d.get("Fornecedor") or "—",
+            "name": d.get("Fornecedor") or "—",
             "atrasadas_hoje": int(_num(d.get("Atrasadas hoje"))),
             "acerto_pct": _num(d.get("Acerto da data (%)")),
         }
         for d in top_desempenho
     ]
 
-    # Retorna TODOS os campos possíveis que a tela pode tentar mapear (.map)
+    # Retorna exatamente as chaves esperadas por: renderGoatIndicators()
     return {
         "totals": {
             "rejeitados_pecas": sum(int(_num(r.get("Peças"))) for r in rejeitados if isinstance(r, dict)),
             "rejeitados_valor": sum(_num(r.get("Valor")) for r in rejeitados if isinstance(r, dict)),
             "perdas_pecas": sum(int(_num(r.get("Peças"))) for r in perdas if isinstance(r, dict)),
-            "atrasadas_count": len(atrasadas),
-            "div_compra_count": len(divergencia_compra),
-            "div_estoque_count": len(divergencia_estoque),
+            "entregas_atrasadas": len(atrasadas),
+            "divergencias_compra": len(divergencia_compra),
+            "divergencias_estoque": len(divergencia_estoque),
         },
-        "top_rejeitados": top_rejeitados,
-        "rejeitados": top_rejeitados,
-        "top_perdas": top_perdas,
-        "perdas": top_perdas,
-        "desempenho": desempenho_lista,
-        "top_desempenho": desempenho_lista,
-        "atrasadas": atrasadas if isinstance(atrasadas, list) else [],
-        "divergencia_compra": divergencia_compra if isinstance(divergencia_compra, list) else [],
-        "divergencias_compra": divergencia_compra if isinstance(divergencia_compra, list) else [],
-        "divergencia_estoque": divergencia_estoque if isinstance(divergencia_estoque, list) else [],
-        "divergencias_estoque": divergencia_estoque if isinstance(divergencia_estoque, list) else [],
+        "top_rejeitados_fornecedor": top_rejeitados,
+        "top_perdas_responsavel": top_perdas,
+        "fornecedores_criticos": fornecedores_criticos,
     }
 
 
