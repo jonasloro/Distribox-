@@ -629,11 +629,11 @@ async def create_inspection(card_id: int, request: Request):
                 (card_id,),
             ).fetchall()
             source_subset = bool(source_items)
-        if not source_subset:
+if not source_subset:
             con.close()
             raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
             
-   purchase_mode = str(card["purchase_mode"] or "").upper()
+    purchase_mode = str(card["purchase_mode"] or "").upper()
     if purchase_mode not in {"GRADE", "SALDO"}:
         # Tipo não reconhecido na importação: permite informar manualmente ao criar a inspeção.
         manual_mode = str(payload.get("purchase_mode") or "").strip().upper()
@@ -648,6 +648,8 @@ async def create_inspection(card_id: int, request: Request):
              f"{user['name']} informou manualmente o tipo da compra: {'Grade' if purchase_mode == 'GRADE' else 'Saldo'}.",
              iso_now()),
         )
+        
+    existing = con.execute(
         "SELECT id FROM quality_inspections WHERE card_id=? AND status='ABERTA'",
         (card_id,),
     ).fetchone()
