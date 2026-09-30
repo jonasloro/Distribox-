@@ -414,3 +414,64 @@ def create_transit_card(payload: dict[str, str]) -> dict[str, Any]:
 def register_goat_routes(app: FastAPI) -> None:
     init_goat_db()
     app.include_router(router)
+
+# ==========================================
+# TRATATIVA E CONFIRMAÇÃO DE RECEBIMENTO
+# ==========================================
+
+def process_receiving_checkin(db, item_id, casulo, qtd_volumes, qtd_pecas_recebidas, status_conferencia, observacao=""):
+    """
+    Processa a conferência física do item do GOAT, aloca no casulo 
+    e atualiza o status de recebimento.
+    """
+    if not item_id:
+        raise ValueError("ID do item não informado.")
+    
+    if not casulo or not str(casulo).strip():
+        raise ValueError("É necessário informar o casulo/endereço de destino.")
+
+    casulo_clean = str(casulo).strip().upper()
+    qtd_vol = int(qtd_volumes) if qtd_volumes else 0
+    qtd_pecas = int(qtd_pecas_recebidas) if qtd_pecas_recebidas else 0
+    
+    # Define o status do registro com base na conferência
+    # Ex: 'Conforme', 'Divergente', 'Avaria'
+    status_final = "Recebido" if status_conferencia == "Conforme" else f"Recebido ({status_conferencia})"
+
+    # 1. Atualiza a tabela de recebimento
+    # Funciona tanto para SQLite quanto para Supabase via interface db
+    try:
+        # Busca item original para manter histórico de notas
+        item_atual = db.table("recebimento").select("*").eq("id", item_id).execute() if hasattr(db, "table") else None
+        
+        update_data = {
+            "casulo": casulo_clean,
+            "qtd_volumes": qtd_vol,
+            "quantidade_pecas": qtd_pecas,
+            "status": status_final,
+            "observacao_tratativa": observacao,
+            "data_recebimento": "NOW()"
+        }
+
+        if hasattr(db, "table"):
+            # Supabase Client
+            response = db.table("recebimento").update(update_data).eq("id", item_id).execute()
+        else:
+            # SQLite / Cursor direto
+            cursor = db.cursor()
+            cursor.execute("""
+                UPDATE recebimento 
+                SET casulo = ?, quantidade_volumes = ?, quantidade_pecas = ?, status = ?, observacoes = ?
+                WHERE id = ?
+            """, (casulo_clean, qtd_vol, qtd_pecas, status_final, observacao, item_id))
+            db.commit()
+
+        return {
+            "success": True,
+            "message": f"Item alocado no casulo {casulo_clean} com sucesso!",
+            "casulo": casulo_clean,
+            "status": status_final
+        }
+
+    except Exception as e:
+        raise RuntimeError(f"Erro ao atualizar banco de dados: {str(e)}")
