@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from openpyxl import load_workbook
 
 from supabase_module import pg_connect
@@ -258,10 +258,17 @@ def parse_goat_card_text(raw_text: str) -> dict:
     }
 
 
-# Endpoint para expor o Parser via API
 @router.post("/parse-card")
 def parse_goat_card_endpoint(payload: dict[str, str]) -> dict[str, Any]:
     raw_text = payload.get("text", "")
     if not raw_text:
         raise HTTPException(400, "O campo 'text' é obrigatório.")
     return parse_goat_card_text(raw_text)
+
+
+def register_goat_routes(app: FastAPI) -> None:
+    """
+    Registra as rotas do GOAT no FastAPI e inicializa o banco de dados.
+    """
+    init_goat_db()
+    app.include_router(router)
