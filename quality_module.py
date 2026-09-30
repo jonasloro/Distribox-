@@ -632,6 +632,7 @@ async def create_inspection(card_id: int, request: Request):
         if not source_subset:
             con.close()
             raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
+            
    purchase_mode = str(card["purchase_mode"] or "").upper()
     if purchase_mode not in {"GRADE", "SALDO"}:
         # Tipo não reconhecido na importação: permite informar manualmente ao criar a inspeção.
