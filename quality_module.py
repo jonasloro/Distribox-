@@ -629,7 +629,7 @@ async def create_inspection(card_id: int, request: Request):
                 (card_id,),
             ).fetchall()
             source_subset = bool(source_items)
-if not source_subset:
+        if not source_subset:
             con.close()
             raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
 
