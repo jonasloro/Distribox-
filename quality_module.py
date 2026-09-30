@@ -633,7 +633,7 @@ if not source_subset:
             con.close()
             raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
             
-    purchase_mode = str(card["purchase_mode"] or "").upper()
+     purchase_mode = str(card["purchase_mode"] or "").upper()
     if purchase_mode not in {"GRADE", "SALDO"}:
         # Tipo não reconhecido na importação: permite informar manualmente ao criar a inspeção.
         manual_mode = str(payload.get("purchase_mode") or "").strip().upper()
