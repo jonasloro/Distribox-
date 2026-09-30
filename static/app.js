@@ -422,6 +422,29 @@ async function renderGlobalHistory() {
     ${rows.map((event) => `<div class="timeline-event"><b>Compra ${esc(event.purchase_id)} — ${esc(event.description)}</b><br><small>${fmtDateTime(event.created_at)} ${event.user_name ? "• "+esc(event.user_name) : ""}</small></div>`).join("") || '<div class="notice">Nenhum evento.</div>'}
   </div></div></div>`;
 }
+async function setCardPurchaseMode(mode) {
+  if (!mode) return;
+  try {
+    const activeId = document.querySelector(".tabs button.active")?.id || "";
+    const tabByBtn = { 
+      tabQualityBtn: "quality", 
+      tabProcessingBtn: "processing", 
+      tabLabelingBtn: "labeling", 
+      tabStorageBtn: "storage", 
+      tabCasuloBtn: "casulo", 
+      tabProductsBtn: "products", 
+      tabHistoryBtn: "history" 
+    };
+    await api(`/api/cards/${currentCardId}/purchase-mode`, { 
+      method: "POST", 
+      body: JSON.stringify({ user_id: currentUser.id, purchase_mode: mode }) 
+    });
+    toast("Tipo da compra definido.");
+    await openCard(currentCardId, tabByBtn[activeId] || "receiving");
+  } catch (error) { 
+    toast(error.message); 
+  }
+}
 
 async function openCard(cardId, tab = "receiving") {
   currentCardId = cardId;
@@ -433,7 +456,7 @@ async function openCard(cardId, tab = "receiving") {
     <div class="summary-grid">
       <div class="summary-box"><span>Setor atual</span><strong>${esc(cardData.current_sector)}</strong></div>
       <div class="summary-box"><span>Tipo de entrada</span><strong>${cardData.receiving_type === "RETORNO" ? "Retorno da Costura" : "Mercadoria nova"}</strong></div>
-      <div class="summary-box"><span>Tipo da compra</span><strong>${cardData.purchase_mode === "GRADE" ? "Grade" : cardData.purchase_mode === "SALDO" ? "Saldo" : "Não reconhecido"}</strong></div>
+      <div class="summary-box"><span>Tipo da compra</span>${["GRADE", "SALDO"].includes(cardData.purchase_mode)     ? `<strong>${cardData.purchase_mode === "GRADE" ? "Grade" : "Saldo"}</strong>`     : (["recebimento", "qualidade", "supervisor", "admin"].includes(currentUser.role)         ? `<select id="cardPurchaseMode" onchange="setCardPurchaseMode(this.value)"><option value="">Não reconhecido — definir</option><option value="GRADE">Grade</option><option value="SALDO">Saldo</option></select>`         : "<strong>Não reconhecido</strong>")}</div>
       <div class="summary-box"><span>Itens</span><strong>${cardData.items.length}</strong></div>
       <div class="summary-box"><span>Quantidade esperada</span><strong>${cardData.expected_total}</strong></div>
       <div class="summary-box"><span>Casulo atual</span><strong>${esc(cardData.casulo_current||"Não informado")}</strong></div>
@@ -920,7 +943,7 @@ function qualitySetupHtml(previousInspection=null, sourceSubset=false) {
       : '<div class="notice success-box"><b>Mercadoria nova:</b> escolha Inspeção 1 somente quando a mercadoria precisar ir para Costura. Escolha Inspeção 2 quando ela já puder seguir diretamente para Processamento. Nos dois casos será usada a amostra dos 10% separada pelo Recebimento.</div>'}
     <div class="form-grid">
       <div class="field"><label>Tipo de inspeção</label><select id="qualityType" onchange="toggleQualitySetupFields()" ${cardData.receiving_type === "RETORNO" ? "disabled" : ""}><option value="1" ${defaultType===1?"selected":""}>Inspeção 1</option><option value="2" ${defaultType===2?"selected":""}>Inspeção 2</option></select></div>
-      <div class="field"><label>Tipo da compra</label><input id="qualityPurchaseMode" class="readonly" readonly value="${defaultMode === "GRADE" ? "Grade — controle por item" : defaultMode === "SALDO" ? "Saldo — quantidade geral" : "Tipo não reconhecido"}"></div>
+      ${["GRADE", "SALDO"].includes(defaultMode)     ? `<div class="field"><label>Tipo da compra</label><input id="qualityPurchaseMode" class="readonly" readonly value="${defaultMode === "GRADE" ? "Grade — controle por item" : "Saldo — quantidade geral"}"></div>`     : `<div class="field"><label>Tipo da compra (não reconhecido — informe)</label><select id="qualityPurchaseMode"><option value="">Selecione</option><option value="GRADE">Grade — controle por item</option><option value="SALDO">Saldo — quantidade geral</option></select></div>`}
       <div class="field" id="qualityDestinationField"><label>Destino da Inspeção 1</label><select id="qualityDestination"><option value="">Selecione</option><option value="CD01">CD01 — retorna ao nosso CD</option><option value="CD02">CD02 — sai do fluxo interno</option></select></div>
       <div class="field"><label>É necessário separar peças para Desenvolvimento?</label><select id="developmentRequired" onchange="toggleDevelopmentSetup()"><option value="">Selecione</option><option value="0">Não</option><option value="1">Sim</option></select></div>
       <div class="field" id="developmentSeparatedField" style="display:none"><label>As peças para Desenvolvimento já foram separadas?</label><select id="developmentSeparated"><option value="">Selecione</option><option value="0">Não</option><option value="1">Sim</option></select></div>
@@ -952,6 +975,7 @@ async function createQualityInspection() {
         development_required: requiredValue === "" ? null : requiredValue === "1",
         development_separated: requiredValue !== "1" ? null : (separatedValue === "" ? null : separatedValue === "1"),
         source_subset: Boolean(window.qualitySourceSubset),
+        purchase_mode: $("qualityPurchaseMode")?.tagName === "SELECT" ? $("qualityPurchaseMode").value : undefined,
       }),
     });
     toast("Inspeção criada.");
