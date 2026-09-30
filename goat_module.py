@@ -364,6 +364,53 @@ def parse_goat_card_endpoint(payload: dict[str, str]) -> dict[str, Any]:
     return parse_goat_card_text(raw_text)
 
 
+def _iso_now() -> str:
+    return datetime.now().replace(microsecond=0).isoformat()
+
+
+@router.post("/create-card")
+def create_transit_card(payload: dict[str, str]) -> dict[str, Any]:
+    """Cria de verdade um card 'Em Trânsito' no Recebimento a partir do texto do card do GOAT."""
+    raw = (payload.get("text") or "").strip()
+    if not raw:
+        raise HTTPException(400, "Cole o texto do card do GOAT.")
+    d = parse_goat_card_text(raw)
+    purchase_id = d["compra"] if d["compra"] != "N/A" else (d["lote"] if d["lote"] != "N/A" else "")
+    if not purchase_id:
+        raise HTTPException(422, "Não encontrei o número da compra (#...) nem o lote no texto colado.")
+    now = _iso_now()
+    notes = f"Lote {d['lote']} | NF {d['nota_fiscal']} | criado via card GOAT"
+    con = db_connect()
+    try:
+        con.execute("PRAGMA foreign_keys=ON")
+        if con.execute("SELECT 1 FROM cards WHERE purchase_id=?", (purchase_id,)).fetchone():
+            raise HTTPException(409, f"Já existe um card para a compra {purchase_id}.")
+        cur = con.execute(
+            """INSERT INTO cards(purchase_id,source_created_date,supplier,original_type,purchase_mode,status_compra,
+               qtd_itens,source_notes,current_sector,status,receiving_type,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (purchase_id, now[:10], d["fornecedor"], d["tipo_compra"], d["tipo_compra"], "Em Trânsito",
+             d["quantidade_pecas"], notes, "RECEBIMENTO", "AGUARDANDO_RECEBIMENTO", "NOVA", now, now),
+        )
+        card_id = cur.lastrowid
+        sku = ", ".join(d["skus"])
+        con.execute(
+            """INSERT INTO items(card_id,source_key,product,sku,lot,nf,expected_qty,status_kanban,source_stage,source_status_purchase)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (card_id, f"{purchase_id}|{d['lote']}|goat", f"Lote {d['lote']}", sku, d["lote"],
+             "" if d["nota_fiscal"] == "N/A" else d["nota_fiscal"], d["quantidade_pecas"],
+             "1.3 Compras - Em Trânsito", "TRANSITO", "Em Trânsito"),
+        )
+        con.execute(
+            "INSERT INTO history(card_id,user_id,event_type,description,created_at) VALUES(?,?,?,?,?)",
+            (card_id, None, "CRIACAO_GOAT", f"Card em trânsito criado a partir do GOAT (compra {purchase_id}).", now),
+        )
+        con.commit()
+    finally:
+        con.close()
+    return {"card_id": card_id, "purchase_id": purchase_id, **d}
+
+
 def register_goat_routes(app: FastAPI) -> None:
     init_goat_db()
     app.include_router(router)

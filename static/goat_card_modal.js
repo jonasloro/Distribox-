@@ -25,7 +25,7 @@ function openGoatCardModal() {
         </div>
         <div class="modal-footer actions" style="margin-top: 15px; display: flex; justify-content: flex-end; gap: 10px;">
           <button class="secondary" onclick="closeGoatModal()" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #323248; background: transparent; color: #fff; cursor: pointer;">Cancelar</button>
-          <button class="primary" onclick="processGoatCard()" style="padding: 8px 16px; border-radius: 4px; border: none; background: #3699ff; color: #fff; cursor: pointer; font-weight: 600;">Processar e Preencher</button>
+          <button class="primary" onclick="processGoatCard()" style="padding: 8px 16px; border-radius: 4px; border: none; background: #3699ff; color: #fff; cursor: pointer; font-weight: 600;">Criar card em trânsito</button>
         </div>
       </div>
     `;
@@ -44,39 +44,15 @@ function closeGoatModal() {
 async function processGoatCard() {
   const textArea = document.getElementById("goatCardText");
   const text = textArea ? textArea.value.trim() : "";
-  
-  if (!text) {
-    if (typeof toast === "function") toast("Cole o texto do card do GOAT antes de processar.");
-    else alert("Cole o texto do card do GOAT antes de processar.");
-    return;
-  }
-
+  const say = (m) => (typeof toast === "function" ? toast(m) : alert(m));
+  if (!text) return say("Cole o texto do card do GOAT antes de criar.");
   try {
-    const data = await api("/api/goat/parse-card", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
-    });
-
-    if (typeof toast === "function") toast("Card processado com sucesso!");
+    const d = await api("/api/goat/create-card", { method: "POST", body: JSON.stringify({ text }) });
+    say(`Card da compra ${d.purchase_id} criado em trânsito (${d.quantidade_pecas} peças).`);
     closeGoatModal();
-
-    const recQty = document.getElementById("recQty");
-    const recVolumes = document.getElementById("recVolumes");
-    const recNotes = document.getElementById("recNotes");
-
-    if (recQty && data.quantidade_pecas) recQty.value = data.quantidade_pecas;
-    if (recVolumes && data.quantidade_volumes) recVolumes.value = data.quantidade_volumes;
-    if (recNotes) {
-      const currentNotes = recNotes.value;
-      const parsedNotes = `Lote: ${data.lote} | NF: ${data.nota_fiscal} | Compra: ${data.compra} | Fornecedor: ${data.fornecedor}`;
-      recNotes.value = currentNotes ? `${currentNotes}\n${parsedNotes}` : parsedNotes;
-    }
-
+    if (typeof goTo === "function") goTo("receiving"); else location.reload();
   } catch (err) {
-    const errMsg = "Erro ao processar card: " + (err.message || err);
-    if (typeof toast === "function") toast(errMsg);
-    else alert(errMsg);
+    say("Erro ao criar card: " + (err.message || err));
   }
 }
 
