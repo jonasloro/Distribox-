@@ -131,7 +131,15 @@ async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
 
 def _sheet_rows(cur, sheet: str) -> list[dict[str, Any]]:
     cur.execute("SELECT data FROM goat_records WHERE sheet=%s", (sheet,))
-    return [json.loads(r[0]) for r in cur.fetchall()]
+    rows = cur.fetchall()
+    result = []
+    for r in rows:
+        try:
+            data = json.loads(r[0]) if isinstance(r, (tuple, list)) else json.loads(r["data"])
+            result.append(data)
+        except Exception:
+            continue
+    return result
 
 
 @router.get("/status")
@@ -139,17 +147,28 @@ def status() -> dict[str, Any]:
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
-                cur.execute("SELECT * FROM goat_imports ORDER BY id DESC LIMIT 1")
+                cur.execute("SELECT id, filename, sheets_count, rows_count, imported_at FROM goat_imports ORDER BY id DESC LIMIT 1")
                 last = cur.fetchone()
-                cur.execute("SELECT sheet, COUNT(*) c FROM goat_records GROUP BY sheet")
+                cur.execute("SELECT sheet, COUNT(*) FROM goat_records GROUP BY sheet")
                 sheets = cur.fetchall()
-    except RuntimeError:
-        return {"last_import": None, "sheets": []}
 
-    return {
-        "last_import": dict(last) if last else None,
-        "sheets": [{"sheet": s[0], "label": SHEET_LABELS.get(s[0], s[0]), "rows": s[1]} for s in sheets],
-    }
+                last_dict = None
+                if last:
+                    last_dict = {
+                        "id": last[0],
+                        "filename": last[1],
+                        "sheets_count": last[2],
+                        "rows_count": last[3],
+                        "imported_at": last[4],
+                    }
+
+                return {
+                    "last_import": last_dict,
+                    "sheets": [{"sheet": s[0], "label": SHEET_LABELS.get(s[0], s[0]), "rows": s[1]} for s in sheets],
+                }
+    except Exception as e:
+        print(f"[aviso] GOAT status error: {e}")
+        return {"last_import": None, "sheets": []}
 
 
 @router.get("/sheet/{sheet}")
@@ -158,7 +177,7 @@ def sheet_rows(sheet: str, limit: int = 100) -> dict[str, Any]:
         with pg_connect() as con:
             with con.cursor() as cur:
                 rows = _sheet_rows(cur, sheet)
-    except RuntimeError:
+    except Exception:
         rows = []
     return {"sheet": sheet, "label": SHEET_LABELS.get(sheet, sheet), "total": len(rows), "rows": rows[: max(1, min(limit, 500))]}
 
@@ -174,31 +193,34 @@ def summary() -> dict[str, Any]:
                 atrasadas = _sheet_rows(cur, "Entregas atrasadas")
                 divergencia_compra = _sheet_rows(cur, "Compra x recebido")
                 divergencia_estoque = _sheet_rows(cur, "Estocagem x esperado")
-    except RuntimeError:
+    except Exception:
         rejeitados = perdas = desempenho = atrasadas = divergencia_compra = divergencia_estoque = []
 
     por_fornecedor: dict[str, dict[str, Any]] = {}
     for r in rejeitados:
-        forn = r.get("Fornecedor") or "—"
-        entry = por_fornecedor.setdefault(forn, {"name": forn, "pecas": 0, "valor": 0.0})
-        entry["pecas"] += int(_num(r.get("Peças")))
-        entry["valor"] += _num(r.get("Valor"))
+        if isinstance(r, dict):
+            forn = r.get("Fornecedor") or "—"
+            entry = por_fornecedor.setdefault(forn, {"name": forn, "pecas": 0, "valor": 0.0})
+            entry["pecas"] += int(_num(r.get("Peças")))
+            entry["valor"] += _num(r.get("Valor"))
     top_rejeitados = sorted(por_fornecedor.values(), key=lambda x: -x["pecas"])[:8]
 
     por_responsavel: dict[str, dict[str, Any]] = {}
     for r in perdas:
-        quem = r.get("Quem") or "—"
-        entry = por_responsavel.setdefault(quem, {"name": quem, "pecas": 0})
-        entry["pecas"] += int(_num(r.get("Peças")))
+        if isinstance(r, dict):
+            quem = r.get("Quem") or "—"
+            entry = por_responsavel.setdefault(quem, {"name": quem, "pecas": 0})
+            entry["pecas"] += int(_num(r.get("Peças")))
     top_perdas = sorted(por_responsavel.values(), key=lambda x: -x["pecas"])[:8]
 
-    top_desempenho = sorted(desempenho, key=lambda x: -_num(x.get("Atrasadas hoje")) if isinstance(x, dict) else 0)[:8]
+    desempenho_filtrado = [d for d in desempenho if isinstance(d, dict)]
+    top_desempenho = sorted(desempenho_filtrado, key=lambda x: -_num(x.get("Atrasadas hoje")) if isinstance(x, dict) else 0)[:8]
 
     return {
         "totals": {
-            "rejeitados_pecas": sum(int(_num(r.get("Peças"))) for r in rejeitados),
-            "rejeitados_valor": sum(_num(r.get("Valor")) for r in rejeitados),
-            "perdas_pecas": sum(int(_num(r.get("Peças"))) for r in perdas),
+            "rejeitados_pecas": sum(int(_num(r.get("Peças"))) for r in rejeitados if isinstance(r, dict)),
+            "rejeitados_valor": sum(_num(r.get("Valor")) for r in rejeitados if isinstance(r, dict)),
+            "perdas_pecas": sum(int(_num(r.get("Peças"))) for r in perdas if isinstance(r, dict)),
             "atrasadas_count": len(atrasadas),
             "div_compra_count": len(divergencia_compra),
             "div_estoque_count": len(divergencia_estoque),
@@ -211,16 +233,12 @@ def summary() -> dict[str, Any]:
                 "atrasadas_hoje": int(_num(d.get("Atrasadas hoje"))),
                 "acerto_pct": _num(d.get("Acerto da data (%)")),
             }
-            for d in top_desempenho if isinstance(d, dict)
+            for d in top_desempenho
         ],
     }
 
 
 def parse_goat_card_text(raw_text: str) -> dict:
-    """
-    Processa o texto copiado diretamente do card do GOAT e retorna um
-    dicionário estruturado para a criação manual do card em trânsito.
-    """
     lote_match = re.search(r'Lote\s+([\w\.]+)', raw_text, re.IGNORECASE)
     lote = lote_match.group(1) if lote_match else "N/A"
 
@@ -267,8 +285,5 @@ def parse_goat_card_endpoint(payload: dict[str, str]) -> dict[str, Any]:
 
 
 def register_goat_routes(app: FastAPI) -> None:
-    """
-    Registra as rotas do GOAT no FastAPI e inicializa o banco de dados.
-    """
     init_goat_db()
     app.include_router(router)
