@@ -201,13 +201,23 @@ def total_allocated(setor: str, card_id: int) -> int:
         return 0
 
 
-def release_card_allocations(card_id: int) -> int:
-    """Libera os endereços do card quando a produção começa (mercadoria saiu do local)."""
+def release_card_allocations(card_id: int, keep_quality_qty: int = 0) -> int:
+    """Libera o endereço do card quando a produção começa. Os 10% ficam na Qualidade
+    (registrados no setor QUALIDADE); o restante sai do endereço original."""
     with pg_connect() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM card_allocations WHERE card_id=%s", (card_id,))
-        n = cur.rowcount
+        cur.execute("SELECT COALESCE(SUM(quantidade),0) t FROM card_allocations WHERE card_id=%s AND setor<>'QUALIDADE'", (card_id,))
+        total = int(cur.fetchone()["t"] or 0)
+        if total <= 0:
+            return 0
+        cur.execute("DELETE FROM card_allocations WHERE card_id=%s AND setor<>'QUALIDADE'", (card_id,))
+        keep = max(0, min(int(keep_quality_qty or 0), total))
+        if keep:
+            cur.execute(
+                "INSERT INTO card_allocations(card_id,setor,address,quantidade,responsavel,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
+                (card_id, "QUALIDADE", "QUALIDADE (10%)", keep, "sistema", iso_now()),
+            )
         conn.commit()
-    return n
+    return total - keep
 
 
 def register_positions_routes(app: FastAPI) -> None:

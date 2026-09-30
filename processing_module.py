@@ -644,8 +644,15 @@ async def processing_timer_action(worker_id: int, action: str, request: Request)
     if action == "start":
         try:
             from positions_module import release_card_allocations
-            release_card_allocations(worker["card_id"])
-            con.execute("UPDATE cards SET casulo_current=NULL WHERE id=?", (worker["card_id"],))
+            rec10 = con.execute(
+                "SELECT ten_percent_actual,ten_percent_min FROM receivings WHERE card_id=? ORDER BY id DESC LIMIT 1",
+                (worker["card_id"],),
+            ).fetchone()
+            keep10 = 0
+            if rec10:
+                keep10 = int(rec10["ten_percent_actual"] if rec10["ten_percent_actual"] is not None else rec10["ten_percent_min"] or 0)
+            if release_card_allocations(worker["card_id"], keep10) >= 0:
+                con.execute("UPDATE cards SET casulo_current=NULL WHERE id=?", (worker["card_id"],))
         except Exception as exc:
             print(f"[aviso] não liberou endereço do card {worker['card_id']}: {exc}")
     add_history(con, worker["card_id"], "TEMPO_PROCESSAMENTO", f"{worker['worker_name']} {verbs[action]} o Processamento.", user_id)

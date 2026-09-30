@@ -281,19 +281,19 @@ input:disabled,select:disabled,textarea:disabled{
     padding: 24px;
 }
 
-.panel-header {
+.dashboard-recebimento .panel-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 20px;
 }
 
-.panel-header h3 {
+.dashboard-recebimento .panel-header h3 {
     font-size: 1.1rem;
     margin: 0 0 4px 0;
 }
 
-.panel-header p {
+.dashboard-recebimento .panel-header p {
     color: var(--text-secondary);
     font-size: 0.8rem;
     margin: 0;
