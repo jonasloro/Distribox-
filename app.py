@@ -51,6 +51,7 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 KANBAN_TRANSITO = "1.3 Compras - Em Trânsito"
 
 STATUS_LABELS = {
+    "EM_TRANSITO": "Em trânsito",
     "AGUARDANDO_RECEBIMENTO": "Aguardando recebimento",
     "RECEBIMENTO_FISICO_CONCLUIDO_10_PENDENTE": "Recebimento físico concluído — 10% pendente",
     "SEPARACAO_10_CONCLUIDA_RECEBIMENTO_PENDENTE": "10% concluído — recebimento físico pendente",
@@ -87,6 +88,9 @@ STATUS_LABELS = {
     "ORIGEM_ESTOCAGEM": "Em Estocagem",
     "ORIGEM_MISTO": "Itens em etapas diferentes",
 }
+
+# Cards que ainda não chegaram ao CD: ficam na aba Recebimento até o operador marcar a chegada.
+TRANSIT_STATUSES = {"EM_TRANSITO", "ORIGEM_TRANSITO"}
 
 RECEIVING_STATUSES = {
     "AGUARDANDO_RECEBIMENTO",
@@ -565,6 +569,15 @@ def init_db() -> None:
                 (costura_card["id"],),
             )
             ensure_receiving(con, costura_card["id"], "COSTURA", item_ids)
+    # Cards criados pelo GOAT antes da regra de chegada: sem andamento e sem chegada marcada → Em trânsito.
+    con.execute(
+        """UPDATE cards SET status='EM_TRANSITO' WHERE current_sector='RECEBIMENTO' AND status='AGUARDANDO_RECEBIMENTO'
+           AND EXISTS (SELECT 1 FROM history h WHERE h.card_id=cards.id AND h.event_type='CRIACAO_GOAT')
+           AND NOT EXISTS (SELECT 1 FROM history h WHERE h.card_id=cards.id AND h.event_type='CHEGADA_CONFIRMADA')
+           AND NOT EXISTS (SELECT 1 FROM receivings r WHERE r.card_id=cards.id AND
+                (r.physical_status!='PENDENTE' OR r.ten_percent_status!='NAO_INICIADA'
+                 OR r.volumes IS NOT NULL OR r.received_qty IS NOT NULL))"""
+    )
     # Cards em trânsito já existentes (ex.: criados pelo GOAT) sem registro de Recebimento.
     for orphan in con.execute(
         """SELECT c.id FROM cards c WHERE c.current_sector='RECEBIMENTO' AND c.status='AGUARDANDO_RECEBIMENTO'
@@ -650,6 +663,28 @@ def ensure_receiving(
             [(receiving_id, item_id) for item_id in normalized_ids],
         )
     return receiving_id
+
+
+def awaiting_arrival(con: sqlite3.Connection, card_id: int) -> bool:
+    """True enquanto o Card está em trânsito e o operador ainda não marcou a chegada.
+
+    Cards antigos que já têm andamento no recebimento (volumes, quantidade, 10% ou
+    conclusão física) são tratados como já recebidos, para não esconder trabalho feito.
+    """
+    card = con.execute(
+        "SELECT current_sector,status FROM cards WHERE id=?", (card_id,)
+    ).fetchone()
+    if not card or card["current_sector"] != "RECEBIMENTO" or card["status"] not in TRANSIT_STATUSES:
+        return False
+    rec = con.execute(
+        "SELECT * FROM receivings WHERE card_id=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1", (card_id,)
+    ).fetchone()
+    if rec and (
+        rec["physical_status"] != "PENDENTE" or rec["ten_percent_status"] != "NAO_INICIADA"
+        or rec["volumes"] is not None or rec["received_qty"] is not None
+    ):
+        return False
+    return True
 
 
 def ensure_pending_receiving(con: sqlite3.Connection, card_id: int) -> bool:
@@ -1325,8 +1360,10 @@ def list_cards(scope: str = "receiving", search: str = ""):
         params.extend([q, q, q, q, q, q, q])
     sql += " GROUP BY c.id ORDER BY c.updated_at DESC"
     rows = con.execute(sql, params).fetchall()
+    transit = {r["id"]: awaiting_arrival(con, r["id"]) for r in rows if r["status"] in TRANSIT_STATUSES}
     con.close()
-    return [dict(r) | {"status_label": STATUS_LABELS.get(r["status"], r["status"])} for r in rows]
+    return [dict(r) | {"status_label": STATUS_LABELS.get(r["status"], r["status"]),
+                       "in_transit": transit.get(r["id"], False)} for r in rows]
 
 
 @app.get("/api/cards/{card_id}")
@@ -1343,6 +1380,7 @@ def get_card(card_id: int):
     card["items"] = [dict(r) for r in con.execute("SELECT * FROM items WHERE card_id=? ORDER BY product,color,size,id", (card_id,)).fetchall()]
     card["expected_total"] = sum(item["expected_qty"] for item in card["items"])
     card["receiving"] = current_receiving(con, card_id)
+    card["in_transit"] = awaiting_arrival(con, card_id)
     card["dispatch"] = current_dispatch(con, card_id)
     card["quality"] = quality_card_data(con, card_id)
     card["processing"] = processing_card_data(con, card_id)
@@ -1372,6 +1410,9 @@ async def save_receiving(receiving_id: int, request: Request):
     if card["current_sector"] != "RECEBIMENTO":
         con.close()
         raise HTTPException(400, "O Card não está no Recebimento.")
+    if awaiting_arrival(con, rec["card_id"]):
+        con.close()
+        raise HTTPException(400, "A mercadoria ainda está em trânsito. Marque como recebida quando ela chegar.")
 
     def incoming(name: str, current: Any) -> Any:
         return data[name] if name in data else current
@@ -1430,6 +1471,9 @@ async def complete_physical(receiving_id: int, request: Request):
     if card["current_sector"] != "RECEBIMENTO":
         con.close()
         raise HTTPException(400, "O Card não está no Recebimento.")
+    if awaiting_arrival(con, rec["card_id"]):
+        con.close()
+        raise HTTPException(400, "A mercadoria ainda está em trânsito. Marque como recebida quando ela chegar.")
     if rec["physical_status"] == "CONCLUIDO":
         con.close()
         raise HTTPException(400, "O recebimento físico já foi concluído.")
@@ -1475,6 +1519,9 @@ async def sample_timer(receiving_id: int, action: str, request: Request):
     if card["current_sector"] != "RECEBIMENTO":
         con.close()
         raise HTTPException(400, "O Card não está no Recebimento.")
+    if awaiting_arrival(con, rec["card_id"]):
+        con.close()
+        raise HTTPException(400, "A mercadoria ainda está em trânsito. Marque como recebida quando ela chegar.")
     if not rec["ten_percent_required"]:
         con.close()
         raise HTTPException(400, "Este recebimento não exige separação dos 10%.")
@@ -1506,6 +1553,32 @@ async def sample_timer(receiving_id: int, action: str, request: Request):
     con.commit()
     con.close()
     return summary | {"next_status": next_status}
+
+
+@app.post("/api/cards/{card_id}/mark-arrived")
+async def mark_arrived(card_id: int, request: Request):
+    """Marca que a mercadoria em trânsito chegou ao CD e libera o trabalho do Recebimento."""
+    data = await request.json()
+    user_id = int(data.get("user_id") or 0)
+    con = db_connect()
+    user = require_role(con, user_id, {"recebimento"})
+    if not con.execute("SELECT 1 FROM cards WHERE id=?", (card_id,)).fetchone():
+        con.close()
+        raise HTTPException(404, "Card não encontrado.")
+    if not awaiting_arrival(con, card_id):
+        con.close()
+        raise HTTPException(400, "Este Card não está aguardando chegada.")
+    ensure_receiving(con, card_id, "NOVA")
+    con.execute(
+        "UPDATE cards SET status='AGUARDANDO_RECEBIMENTO',receiving_type='NOVA',updated_at=? WHERE id=?",
+        (iso_now(), card_id),
+    )
+    add_history(con, card_id, "CHEGADA_CONFIRMADA",
+                f"{user['name']} marcou a mercadoria como recebida (chegou ao CD). Recebimento físico e separação dos 10% liberados.",
+                user_id)
+    con.commit()
+    con.close()
+    return {"ok": True, "status": "AGUARDANDO_RECEBIMENTO"}
 
 
 @app.post("/api/cards/{card_id}/casulo")

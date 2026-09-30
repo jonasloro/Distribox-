@@ -390,7 +390,7 @@ def create_transit_card(payload: dict[str, str]) -> dict[str, Any]:
                qtd_itens,source_notes,current_sector,status,receiving_type,created_at,updated_at)
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (purchase_id, now[:10], d["fornecedor"], d["tipo_compra"], d["tipo_compra"], "Em Trânsito",
-             d["quantidade_pecas"], notes, "RECEBIMENTO", "AGUARDANDO_RECEBIMENTO", "NOVA", now, now),
+             d["quantidade_pecas"], notes, "RECEBIMENTO", "EM_TRANSITO", "NOVA", now, now),
         )
         card_id = cur.lastrowid
         sku = ", ".join(d["skus"])
