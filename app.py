@@ -21,6 +21,7 @@ from quality_module import init_quality_db, quality_card_data, register_quality_
 from processing_module import init_processing_db, processing_card_data, register_processing_routes
 from downstream_module import downstream_card_data, init_downstream_db, register_downstream_routes
 from production_module import init_production_db, register_production_routes
+from processing_module import ensure_worker_function_column
 from goat_module import init_goat_db, register_goat_routes
 from positions_module import init_positions_db, register_positions_routes, total_allocated
 from unified_module import init_unified_db, register_unified_routes
@@ -940,6 +941,7 @@ def startup() -> None:
     init_db()
     init_quality_db()
     init_processing_db()
+    ensure_worker_function_column()
     init_downstream_db()
     init_production_db()
     init_goat_db()
@@ -1313,7 +1315,7 @@ def dashboard():
         "AND si.source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO'))"
     )
     totals["processing_qty"] = sum_expected(
-        "c.current_sector='PROCESSAMENTO' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id "
+        "c.current_sector IN ('PROCESSAMENTO','TRIAGEM') OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id "
         "AND si.source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO'))"
     )
     capacity_row = con.execute(

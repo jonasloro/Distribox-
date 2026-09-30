@@ -201,5 +201,14 @@ def total_allocated(setor: str, card_id: int) -> int:
         return 0
 
 
+def release_card_allocations(card_id: int) -> int:
+    """Libera os endereços do card quando a produção começa (mercadoria saiu do local)."""
+    with pg_connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM card_allocations WHERE card_id=%s", (card_id,))
+        n = cur.rowcount
+        conn.commit()
+    return n
+
+
 def register_positions_routes(app: FastAPI) -> None:
     app.include_router(router)

@@ -1541,7 +1541,7 @@ function processingUserOptions(selected="") {
 function processingWorkersHtml(p, isOpen) {
   const currentAlready = p.workers.some((w) => w.user_id === currentUser.id);
   const addArea = isOpen && canOperateProcessing() ? `<div class="bulk-toolbar processing-worker-add">
-    ${currentUser.role === "processamento" ? `<div class="selected-inspector"><span>Operador</span><b>${esc(currentUser.name)}</b></div><button class="primary" ${currentAlready ? "disabled" : ""} onclick="addProcessingWorker(${currentUser.id})">Assumir Card</button>` : `<div class="field"><label>Adicionar colaborador</label><select id="processingWorkerSelect"><option value="">Selecione</option>${processingUserOptions()}</select></div><button class="primary" onclick="addProcessingWorker(Number($(\"processingWorkerSelect\").value||0))">Adicionar</button>`}
+    ${currentUser.role === "processamento" ? `<div class="selected-inspector"><span>Operador</span><b>${esc(currentUser.name)}</b></div><button class="primary" ${currentAlready ? "disabled" : ""} onclick="addProcessingWorker(${currentUser.id})">Assumir Card</button>` : `<div class="field"><label>Função</label><select id="processingFunctionSelect"><option value="PROCESSAMENTO">Processamento</option><option value="TRIAGEM">Triagem</option><option value="ETIQUETAGEM">Etiquetagem</option><option value="ESTOCAGEM">Estocagem</option></select></div><div class="field"><label>Adicionar colaborador</label><select id="processingWorkerSelect"><option value="">Selecione</option>${processingUserOptions()}</select></div><button class="primary" onclick="addProcessingWorker(Number($(\"processingWorkerSelect\").value||0))">Adicionar</button>`}
   </div>` : "";
   return `<h3 class="section-heading">Colaboradores e produção</h3>${addArea}${p.workers.length ? p.workers.map((w)=>processingWorkerHtml(w,isOpen)).join("") : '<div class="notice">Nenhum colaborador assumiu o Card.</div>'}`;
 }
@@ -1571,7 +1571,7 @@ function processingWorkerHtml(w, isOpen) {
 async function addProcessingWorker(userId) {
   if (!userId) return toast("Selecione o colaborador.");
   try {
-    await api(`/api/processing/${cardData.processing.id}/workers`, {method:"POST",body:JSON.stringify({user_id:currentUser.id,worker_user_id:userId})});
+    await api(`/api/processing/${cardData.processing.id}/workers`, {method:"POST",body:JSON.stringify({user_id:currentUser.id,worker_user_id:userId,function:$("processingFunctionSelect")?.value||"PROCESSAMENTO"})});
     toast("Colaborador incluído.");
     await openCard(currentCardId,"processing");
   } catch (error) { toast(error.message); }

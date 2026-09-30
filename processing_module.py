@@ -127,6 +127,7 @@ def init_processing_db() -> None:
             produced_qty INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             completed_at TEXT,
+            function TEXT NOT NULL DEFAULT 'PROCESSAMENTO',
             UNIQUE(processing_id,user_id),
             FOREIGN KEY(processing_id) REFERENCES processing_records(id) ON DELETE CASCADE,
             FOREIGN KEY(user_id) REFERENCES users(id)
@@ -207,6 +208,17 @@ def worker_timer_summary(con: sqlite3.Connection, worker_id: int) -> dict[str, A
         "finished_at": final_end.isoformat() if final_end else None,
         "events": [dict(row) for row in events],
     }
+
+
+def ensure_worker_function_column() -> None:
+    con = db_connect()
+    try:
+        con.execute("ALTER TABLE processing_workers ADD COLUMN function TEXT NOT NULL DEFAULT 'PROCESSAMENTO'")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        con.close()
 
 
 def refresh_processing_card_status(con: sqlite3.Connection, processing_id: int) -> None:
@@ -522,6 +534,10 @@ async def add_processing_worker(processing_id: int, request: Request):
     if not record or record["status"] != "ABERTO":
         con.close()
         raise HTTPException(400, "O Processamento não está aberto.")
+    func = str(payload.get("function") or "PROCESSAMENTO").strip().upper()
+    if func not in {"PROCESSAMENTO", "TRIAGEM", "ETIQUETAGEM", "ESTOCAGEM"}:
+        con.close()
+        raise HTTPException(400, "Função inválida.")
     target = con.execute("SELECT * FROM users WHERE id=?", (worker_user_id,)).fetchone()
     if not target or target["role"] != "processamento":
         con.close()
@@ -531,8 +547,8 @@ async def add_processing_worker(processing_id: int, request: Request):
         raise HTTPException(403, "O operador pode assumir somente para si próprio.")
     try:
         con.execute(
-            "INSERT INTO processing_workers(processing_id,user_id,created_at) VALUES(?,?,?)",
-            (processing_id, worker_user_id, iso_now()),
+            "INSERT INTO processing_workers(processing_id,user_id,created_at,function) VALUES(?,?,?,?)",
+            (processing_id, worker_user_id, iso_now(), func),
         )
     except sqlite3.IntegrityError:
         con.close()
@@ -541,7 +557,7 @@ async def add_processing_worker(processing_id: int, request: Request):
         con,
         record["card_id"],
         "PROCESSAMENTO_ASSUMIDO",
-        f"{target['name']} foi incluído no Processamento por {actor['name']}.",
+        f"{target['name']} foi incluído no Processamento ({func.title()}) por {actor['name']}.",
         user_id,
     )
     refresh_processing_card_status(con, processing_id)
@@ -625,6 +641,13 @@ async def processing_timer_action(worker_id: int, action: str, request: Request)
         (new_state, iso_now() if new_state == "CONCLUIDA" else None, worker_id),
     )
     verbs = {"start": "iniciou", "pause": "pausou", "resume": "retomou", "finish": "finalizou"}
+    if action == "start":
+        try:
+            from positions_module import release_card_allocations
+            release_card_allocations(worker["card_id"])
+            con.execute("UPDATE cards SET casulo_current=NULL WHERE id=?", (worker["card_id"],))
+        except Exception as exc:
+            print(f"[aviso] não liberou endereço do card {worker['card_id']}: {exc}")
     add_history(con, worker["card_id"], "TEMPO_PROCESSAMENTO", f"{worker['worker_name']} {verbs[action]} o Processamento.", user_id)
     refresh_processing_card_status(con, worker["processing_id"])
     con.commit()
