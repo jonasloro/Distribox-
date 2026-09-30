@@ -108,6 +108,7 @@ async function goTo(view) {
   try {
     if (view === "dashboard") await renderDashboard();
     if (view === "receiving") await renderCards("receiving");
+    if (view === "painel-recebimento") renderRecebimentoPanel();
     if (view === "quality") await renderCards("quality");
     if (view === "processing") await renderCards("processing");
     if (view === "labeling") await renderCards("labeling");
@@ -2039,7 +2040,7 @@ if (currentUser) enterApp();
  * Baseado no layout analítico e visual da Opção 3.
  */
 function renderRecebimentoPanel() {
-    const mainContent = document.getElementById('main-content'); // Ajuste para o ID da sua div principal
+    const mainContent = document.getElementById('mainContent');
     
     mainContent.innerHTML = `
         <div class="dashboard-recebimento">
