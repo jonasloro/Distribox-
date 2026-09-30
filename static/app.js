@@ -2033,3 +2033,248 @@ async function renderSettings(){setPage("Configurações","");$("mainContent").i
 
 setInterval(() => { if ($("clock")) $("clock").textContent = new Date().toLocaleString("pt-BR"); }, 1000);
 if (currentUser) enterApp();
+
+/**
+ * Renderiza o novo Painel de Recebimento com Mapa de Casulos
+ * Baseado no layout analítico e visual da Opção 3.
+ */
+function renderRecebimentoPanel() {
+    const mainContent = document.getElementById('main-content'); // Ajuste para o ID da sua div principal
+    
+    mainContent.innerHTML = `
+        <div class="dashboard-recebimento">
+            <div class="dash-header">
+                <h2>Painel Operacional do Centro de Distribuição</h2>
+                <p id="last-update">Atualizado agora · Turno A · CD Curitiba - PR</p>
+            </div>
+
+            <!-- KPIs Superiores -->
+            <div class="kpi-container">
+                <div class="kpi-box">
+                    <div class="kpi-info">
+                        <h4 style="color: #ffb800;">Peças Aguardando Recebimento</h4>
+                        <div class="kpi-value" id="kpi-pecas">0 <span>peças</span></div>
+                        <p style="color: var(--text-secondary); font-size: 0.8rem;">Cargas no pátio aguardando endereçamento.</p>
+                    </div>
+                </div>
+                <div class="kpi-box">
+                    <div class="kpi-info">
+                        <h4 style="color: #60a5fa;">% Da Capacidade Real do CD</h4>
+                        <div class="kpi-value" id="kpi-capacidade">0% <span>ocupado</span></div>
+                        <p style="color: var(--text-secondary); font-size: 0.8rem;">Limite de segurança operacional em 88%.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Grid Principal -->
+            <div class="main-grid">
+                <!-- Mapa de Casulos -->
+                <div class="panel-section">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Mapa de Casulos</h3>
+                            <p>Setores monitorados em tempo real</p>
+                        </div>
+                        <button class="btn btn-secondary btn-sm">Filtrar</button>
+                    </div>
+                    <div class="casulos-grid" id="casulos-grid">
+                        <!-- Casulos serão injetados aqui -->
+                    </div>
+                </div>
+
+                <!-- Fila de Recebimento -->
+                <div class="panel-section">
+                    <div class="panel-header">
+                        <div>
+                            <h3>Fila de Recebimento</h3>
+                            <p id="fila-count">0 cargas no pátio</p>
+                        </div>
+                        <span class="status-badge" style="background: rgba(16,185,129,0.1); color: #10b981;">● AO VIVO</span>
+                    </div>
+                    <div class="fila-list" id="fila-list">
+                        <!-- Fila será injetada aqui -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    loadCasulosData();
+    loadRecebimentoQueue();
+}
+
+/**
+ * Simula/Carrega os dados dos casulos e injeta no DOM.
+ * Em produção, conecte a um endpoint GET /api/casulos.
+ */
+function loadCasulosData() {
+    // Dados de exemplo baseados na imagem
+    const casulos = [
+        { id: 'A-01', nome: 'Casulo Alfa', ocupacao: 92, pos_atuais: 1104, pos_total: 1200 },
+        { id: 'A-02', nome: 'Casulo Alfa', ocupacao: 78, pos_atuais: 936, pos_total: 1200 },
+        { id: 'A-03', nome: 'Casulo Alfa', ocupacao: 41, pos_atuais: 492, pos_total: 1200 },
+        { id: 'A-04', nome: 'Casulo Alfa', ocupacao: 12, pos_atuais: 144, pos_total: 1200 },
+        { id: 'B-01', nome: 'Casulo Beta', ocupacao: 100, pos_atuais: 800, pos_total: 800 },
+        { id: 'B-02', nome: 'Casulo Beta', ocupacao: 64, pos_atuais: 512, pos_total: 800 }
+    ];
+
+    const grid = document.getElementById('casulos-grid');
+    grid.innerHTML = '';
+
+    casulos.forEach(c => {
+        let statusClass = 'livre';
+        let statusLabel = 'LIVRE';
+        let bgColor = 'var(--status-free)';
+
+        if (c.ocupacao >= 90) { statusClass = 'critico'; statusLabel = c.ocupacao === 100 ? 'BLOQUEADO' : 'CRÍTICO'; bgColor = 'var(--status-critical)'; }
+        else if (c.ocupacao >= 75) { statusClass = 'atencao'; statusLabel = 'ATENÇÃO'; bgColor = 'var(--status-warning)'; }
+        else if (c.ocupacao >= 30) { statusClass = 'normal'; statusLabel = 'NORMAL'; bgColor = 'var(--status-normal)'; }
+
+        grid.innerHTML += `
+            <div class="casulo-card ${statusClass}" onclick="abrirModalFiltroCasulo('${c.id}')">
+                <div class="casulo-header">
+                    <div>
+                        <div class="casulo-id">${c.id}</div>
+                        <div style="font-size: 0.7rem; color: var(--text-secondary)">${c.nome}</div>
+                    </div>
+                    <div style="font-size: 0.65rem; font-weight: 600; color: ${bgColor}">${statusLabel}</div>
+                </div>
+                <div class="casulo-ocupacao">${c.ocupacao}%</div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" style="width: ${c.ocupacao}%; background-color: ${bgColor}"></div>
+                </div>
+                <div class="casulo-posicoes">${c.pos_atuais.toLocaleString()} / ${c.pos_total.toLocaleString()} pos.</div>
+            </div>
+        `;
+    });
+}
+
+/**
+ * Carrega a fila de recebimento[cite: 6].
+ */
+function loadRecebimentoQueue() {
+    // Dados de exemplo simulando retorno da base de dados
+    const fila = [
+        { id: 1, nf: '884.221', fornecedor: 'Metalúrgica Vetor', status: 'Descarregando' },
+        { id: 2, nf: '884.219', fornecedor: 'Componentes Ápice', status: 'Aguardando' },
+        { id: 3, nf: '884.207', fornecedor: 'Plásticos Orion', status: 'Em Conferência' }
+    ];
+
+    const list = document.getElementById('fila-list');
+    document.getElementById('fila-count').innerText = `${fila.length} cargas no pátio`;
+    list.innerHTML = '';
+
+    fila.forEach(item => {
+        let badgeClass = '';
+        if (item.status === 'Descarregando') badgeClass = 'status-descarregando';
+        else if (item.status === 'Em Conferência') badgeClass = 'status-conferencia';
+        else badgeClass = 'status-aguardando';
+
+        list.innerHTML += `
+            <div class="fila-item" onclick="abrirModalConferencia(${item.id}, '${item.nf}', '${item.fornecedor}')">
+                <div class="fila-info">
+                    <h4>NF ${item.nf}</h4>
+                    <p>${item.fornecedor}</p>
+                </div>
+                <div class="status-badge ${badgeClass}">● ${item.status.toUpperCase()}</div>
+            </div>
+        `;
+    });
+}
+
+/**
+ * Abre o Modal de Conferência Física conectando com o backend.
+ */
+function abrirModalConferencia(itemId, nf, fornecedor) {
+    // Implementação de modal utilizando SweetAlert2 (ou adapte para o modal nativo do Bootstrap/HTML do seu projeto)
+    Swal.fire({
+        title: `Conferência - NF ${nf}`,
+        html: `
+            <div style="text-align: left; padding-top: 10px;" class="modal-conferencia">
+                <p style="margin-bottom: 20px; color: var(--text-secondary)">Fornecedor: <strong>${fornecedor}</strong></p>
+                
+                <label>Casulo de Destino</label>
+                <input type="text" id="conf-casulo" placeholder="Ex: A-01" class="swal2-input" style="width: 100%; margin: 8px 0 20px 0;">
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                    <div>
+                        <label>Volumes Recebidos</label>
+                        <input type="number" id="conf-vol" placeholder="Qtd" class="swal2-input" style="width: 100%; margin-top: 8px;">
+                    </div>
+                    <div>
+                        <label>Peças Recebidas</label>
+                        <input type="number" id="conf-pecas" placeholder="Qtd" class="swal2-input" style="width: 100%; margin-top: 8px;">
+                    </div>
+                </div>
+
+                <label style="margin-top: 20px; display: block;">Status da Conferência</label>
+                <select id="conf-status" class="swal2-select" style="width: 100%; margin: 8px 0 20px 0;">
+                    <option value="Conforme">Conforme (100% OK)</option>
+                    <option value="Divergente">Divergente (Falta/Sobra)</option>
+                    <option value="Avaria">Avaria (Danificado)</option>
+                </select>
+
+                <label>Observações</label>
+                <textarea id="conf-obs" placeholder="Detalhes da tratativa..." class="swal2-textarea" style="width: 100%; margin-top: 8px;"></textarea>
+            </div>
+        `,
+        showCancelButton: true,
+        confirmButtonText: 'Finalizar e Alocar',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#3b82f6',
+        background: '#151722',
+        color: '#fff',
+        preConfirm: () => {
+            const casulo = document.getElementById('conf-casulo').value;
+            if (!casulo) {
+                Swal.showValidationMessage('O Casulo de Destino é obrigatório');
+                return false;
+            }
+            return {
+                id: itemId,
+                casulo: casulo,
+                qtd_volumes: document.getElementById('conf-vol').value,
+                qtd_pecas: document.getElementById('conf-pecas').value,
+                status_conferencia: document.getElementById('conf-status').value,
+                observacao: document.getElementById('conf-obs').value
+            };
+        }
+    }).then((result) => {
+        if (result.isConfirmed) {
+            confirmarRecebimentoBackend(result.value);
+        }
+    });
+}
+
+/**
+ * Envia o payload da conferência para a rota do app.py
+ */
+async function confirmarRecebimentoBackend(payload) {
+    try {
+        const response = await fetch('/api/goat/confirm-receiving', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            Swal.fire({
+                icon: 'success',
+                title: 'Alocado!',
+                text: data.message,
+                background: '#151722',
+                color: '#fff',
+                confirmButtonColor: '#10b981'
+            });
+            // Recarrega os painéis para atualizar capacidades e fila
+            renderRecebimentoPanel();
+        } else {
+            Swal.fire('Erro', data.error || 'Falha ao confirmar.', 'error');
+        }
+    } catch (error) {
+        console.error('Erro na requisição:', error);
+        Swal.fire('Erro', 'Erro de comunicação com o servidor.', 'error');
+    }
+}
