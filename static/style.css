@@ -182,3 +182,240 @@ input:disabled,select:disabled,textarea:disabled{
 .shipping-completion{padding:13px 15px;margin:13px 0;background:#1c1f24;border:1px solid #33383f;border-radius:8px}.shipping-completion>div:first-child{display:flex;justify-content:space-between}.shipping-completion span,.shipping-completion small{color:#91a4b8;font-size:11px}.shipping-items{max-height:42vh}.shipping-items input[data-field="notes"]{min-width:180px;padding:7px;border-radius:6px}
 @media(max-width:1100px){.shipping-form-grid{grid-template-columns:repeat(2,1fr)}.shipment-new-item{grid-template-columns:1fr 1.5fr 110px auto}}
 @media(max-width:760px){.shipping-kpis,.shipping-form-grid,.shipping-toolbar,.shipment-new-item{grid-template-columns:1fr}.shipping-form-grid .grow{grid-column:auto}.shipment-new-item button{width:100%}}
+
+/* ==========================================================================
+   TEMA DARK - PAINEL OPERACIONAL DE RECEBIMENTO (Baseado no Mockup V3)
+   ========================================================================== */
+
+:root {
+    --bg-dark-app: #0b0c10;
+    --bg-panel: #151722;
+    --bg-card: #1f2233;
+    --border-subtle: rgba(255, 255, 255, 0.08);
+    --text-primary: #ffffff;
+    --text-secondary: #8b92a5;
+    
+    /* Status Colors */
+    --status-critical: #ff3366;
+    --status-warning: #ffb800;
+    --status-normal: #3b82f6;
+    --status-free: #6b7280;
+    --status-success: #10b981;
+}
+
+.dashboard-recebimento {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    padding: 24px;
+    background-color: var(--bg-dark-app);
+    color: var(--text-primary);
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+}
+
+.dash-header h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0 0 8px 0;
+}
+
+.dash-header p {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin: 0;
+}
+
+/* KPIs Superiores */
+.kpi-container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+}
+
+.kpi-box {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    padding: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.kpi-info h4 {
+    color: var(--status-critical);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 0 0 12px 0;
+}
+
+.kpi-info .kpi-value {
+    font-size: 2.5rem;
+    font-weight: 700;
+    margin: 0 0 12px 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+
+.kpi-info .kpi-value span {
+    font-size: 1rem;
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+/* Grid Principal (Mapa de Casulos + Fila) */
+.main-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 24px;
+}
+
+.panel-section {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    padding: 24px;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.panel-header h3 {
+    font-size: 1.1rem;
+    margin: 0 0 4px 0;
+}
+
+.panel-header p {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin: 0;
+}
+
+/* Grelha de Casulos */
+.casulos-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px;
+}
+
+.casulo-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 16px;
+    position: relative;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.casulo-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+.casulo-card::before {
+    content: '';
+    position: absolute;
+    top: -1px; left: 16px; right: 16px;
+    height: 2px;
+    border-radius: 2px;
+}
+
+.casulo-card.critico::before { background: var(--status-critical); box-shadow: 0 0 8px var(--status-critical); }
+.casulo-card.atencao::before { background: var(--status-warning); box-shadow: 0 0 8px var(--status-warning); }
+.casulo-card.normal::before { background: var(--status-normal); box-shadow: 0 0 8px var(--status-normal); }
+.casulo-card.livre::before { background: var(--status-free); }
+
+.casulo-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.casulo-id { font-weight: 600; font-size: 1rem; }
+.casulo-ocupacao {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 12px 0;
+}
+
+.casulo-card.critico .casulo-ocupacao { color: var(--status-critical); }
+.casulo-card.atencao .casulo-ocupacao { color: var(--status-warning); }
+.casulo-card.normal .casulo-ocupacao { color: var(--status-normal); }
+.casulo-card.livre .casulo-ocupacao { color: var(--status-free); }
+
+.progress-bar-bg {
+    height: 4px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+}
+
+.casulo-posicoes {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+/* Fila de Recebimento */
+.fila-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.fila-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.fila-info h4 { margin: 0 0 4px 0; font-size: 0.95rem; }
+.fila-info p { margin: 0; color: var(--text-secondary); font-size: 0.8rem; }
+
+.status-badge {
+    padding: 4px 10px;
+    border-radius: 100px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.status-descarregando { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+.status-conferencia { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+.status-aguardando { background: rgba(107, 114, 128, 0.15); color: #9ca3af; border: 1px solid rgba(107, 114, 128, 0.3); }
+
+/* Modal de Conferência */
+.modal-conferencia {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    padding: 32px;
+    color: var(--text-primary);
+}
+.modal-conferencia input, .modal-conferencia select, .modal-conferencia textarea {
+    background: var(--bg-dark-app);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 12px;
+    width: 100%;
+    margin-top: 8px;
+}
