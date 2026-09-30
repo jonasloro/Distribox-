@@ -475,3 +475,41 @@ def process_receiving_checkin(db, item_id, casulo, qtd_volumes, qtd_pecas_recebi
 
     except Exception as e:
         raise RuntimeError(f"Erro ao atualizar banco de dados: {str(e)}")
+
+def process_receiving_checkin(item_id, casulo, qtd_volumes, qtd_pecas_recebidas, status_conferencia, observacao=""):
+    """
+    Processa a conferência física do item do GOAT, aloca no casulo 
+    e atualiza o status no Supabase/SQLite.
+    """
+    if not item_id:
+        raise ValueError("ID do item não informado.")
+    
+    if not casulo or not str(casulo).strip():
+        raise ValueError("É necessário informar o casulo/endereço de destino.")
+
+    casulo_clean = str(casulo).strip().upper()
+    qtd_vol = int(qtd_volumes) if qtd_volumes else 0
+    qtd_pecas = int(qtd_pecas_recebidas) if qtd_pecas_recebidas else 0
+    
+    status_final = "Recebido" if status_conferencia == "Conforme" else f"Recebido ({status_conferencia})"
+
+    payload = {
+        "casulo": casulo_clean,
+        "quantidade_volumes": qtd_vol,
+        "quantidade_pecas": qtd_pecas,
+        "status": status_final,
+        "observacao_tratativa": observacao
+    }
+
+    # Utiliza a função de atualização nativa do próprio goat_module.py
+    resultado = update_recebimento(item_id, payload)
+    
+    if not resultado:
+        raise RuntimeError("Não foi possível atualizar o registro no banco de dados.")
+
+    return {
+        "success": True,
+        "message": f"Item alocado no casulo {casulo_clean} com sucesso!",
+        "casulo": casulo_clean,
+        "status": status_final
+    }
