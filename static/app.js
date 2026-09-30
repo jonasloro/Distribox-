@@ -305,7 +305,7 @@ function productionQueueRow(card,tab="processing") {
   const searchable = [card.purchase_id,card.supplier,card.brand,card.casulo_current,card.original_type,card.material_search].join(" ").toLowerCase();
   const activity = productionActivity(card,tab);
   return `<tr class="production-material-row" tabindex="0" data-id="${card.id}" data-label="${esc(card.purchase_id)} — ${esc(card.brand||card.supplier||'Sem marca')}" data-search="${esc(searchable)}" data-type="${esc(card.purchase_mode||'')}" data-status="${activity}" data-brand="${esc(card.brand||'')}" onclick="selectProductionMaterial(${card.id})" ondblclick="openCard(${card.id},'${tab}')" onkeydown="if(event.key==='Enter')openCard(${card.id},'${tab}')">
-    <td class="select-col"><span class="row-selector"></span></td><td><b>${esc(card.purchase_id)}</b><small>${esc(card.original_type||'')}</small></td><td>${esc(card.supplier||"—")}</td><td>${esc(card.brand||"—")}</td><td><span class="type-pill">${card.purchase_mode === "GRADE" ? "Grade" : "Saldo"}</span></td><td>${card.item_count}</td><td><b>${card.expected_total}</b></td><td>${esc(card.casulo_current||"—")}</td><td><span class="badge ${statusClass(card.status)}">${esc(card.status_label)}</span></td><td><button class="row-open" onclick="event.stopPropagation();openCard(${card.id},'${tab}')" aria-label="Abrir material">›</button></td></tr>`;
+    <td class="select-col"><span class="row-selector"></span></td><td><b>${esc(card.purchase_id)}</b><small>${esc(card.original_type||'')}</small></td><td>${esc(card.supplier||"—")}</td><td>${esc(card.brand||"—")}</td><td><span class="type-pill">${card.purchase_mode === "GRADE" ? "Grade" : "Saldo"}</span></td><td>${card.item_count}</td><td><b>${card.expected_total}</b></td><td>${esc(card.casulo_current||"—")}</td><td><span class="badge ${statusClass(card.status)}">${esc(card.status_label)}</span></td><td>${tab === "receiving" && card.status === "AGUARDANDO_RECEBIMENTO" && currentUser?.role === "recebimento" ? `<button class="success small-btn" onclick="event.stopPropagation();openCard(${card.id},'receiving')">Marcar como recebido</button> ` : ""}<button class="row-open" onclick="event.stopPropagation();openCard(${card.id},'${tab}')" aria-label="Abrir material">›</button></td></tr>`;
 }
 
 function filterProductionQueue() {
@@ -638,6 +638,7 @@ function receivingFormHtml(isReturn) {
   return `
     <div class="panel-body">
       <div class="notice ${isReturn ? "success-box" : ""}"><b>${isReturn ? "Recebimento do retorno CD01" : "Recebimento de mercadoria em trânsito"}</b><br>${isReturn ? "Registre o retorno e separe uma nova amostra de 10%. O Card só segue para a Inspeção 2 quando as duas partes terminarem." : "O recebimento físico e a separação dos 10% com triagem inicial podem ser concluídos em qualquer ordem. O Card só segue para a Qualidade quando ambos terminarem."}</div>
+      ${!operate && !physicalDone ? `<div class="notice warn"><b>Somente o operador de Recebimento pode marcar como recebido.</b><br>${cardData.current_sector !== "RECEBIMENTO" ? "Este Card não está no Recebimento." : "Entre com um usuário do perfil Recebimento para usar os botões de ação."}</div>` : ""}
       ${operationItems.length ? `<div class="notice"><b>${operationItems.length} item(ns) fazem parte deste controle</b><br>Somente estes itens serão movimentados. Os demais itens da compra permanecerão em suas etapas atuais.</div>` : ""}
       <h3 class="section-heading">Recebimento físico</h3>
       <div class="form-grid">
@@ -648,7 +649,7 @@ function receivingFormHtml(isReturn) {
         <div class="field full"><label>Observações</label><textarea id="recNotes" ${readOnly}>${esc(r.notes||"")}</textarea></div>
       </div>
       <div class="actions">
-        ${operate && !physicalDone ? `<button class="secondary" onclick="saveReceiving()">Salvar dados</button><button class="success" onclick="completePhysical()">Concluir recebimento físico</button><label class="primary small-btn" style="cursor:pointer">Adicionar fotos<input id="receivingFiles" type="file" multiple hidden onchange="uploadReceivingPhotos()"></label>` : ""}
+        ${operate && !physicalDone ? `<button class="secondary" onclick="saveReceiving()">Salvar dados</button><button class="success" onclick="completePhysical()">${isReturn ? "Marcar retorno como recebido" : "Marcar como recebido"}</button><label class="primary small-btn" style="cursor:pointer">Adicionar fotos<input id="receivingFiles" type="file" multiple hidden onchange="uploadReceivingPhotos()"></label>` : ""}
         ${physicalDone ? '<span class="badge green">Recebimento físico concluído</span>' : '<span class="badge gray">Recebimento físico pendente</span>'}
       </div>
       ${!physicalDone ? `<h3 class="section-heading">Endereçamento no Recebimento (RM)</h3><div id="posAllocBox" class="notice">Carregando posições…</div>` : ""}
@@ -2272,7 +2273,7 @@ async function confirmarRecebimentoBackend(payload) {
             // Recarrega os painéis para atualizar capacidades e fila
             renderRecebimentoPanel();
         } else {
-            Swal.fire('Erro', data.error || 'Falha ao confirmar.', 'error');
+            Swal.fire('Erro', data.detail || data.error || 'Falha ao confirmar.', 'error');
         }
     } catch (error) {
         console.error('Erro na requisição:', error);
