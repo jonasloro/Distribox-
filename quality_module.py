@@ -632,11 +632,21 @@ async def create_inspection(card_id: int, request: Request):
         if not source_subset:
             con.close()
             raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
-    purchase_mode = str(card["purchase_mode"] or "").upper()
+   purchase_mode = str(card["purchase_mode"] or "").upper()
     if purchase_mode not in {"GRADE", "SALDO"}:
-        con.close()
-        raise HTTPException(400, "O tipo da compra não foi reconhecido na importação.")
-    existing = con.execute(
+        # Tipo não reconhecido na importação: permite informar manualmente ao criar a inspeção.
+        manual_mode = str(payload.get("purchase_mode") or "").strip().upper()
+        if manual_mode not in {"GRADE", "SALDO"}:
+            con.close()
+            raise HTTPException(400, "O tipo da compra não foi reconhecido. Selecione Grade ou Saldo para continuar.")
+        purchase_mode = manual_mode
+        con.execute("UPDATE cards SET purchase_mode=?,updated_at=? WHERE id=?", (purchase_mode, iso_now(), card_id))
+        con.execute(
+            "INSERT INTO history(card_id,user_id,event_type,description,created_at) VALUES(?,?,?,?,?)",
+            (card_id, user_id, "TIPO_COMPRA_MANUAL",
+             f"{user['name']} informou manualmente o tipo da compra: {'Grade' if purchase_mode == 'GRADE' else 'Saldo'}.",
+             iso_now()),
+        )
         "SELECT id FROM quality_inspections WHERE card_id=? AND status='ABERTA'",
         (card_id,),
     ).fetchone()
