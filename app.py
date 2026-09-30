@@ -1553,7 +1553,45 @@ async def sample_timer(receiving_id: int, action: str, request: Request):
     con.commit()
     con.close()
     return summary | {"next_status": next_status}
-
+@app.post("/api/cards/{card_id}/purchase-mode")
+async def set_purchase_mode(card_id: int, request: Request):
+    """Define manualmente Grade/Saldo quando o tipo não foi reconhecido na importação."""
+    data = await request.json()
+    user_id = int(data.get("user_id") or 0)
+    mode = str(data.get("purchase_mode") or "").strip().upper()
+    if mode not in {"GRADE", "SALDO"}:
+        raise HTTPException(400, "Selecione o tipo da compra: Grade ou Saldo.")
+    
+    con = db_connect()
+    user = require_role(con, user_id, {"recebimento", "qualidade", "supervisor", "admin"})
+    card = con.execute("SELECT id,purchase_mode FROM cards WHERE id=?", (card_id,)).fetchone()
+    
+    if not card:
+        con.close()
+        raise HTTPException(404, "Card não encontrado.")
+    
+    if str(card["purchase_mode"] or "").upper() in {"GRADE", "SALDO"}:
+        con.close()
+        raise HTTPException(400, "O tipo da compra já foi definido e não pode ser alterado.")
+    
+    con.execute("UPDATE cards SET purchase_mode=?,updated_at=? WHERE id=?", (mode, iso_now(), card_id))
+    
+    # Recalcula regra de 10% para recebimentos abertos se for Grade
+    for rec in con.execute("SELECT id,received_qty,source_subset FROM receivings WHERE card_id=? AND closed_at IS NULL", (card_id,)).fetchall():
+        if rec["source_subset"]:
+            base = con.execute("""SELECT COALESCE(SUM(i.expected_qty),0) t,COUNT(*) n FROM receiving_operation_items roi
+                JOIN items i ON i.id=roi.item_id WHERE roi.receiving_id=? AND i.expected_qty>0""", (rec["id"],)).fetchone()
+        else:
+            base = con.execute("SELECT COALESCE(SUM(expected_qty),0) t,COUNT(*) n FROM items WHERE card_id=? AND expected_qty>0", (card_id,)).fetchone()
+        qty = int(rec["received_qty"]) if rec["received_qty"] is not None else int(base["t"] or 0)
+        minimum = max(math.ceil(qty * 0.10), int(base["n"] or 0) if mode == "GRADE" else 0)
+        con.execute("UPDATE receivings SET ten_percent_min=? WHERE id=?", (minimum, rec["id"]))
+    
+    add_history(con, card_id, "TIPO_COMPRA_MANUAL",
+                f"{user['name']} informou manualmente o tipo da compra: {'Grade' if mode == 'GRADE' else 'Saldo'}.", user_id)
+    con.commit()
+    con.close()
+    return {"ok": True, "purchase_mode": mode}
 
 @app.post("/api/cards/{card_id}/mark-arrived")
 async def mark_arrived(card_id: int, request: Request):
