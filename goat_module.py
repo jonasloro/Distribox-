@@ -28,6 +28,7 @@ SHEET_LABELS = {
 
 
 def db_connect() -> sqlite3.Connection:
+    os.makedirs(DB_PATH.parent, exist_ok=True)
     con = sqlite3.connect(DB_PATH, timeout=10)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
@@ -36,6 +37,7 @@ def db_connect() -> sqlite3.Connection:
 
 
 def init_goat_db() -> None:
+    # 1. Tenta inicializar PostgreSQL / Supabase
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -58,8 +60,34 @@ def init_goat_db() -> None:
                     """
                 )
             con.commit()
-    except RuntimeError as e:
-        print(f"[aviso] GOAT: {e}")
+    except Exception as e:
+        print(f"[aviso] GOAT PG init fallback to SQLite: {e}")
+
+    # 2. Garante inicialização no SQLite local
+    try:
+        con = db_connect()
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS goat_imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT,
+                sheets_count INTEGER,
+                rows_count INTEGER,
+                imported_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS goat_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sheet TEXT NOT NULL,
+                data TEXT NOT NULL,
+                imported_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_goat_records_sheet ON goat_records(sheet);
+            """
+        )
+        con.commit()
+        con.close()
+    except Exception as e:
+        print(f"[erro] GOAT SQLite init error: {e}")
 
 
 def _cell(v: Any) -> Any:
@@ -80,6 +108,40 @@ def _num(v: Any) -> float:
         return 0.0
 
 
+def _get_sheet_records(sheet_name: str) -> list[dict[str, Any]]:
+    # Tenta Supabase primeiro
+    try:
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute("SELECT data FROM goat_records WHERE sheet=%s", (sheet_name,))
+                rows = cur.fetchall()
+                res = []
+                for r in rows:
+                    try:
+                        res.append(json.loads(r[0]))
+                    except Exception:
+                        pass
+                if res:
+                    return res
+    except Exception:
+        pass
+
+    # Fallback para SQLite
+    try:
+        con = db_connect()
+        rows = con.execute("SELECT data FROM goat_records WHERE sheet=?", (sheet_name,)).fetchall()
+        con.close()
+        res = []
+        for r in rows:
+            try:
+                res.append(json.loads(r["data"]))
+            except Exception:
+                pass
+        return res
+    except Exception:
+        return []
+
+
 @router.post("/import")
 async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
     if not file.filename or not file.filename.endswith(".xlsx"):
@@ -93,6 +155,7 @@ async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
     now = datetime.now().replace(microsecond=0).isoformat()
     total_rows = 0
 
+    # Gravação no Postgres / Supabase se disponível
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -111,17 +174,47 @@ async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
                         record = {headers[i]: _cell(row[i]) for i in range(min(len(headers), len(row)))}
                         batch.append((sheet_name, json.dumps(record, ensure_ascii=False), now))
                     if batch:
-                        cur.executemany(
-                            "INSERT INTO goat_records(sheet,data,imported_at) VALUES(%s,%s,%s)", batch
-                        )
+                        cur.executemany("INSERT INTO goat_records(sheet,data,imported_at) VALUES(%s,%s,%s)", batch)
                         total_rows += len(batch)
                 cur.execute(
                     "INSERT INTO goat_imports(filename,sheets_count,rows_count,imported_at) VALUES(%s,%s,%s,%s)",
                     (file.filename, len(wb.sheetnames), total_rows, now),
                 )
             con.commit()
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
+    except Exception as e:
+        print(f"[aviso] Falha ao importar no Supabase, usando SQLite local: {e}")
+
+    # Gravação no SQLite local (garante que dados sempre existem)
+    try:
+        con = db_connect()
+        con.execute("DELETE FROM goat_records")
+        sq_total = 0
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            rows_iter = ws.iter_rows(values_only=True)
+            headers = next(rows_iter, None)
+            if not headers:
+                continue
+            headers = [str(h).strip() if h else f"col{i}" for i, h in enumerate(headers)]
+            for row in rows_iter:
+                if not any(v is not None for v in row):
+                    continue
+                record = {headers[i]: _cell(row[i]) for i in range(min(len(headers), len(row)))}
+                con.execute(
+                    "INSERT INTO goat_records(sheet,data,imported_at) VALUES(?,?,?)",
+                    (sheet_name, json.dumps(record, ensure_ascii=False), now),
+                )
+                sq_total += 1
+        con.execute(
+            "INSERT INTO goat_imports(filename,sheets_count,rows_count,imported_at) VALUES(?,?,?,?)",
+            (file.filename, len(wb.sheetnames), sq_total, now),
+        )
+        con.commit()
+        con.close()
+        if total_rows == 0:
+            total_rows = sq_total
+    except Exception as e:
+        print(f"[erro] Falha no SQLite import: {e}")
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -129,21 +222,9 @@ async def import_report(file: UploadFile = File(...)) -> dict[str, Any]:
     return {"sheets": len(wb.sheetnames), "rows": total_rows, "imported_at": now}
 
 
-def _sheet_rows(cur, sheet: str) -> list[dict[str, Any]]:
-    cur.execute("SELECT data FROM goat_records WHERE sheet=%s", (sheet,))
-    rows = cur.fetchall()
-    result = []
-    for r in rows:
-        try:
-            data = json.loads(r[0]) if isinstance(r, (tuple, list)) else json.loads(r["data"])
-            result.append(data)
-        except Exception:
-            continue
-    return result
-
-
 @router.get("/status")
 def status() -> dict[str, Any]:
+    # Try Supabase
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -162,39 +243,40 @@ def status() -> dict[str, Any]:
                         "imported_at": last[4],
                     }
 
-                return {
-                    "last_import": last_dict,
-                    "sheets": [{"sheet": s[0], "label": SHEET_LABELS.get(s[0], s[0]), "rows": s[1]} for s in sheets],
-                }
+                sheets_list = [{"sheet": s[0], "label": SHEET_LABELS.get(s[0], s[0]), "rows": s[1]} for s in sheets if s]
+                return {"last_import": last_dict, "sheets": sheets_list, "imports": [last_dict] if last_dict else []}
+    except Exception:
+        pass
+
+    # Fallback SQLite
+    try:
+        con = db_connect()
+        last = con.execute("SELECT * FROM goat_imports ORDER BY id DESC LIMIT 1").fetchone()
+        sheets = con.execute("SELECT sheet, COUNT(*) c FROM goat_records GROUP BY sheet").fetchall()
+        con.close()
+
+        last_dict = dict(last) if last else None
+        sheets_list = [{"sheet": s["sheet"], "label": SHEET_LABELS.get(s["sheet"], s["sheet"]), "rows": s["c"]} for s in sheets if s]
+        return {"last_import": last_dict, "sheets": sheets_list, "imports": [last_dict] if last_dict else []}
     except Exception as e:
         print(f"[aviso] GOAT status error: {e}")
-        return {"last_import": None, "sheets": []}
+        return {"last_import": None, "sheets": [], "imports": []}
 
 
 @router.get("/sheet/{sheet}")
 def sheet_rows(sheet: str, limit: int = 100) -> dict[str, Any]:
-    try:
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                rows = _sheet_rows(cur, sheet)
-    except Exception:
-        rows = []
+    rows = _get_sheet_records(sheet)
     return {"sheet": sheet, "label": SHEET_LABELS.get(sheet, sheet), "total": len(rows), "rows": rows[: max(1, min(limit, 500))]}
 
 
 @router.get("/summary")
 def summary() -> dict[str, Any]:
-    try:
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                rejeitados = _sheet_rows(cur, "Rejeitados")
-                perdas = _sheet_rows(cur, "Perdas")
-                desempenho = _sheet_rows(cur, "Desempenho de fornecedores")
-                atrasadas = _sheet_rows(cur, "Entregas atrasadas")
-                divergencia_compra = _sheet_rows(cur, "Compra x recebido")
-                divergencia_estoque = _sheet_rows(cur, "Estocagem x esperado")
-    except Exception:
-        rejeitados = perdas = desempenho = atrasadas = divergencia_compra = divergencia_estoque = []
+    rejeitados = _get_sheet_records("Rejeitados")
+    perdas = _get_sheet_records("Perdas")
+    desempenho = _get_sheet_records("Desempenho de fornecedores")
+    atrasadas = _get_sheet_records("Entregas atrasadas")
+    divergencia_compra = _get_sheet_records("Compra x recebido")
+    divergencia_estoque = _get_sheet_records("Estocagem x esperado")
 
     por_fornecedor: dict[str, dict[str, Any]] = {}
     for r in rejeitados:
@@ -216,6 +298,16 @@ def summary() -> dict[str, Any]:
     desempenho_filtrado = [d for d in desempenho if isinstance(d, dict)]
     top_desempenho = sorted(desempenho_filtrado, key=lambda x: -_num(x.get("Atrasadas hoje")) if isinstance(x, dict) else 0)[:8]
 
+    desempenho_lista = [
+        {
+            "fornecedor": d.get("Fornecedor") or "—",
+            "atrasadas_hoje": int(_num(d.get("Atrasadas hoje"))),
+            "acerto_pct": _num(d.get("Acerto da data (%)")),
+        }
+        for d in top_desempenho
+    ]
+
+    # Retorna TODOS os campos possíveis que a tela pode tentar mapear (.map)
     return {
         "totals": {
             "rejeitados_pecas": sum(int(_num(r.get("Peças"))) for r in rejeitados if isinstance(r, dict)),
@@ -226,15 +318,16 @@ def summary() -> dict[str, Any]:
             "div_estoque_count": len(divergencia_estoque),
         },
         "top_rejeitados": top_rejeitados,
+        "rejeitados": top_rejeitados,
         "top_perdas": top_perdas,
-        "desempenho": [
-            {
-                "fornecedor": d.get("Fornecedor") or "—",
-                "atrasadas_hoje": int(_num(d.get("Atrasadas hoje"))),
-                "acerto_pct": _num(d.get("Acerto da data (%)")),
-            }
-            for d in top_desempenho
-        ],
+        "perdas": top_perdas,
+        "desempenho": desempenho_lista,
+        "top_desempenho": desempenho_lista,
+        "atrasadas": atrasadas if isinstance(atrasadas, list) else [],
+        "divergencia_compra": divergencia_compra if isinstance(divergencia_compra, list) else [],
+        "divergencias_compra": divergencia_compra if isinstance(divergencia_compra, list) else [],
+        "divergencia_estoque": divergencia_estoque if isinstance(divergencia_estoque, list) else [],
+        "divergencias_estoque": divergencia_estoque if isinstance(divergencia_estoque, list) else [],
     }
 
 
