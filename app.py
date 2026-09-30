@@ -565,6 +565,12 @@ def init_db() -> None:
                 (costura_card["id"],),
             )
             ensure_receiving(con, costura_card["id"], "COSTURA", item_ids)
+    # Cards em trânsito já existentes (ex.: criados pelo GOAT) sem registro de Recebimento.
+    for orphan in con.execute(
+        """SELECT c.id FROM cards c WHERE c.current_sector='RECEBIMENTO' AND c.status='AGUARDANDO_RECEBIMENTO'
+           AND NOT EXISTS (SELECT 1 FROM receivings r WHERE r.card_id=c.id AND r.closed_at IS NULL)"""
+    ).fetchall():
+        ensure_pending_receiving(con, orphan["id"])
     con.commit()
     con.close()
 
@@ -644,6 +650,27 @@ def ensure_receiving(
             [(receiving_id, item_id) for item_id in normalized_ids],
         )
     return receiving_id
+
+
+def ensure_pending_receiving(con: sqlite3.Connection, card_id: int) -> bool:
+    """Garante o registro de Recebimento de um Card que aguarda recebimento.
+
+    Cards em trânsito criados fora da importação (ex.: card do GOAT) nascem sem
+    registro em `receivings`; sem ele a tela não tem onde gravar volumes, 10% e
+    conclusão física, e os botões de ação não aparecem.
+    """
+    card = con.execute(
+        "SELECT current_sector,status,receiving_type FROM cards WHERE id=?", (card_id,)
+    ).fetchone()
+    if not card or card["current_sector"] != "RECEBIMENTO" or card["status"] != "AGUARDANDO_RECEBIMENTO":
+        return False
+    if con.execute(
+        "SELECT 1 FROM receivings WHERE card_id=? AND closed_at IS NULL LIMIT 1", (card_id,)
+    ).fetchone():
+        return False
+    receiving_type = card["receiving_type"] if card["receiving_type"] in ("NOVA", "RETORNO") else "NOVA"
+    ensure_receiving(con, card_id, receiving_type)
+    return True
 
 
 def timer_events(con: sqlite3.Connection, receiving_id: int) -> list[sqlite3.Row]:
@@ -1309,6 +1336,8 @@ def get_card(card_id: int):
     if not row:
         con.close()
         raise HTTPException(404, "Card não encontrado.")
+    if ensure_pending_receiving(con, card_id):
+        con.commit()
     card = dict(row)
     card["status_label"] = STATUS_LABELS.get(card["status"], card["status"])
     card["items"] = [dict(r) for r in con.execute("SELECT * FROM items WHERE card_id=? ORDER BY product,color,size,id", (card_id,)).fetchall()]
