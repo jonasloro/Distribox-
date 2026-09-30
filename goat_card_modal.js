@@ -9,23 +9,23 @@ function openGoatCardModal() {
     modal.id = "goatModal";
     modal.className = "modal hidden";
     modal.innerHTML = `
-      <div class="modal-content" style="max-width: 600px; background: #fff; padding: 20px; border-radius: 8px; margin: 10% auto;">
+      <div class="modal-content" style="max-width: 600px; background: #1e1e2d; color: #fff; padding: 20px; border-radius: 8px; margin: 10% auto; border: 1px solid #323248;">
         <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-          <h2 style="margin: 0;">Importar Card do GOAT</h2>
-          <button class="close-btn" onclick="closeGoatModal()" style="background: none; border: none; font-size: 20px; cursor: pointer;">&times;</button>
+          <h2 style="margin: 0; font-size: 1.25rem;">Importar Card do GOAT</h2>
+          <button class="close-btn" onclick="closeGoatModal()" style="background: none; border: none; color: #fff; font-size: 24px; cursor: pointer;">&times;</button>
         </div>
         <div class="modal-body">
-          <div class="notice" style="margin-bottom: 12px; background: #eef6ff; padding: 10px; border-radius: 4px;">
+          <div class="notice" style="margin-bottom: 12px; background: #2b2b40; color: #8a8a9e; padding: 10px; border-radius: 4px; font-size: 0.9rem;">
             Copie todo o texto do card no GOAT e cole no campo abaixo.
           </div>
           <div class="field full">
-            <label style="display: block; font-weight: bold; margin-bottom: 5px;">Texto Copiado do GOAT</label>
-            <textarea id="goatCardText" rows="10" style="width: 100%; box-sizing: border-box; padding: 8px;" placeholder="Cole aqui o texto do card..."></textarea>
+            <label style="display: block; font-weight: bold; margin-bottom: 5px; font-size: 0.85rem;">Texto Copiado do GOAT</label>
+            <textarea id="goatCardText" rows="10" style="width: 100%; box-sizing: border-box; padding: 10px; background: #151521; color: #fff; border: 1px solid #323248; border-radius: 4px; font-family: inherit;" placeholder="Cole aqui o texto do card..."></textarea>
           </div>
         </div>
         <div class="modal-footer actions" style="margin-top: 15px; display: flex; justify-content: flex-end; gap: 10px;">
-          <button class="secondary" onclick="closeGoatModal()">Cancelar</button>
-          <button class="primary" onclick="processGoatCard()">Processar e Preencher</button>
+          <button class="secondary" onclick="closeGoatModal()" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #323248; background: transparent; color: #fff; cursor: pointer;">Cancelar</button>
+          <button class="primary" onclick="processGoatCard()" style="padding: 8px 16px; border-radius: 4px; border: none; background: #3699ff; color: #fff; cursor: pointer; font-weight: 600;">Processar e Preencher</button>
         </div>
       </div>
     `;
@@ -61,7 +61,7 @@ async function processGoatCard() {
     if (typeof toast === "function") toast("Card processado com sucesso!");
     closeGoatModal();
 
-    // Preenche automaticamente os campos da tela de recebimento se estiverem abertos
+    // 1. Se houver um formulário de recebimento aberto na tela (modal de Card):
     const recQty = document.getElementById("recQty");
     const recVolumes = document.getElementById("recVolumes");
     const recNotes = document.getElementById("recNotes");
@@ -74,6 +74,13 @@ async function processGoatCard() {
       recNotes.value = currentNotes ? `${currentNotes}\n${parsedNotes}` : parsedNotes;
     }
 
+    // 2. Se a lista estiver na tela principal e for recarregar os dados:
+    if (typeof loadReceivingQueue === "function") {
+      loadReceivingQueue();
+    } else if (typeof renderReceiving === "function") {
+      renderReceiving();
+    }
+
   } catch (err) {
     const errMsg = "Erro ao processar card: " + (err.message || err);
     if (typeof toast === "function") toast(errMsg);
@@ -81,9 +88,30 @@ async function processGoatCard() {
   }
 }
 
-// Injeta automaticamente o botão "+ Importar Card GOAT" assim que a tela de Recebimento abrir
+// Injeta o botão tanto no topo do Recebimento quanto dentro do formulário de Card
 function attachGoatButtonObserver() {
   const observer = new MutationObserver(() => {
+    // A) Injeta o botão no cabeçalho principal da página de Recebimento
+    const pageHeader = document.querySelector("h2") || document.querySelector("h1");
+    if (pageHeader && pageHeader.innerText.includes("Recebimento")) {
+      let headerContainer = pageHeader.parentElement;
+      if (headerContainer && !document.getElementById("btnImportGoatHeader")) {
+        const btn = document.createElement("button");
+        btn.id = "btnImportGoatHeader";
+        btn.type = "button";
+        btn.className = "primary";
+        btn.innerText = "+ Importar Card GOAT";
+        btn.style.cssText = "margin-left: auto; padding: 8px 16px; background: #3699ff; border: none; border-radius: 4px; color: #fff; cursor: pointer; font-weight: 600;";
+        btn.onclick = openGoatCardModal;
+        
+        headerContainer.style.display = "flex";
+        headerContainer.style.alignItems = "center";
+        headerContainer.style.justifyContent = "space-between";
+        headerContainer.appendChild(btn);
+      }
+    }
+
+    // B) Injeta o botão dentro da modal de um card específico (se aberto)
     const recQty = document.getElementById("recQty");
     if (recQty) {
       const actionsDiv = recQty.closest(".panel-body")?.querySelector(".actions");
