@@ -156,8 +156,93 @@ def normalize_header(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", normalize_text(value))
 
 
+
+
+def _clean_sgo_quantity(value: Any) -> Optional[int]:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return None
+    compact = text.replace(" ", "")
+    # Quantidade humana do SGO: 2.136 = 2136, 2.136,5 não é usada
+    # como quantidade operacional de referência.
+    if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", compact):
+        return int(compact.replace(".", ""))
+    if re.fullmatch(r"\d+", compact):
+        return int(compact)
+    return None
+
+
+def reference_blocks_from_copied_product(value: Any) -> list[dict[str, Any]]:
+    """Destrincha um bloco copiado do SGO em referências independentes.
+    
+    Exemplo esperado:
+        Lote 349.b
+        CONJUNTO Fem AUREAN ROAD MEL 22096-BLUSA
+        258.451.11.35.22096-BLUSA
+        No envio 456
+        ...
+    """
+    text = "" if value is None else str(value)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I).replace("**", "")
+    lines = [line.strip(" |\t") for line in text.splitlines() if line.strip(" |\t")]
+    if not lines:
+        return []
+
+    def is_technical_code(label: str) -> bool:
+        return bool(re.fullmatch(r"(?:\d+[.]){2,}\d+(?:[-_/][A-Za-z0-9À-ÿ._/-]+)?", label))
+
+    def is_noise(label: str) -> bool:
+        normalized = normalize_text(label)
+        return (
+            not normalized
+            or normalized.startswith(("no envio", "lote ", "id=", "sku ",
+                                       "codigo ", "código ", "total "))
+            or normalized in {"produto", "referencia", "referência"}
+        )
+
+    ref_pattern = re.compile(
+        r"\b(?:\d{4,8}|[A-Za-zÀ-ÿ]{2,}\d{2,})-[A-Za-zÀ-ÿ0-9._/-]+\b"
+    )
+    blocks: list[dict[str, Any]] = []
+
+    for idx, line in enumerate(lines):
+        if is_noise(line) or is_technical_code(line):
+            continue
+        if not ref_pattern.search(line):
+            continue
+
+        block = {
+            "reference": line,
+            "sku": None,
+            "expected_qty": None,
+        }
+
+        for look in lines[idx + 1: idx + 8]:
+            if ref_pattern.search(look) and not is_technical_code(look):
+                break
+            if block["sku"] is None and is_technical_code(look):
+                block["sku"] = look
+                continue
+            match_qty = re.search(
+                r"\bno\s+envio\b\s*[:\-]?\s*([0-9][0-9.,]*)",
+                look,
+                flags=re.I,
+            )
+            if match_qty:
+                block["expected_qty"] = _clean_sgo_quantity(match_qty.group(1))
+                break
+
+        blocks.append(block)
+
+    return blocks
+
+
 def reference_from_copied_product(value: Any, explicit_reference: Any = "") -> str:
-    """Extrai a referência comercial de um texto bruto do SGO."""
+    """Extrai uma única referência comercial de um texto bruto do SGO."""
+    blocks = reference_blocks_from_copied_product(value)
+    if blocks:
+        return blocks[0]["reference"]
+
     text = "" if value is None else str(value)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I).replace("**", "")
 
@@ -174,22 +259,9 @@ def reference_from_copied_product(value: Any, explicit_reference: Any = "") -> s
             or bool(re.fullmatch(r"\d+", normalized))
         )
 
-    lines = [line.strip(" |\t") for line in text.splitlines() if line.strip(" |\t")]
-    clean = [line for line in lines if not is_technical_code(line) and not is_source_noise(line)]
-
-    # O SGO normalmente identifica a referência pelo descritivo + código da peça,
-    # por exemplo: "CONJUNTO ... 22096-BLUSA". Esse padrão tem prioridade absoluta.
-    coded = [
-        line for line in clean
-        if re.search(r"\b\d{4,8}-[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9._/-]*\b", line)
-    ]
-    if coded:
-        return coded[0]
-
-    # Segundo nível: uma linha claramente descritiva, sem ser lote/código técnico.
-    descriptive = [line for line in clean if len(line.split()) >= 2 and re.search(r"[A-Za-zÀ-ÿ]", line)]
-    if descriptive:
-        return descriptive[0]
+    for line in [line.strip(" |\t") for line in text.splitlines() if line.strip(" |\t")]:
+        if not is_technical_code(line) and not is_source_noise(line):
+            return line
 
     fallback = "" if explicit_reference is None else str(explicit_reference).strip()
     if fallback and not is_technical_code(fallback) and not is_source_noise(fallback):
@@ -198,7 +270,7 @@ def reference_from_copied_product(value: Any, explicit_reference: Any = "") -> s
 
 
 def reference_from_import_row(row: tuple[Any, ...], headers: dict[str, int]) -> str:
-    """Procura a referência comercial em toda a linha importada, não só na coluna Produto."""
+    """Procura a referência comercial em toda a linha importada."""
     priority_names = (
         "produto", "descricao", "descrição", "mercadoria",
         "referencia", "referência", "grupo",
@@ -213,19 +285,16 @@ def reference_from_import_row(row: tuple[Any, ...], headers: dict[str, int]) -> 
         candidate = reference_from_copied_product(raw)
         if candidate:
             score = 100
-            if re.search(r"\b\d{4,8}-[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9._/-]*\b", candidate):
+            if re.search(r"\b(?:\d{4,8}|[A-Za-zÀ-ÿ]{2,}\d{2,})-[A-Za-zÀ-ÿ0-9._/-]+\b", candidate):
                 score += 50
             candidates.append((score, candidate))
 
-    # Último recurso: varre todas as células. O lote/status pode estar em qualquer
-    # coluna dependendo da versão exportada pelo SGO, então a referência não fica
-    # presa a uma única posição do relatório.
     for raw in row:
         candidate = reference_from_copied_product(raw)
         if not candidate:
             continue
         score = 10
-        if re.search(r"\b\d{4,8}-[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9._/-]*\b", candidate):
+        if re.search(r"\b(?:\d{4,8}|[A-Za-zÀ-ÿ]{2,}\d{2,})-[A-Za-zÀ-ÿ0-9._/-]+\b", candidate):
             score += 80
         if len(candidate.split()) >= 3:
             score += 10
@@ -234,8 +303,8 @@ def reference_from_import_row(row: tuple[Any, ...], headers: dict[str, int]) -> 
     if candidates:
         candidates.sort(key=lambda pair: (-pair[0], -len(pair[1])))
         return candidates[0][1]
-
     return ""
+
 
 def kanban_matches(value: Any) -> bool:
     return normalize_text(value) == normalize_text(KANBAN_TRANSITO)
@@ -614,7 +683,7 @@ def init_db() -> None:
     # da primeira linha do Produto, não o código técnico 258.xxx...
     existing_items = con.execute("SELECT id,product,reference FROM items").fetchall()
     for item in existing_items:
-        normalized_reference = reference_from_copied_product(item["product"]) or (item["reference"] or "").strip()
+        normalized_reference = reference_from_copied_product(item["product"])
         if normalized_reference and normalized_reference != (item["reference"] or "").strip():
             con.execute("UPDATE items SET reference=? WHERE id=?", (normalized_reference, item["id"]))
     # Migração funcional V4: Cards CD01 permanecem na aba Recebimento enquanto estão em Costura.
@@ -1265,25 +1334,22 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 product = str(cell(row, "produto", "") or "").strip()
                 sku = str(cell(row, "sku", "") or "").strip()
                 explicit_reference = str(cell(row, "referencia", "") or "").strip()
-                reference = reference_from_import_row(row, headers) or reference_from_copied_product(product, explicit_reference)
+                row_expected_qty = clean_int(cell(row, "qtdesperada"))
                 color_value = str(cell(row, "cor", "") or "").strip()
                 size_value = str(cell(row, "tamanho", "") or "").strip()
                 lot_id_value = clean_id(cell(row, "idlote"))
-                source_key = "|".join([
-                    purchase_id,
-                    reference,
-                    sku or product,
-                    color_value,
-                    size_value,
-                ])
-                legacy_source_key = "|".join([
-                    purchase_id,
-                    lot_id_value,
-                    sku or product,
-                    color_value,
-                    size_value,
-                    explicit_reference,
-                ])
+
+                parsed_blocks = reference_blocks_from_copied_product(product)
+                if not parsed_blocks:
+                    fallback_reference = reference_from_import_row(row, headers) or reference_from_copied_product(product, explicit_reference)
+                    parsed_blocks = [{
+                        "reference": fallback_reference,
+                        "sku": sku or None,
+                        "expected_qty": row_expected_qty,
+                    }]
+                elif len(parsed_blocks) == 1 and parsed_blocks[0].get("expected_qty") is None:
+                    parsed_blocks[0]["expected_qty"] = row_expected_qty
+
                 source_values = {
                     "status_kanban": cell(row, "statuskanban", ""),
                     "status_purchase": cell(row, "statuscompra", ""),
@@ -1293,65 +1359,99 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                     "status_pcp": cell(row, "statuspcp", ""),
                     "status_logistics": cell(row, "statuslogistica", ""),
                 }
-                item_values = (
-                    product,
-                    reference,
-                    sku,
-                    str(cell(row, "grupo", "") or "").strip(),
-                    str(cell(row, "colecao", "") or "").strip(),
-                    str(cell(row, "marca", "") or "").strip(),
-                    str(cell(row, "genero", "") or "").strip(),
-                    color_value,
-                    size_value,
-                    str(cell(row, "capsula", "") or "").strip(),
-                    str(cell(row, "lote", "") or "").strip(),
-                    lot_id_value,
-                    str(cell(row, "nf", "") or "").strip(),
-                    clean_int(cell(row, "qtdesperada")),
-                    str(cell(row, "urlfoto", "") or "").strip(),
-                    str(cell(row, "statuskanban", "") or "").strip(),
-                    source_stage_from_row(source_values),
-                    str(source_values["status_purchase"] or "").strip(),
-                    str(source_values["status_lot"] or "").strip(),
-                    str(source_values["status_quality"] or "").strip(),
-                    str(source_values["inspection_phase"] or "").strip(),
-                    str(source_values["status_pcp"] or "").strip(),
-                    str(cell(row, "costureiro", "") or "").strip(),
-                    str(source_values["status_logistics"] or "").strip(),
-                    clean_int(cell(row, "qtdrecebida")),
-                )
-                item = con.execute("SELECT id FROM items WHERE card_id=? AND source_key=?", (card_id, source_key)).fetchone()
-                if not item and legacy_source_key != source_key:
-                    # Migra o item importado pela chave antiga (que usava lote) para
-                    # a nova identidade operacional baseada na referência comercial.
+
+                for parsed in parsed_blocks:
+                    reference = str(parsed.get("reference") or "").strip()
+                    if not reference:
+                        raise ValueError("Referência comercial não encontrada no Produto/Descrição do SGO.")
+
+                    item_sku = str(parsed.get("sku") or sku or "").strip()
+                    expected_qty = (
+                        int(parsed["expected_qty"])
+                        if parsed.get("expected_qty") is not None
+                        else row_expected_qty
+                    )
+                    item_product = reference if len(parsed_blocks) > 1 else product
+
+                    source_key = "|".join([
+                        purchase_id,
+                        reference,
+                        item_sku or item_product,
+                        color_value,
+                        size_value,
+                    ])
+                    legacy_source_key = "|".join([
+                        purchase_id,
+                        lot_id_value,
+                        sku or product,
+                        color_value,
+                        size_value,
+                        explicit_reference,
+                    ])
+
+                    item_values = (
+                        item_product,
+                        reference,
+                        item_sku,
+                        str(cell(row, "grupo", "") or "").strip(),
+                        str(cell(row, "colecao", "") or "").strip(),
+                        str(cell(row, "marca", "") or "").strip(),
+                        str(cell(row, "genero", "") or "").strip(),
+                        color_value,
+                        size_value,
+                        str(cell(row, "capsula", "") or "").strip(),
+                        str(cell(row, "lote", "") or "").strip(),
+                        lot_id_value,
+                        str(cell(row, "nf", "") or "").strip(),
+                        expected_qty,
+                        str(cell(row, "urlfoto", "") or "").strip(),
+                        str(cell(row, "statuskanban", "") or "").strip(),
+                        source_stage_from_row(source_values),
+                        str(source_values["status_purchase"] or "").strip(),
+                        str(source_values["status_lot"] or "").strip(),
+                        str(source_values["status_quality"] or "").strip(),
+                        str(source_values["inspection_phase"] or "").strip(),
+                        str(source_values["status_pcp"] or "").strip(),
+                        str(cell(row, "costureiro", "") or "").strip(),
+                        str(source_values["status_logistics"] or "").strip(),
+                        clean_int(cell(row, "qtdrecebida")),
+                    )
+
                     item = con.execute(
                         "SELECT id FROM items WHERE card_id=? AND source_key=?",
-                        (card_id, legacy_source_key),
+                        (card_id, source_key),
                     ).fetchone()
+                    if not item and legacy_source_key != source_key and len(parsed_blocks) == 1:
+                        item = con.execute(
+                            "SELECT id FROM items WHERE card_id=? AND source_key=?",
+                            (card_id, legacy_source_key),
+                        ).fetchone()
+                        if item:
+                            con.execute(
+                                "UPDATE items SET source_key=? WHERE id=?",
+                                (source_key, item["id"]),
+                            )
+
                     if item:
                         con.execute(
-                            "UPDATE items SET source_key=? WHERE id=?",
-                            (source_key, item["id"]),
+                            """UPDATE items SET product=?,reference=?,sku=?,group_name=?,collection=?,brand=?,gender=?,color=?,
+                               size=?,capsule=?,lot=?,lot_id=?,nf=?,expected_qty=?,url_photo=?,status_kanban=?,source_stage=?,
+                               source_status_purchase=?,source_status_lot=?,source_status_quality=?,source_inspection_phase=?,
+                               source_status_pcp=?,source_seamstress=?,source_status_logistics=?,source_received_qty=? WHERE id=?""",
+                            (*item_values, item["id"]),
                         )
-                if item:
-                    con.execute(
-                        """UPDATE items SET product=?,reference=?,sku=?,group_name=?,collection=?,brand=?,gender=?,color=?,
-                           size=?,capsule=?,lot=?,lot_id=?,nf=?,expected_qty=?,url_photo=?,status_kanban=?,source_stage=?,
-                           source_status_purchase=?,source_status_lot=?,source_status_quality=?,source_inspection_phase=?,
-                           source_status_pcp=?,source_seamstress=?,source_status_logistics=?,source_received_qty=? WHERE id=?""",
-                        (*item_values, item["id"]),
-                    )
-                    items_updated += 1
-                else:
-                    con.execute(
-                        """INSERT INTO items(card_id,source_key,product,reference,sku,group_name,collection,brand,gender,
-                           color,size,capsule,lot,lot_id,nf,expected_qty,url_photo,status_kanban,source_stage,
-                           source_status_purchase,source_status_lot,source_status_quality,source_inspection_phase,
-                           source_status_pcp,source_seamstress,source_status_logistics,source_received_qty)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (card_id, source_key, *item_values),
-                    )
-                    items_created += 1
+                        items_updated += 1
+                    else:
+                        con.execute(
+                            """INSERT INTO items(card_id,source_key,product,reference,sku,group_name,collection,brand,gender,
+                               color,size,capsule,lot,lot_id,nf,expected_qty,url_photo,status_kanban,source_stage,
+                               source_status_purchase,source_status_lot,source_status_quality,source_inspection_phase,
+                               source_status_pcp,source_seamstress,source_status_logistics,source_received_qty)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (card_id, source_key, *item_values),
+                        )
+                        items_created += 1
+
             except Exception as exc:
                 errors.append(f"Linha {line_no}: {exc}")
 
