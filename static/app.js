@@ -2785,13 +2785,12 @@ async function submitAllocation(cardId,setor){
     toast("Informe a quantidade para esta referência.");
     return;
   }
-  const remaining=itemRemainingQty(item);
-  if(qty>remaining){
-    toast("A referência "+referenceLabel(item)+" possui somente "+remaining.toLocaleString("pt-BR")+" volume(s) restantes.");
+  if(ctx.remaining<=0){
+    toast("Não há mais volumes disponíveis para este Card.");
     return;
   }
-  if(ctx.remaining>0&&qty>ctx.remaining){
-    toast("A quantidade ultrapassa o saldo geral de "+ctx.remaining.toLocaleString("pt-BR")+" volumes.");
+  if(qty>ctx.remaining){
+    toast("A quantidade ultrapassa o saldo de "+ctx.remaining.toLocaleString("pt-BR")+" volume(s) do Card.");
     return;
   }
   try{
