@@ -1496,7 +1496,7 @@ async function createProcessing() {
     const labeling = $("processingNeedsLabeling").value;
     const importedChecks = [...document.querySelectorAll(".processing-import-item")];
     const itemIds = importedChecks.filter((input)=>input.checked).map((input)=>Number(input.value));
-    if (importedChecks.length && !itemIds.length) throw new Error("Selecione pelo menos um tamanho para produzir.");
+    if (importedChecks.length && !itemIds.length) throw new Error("Selecione pelo menos uma referência para produzir.");
     await api(`/api/cards/${currentCardId}/processing`, {
       method: "POST",
       body: JSON.stringify({
@@ -1555,7 +1555,7 @@ function processingConfigurationHtml(p, editable) {
       <div class="field"><label>Triagem</label><input class="readonly" readonly value="${p.needs_triage ? "Sim" : "Não"}"></div>
       <div class="field"><label>Etiquetagem</label><input class="readonly" readonly value="${p.needs_labeling ? "Sim" : "Não"}"></div>
       <div class="field"><label>Tipo de etiqueta</label><input class="readonly" readonly value="${esc(p.label_type||"Não se aplica")}"></div>
-      <div class="field"><label>Quantidade da Grade</label><input class="readonly" readonly value="${p.quantity_deferred_to_storage ? "Confirmar na Estocagem" : "Informada no Processamento"}"></div>
+      <div class="field"><label>Volumes</label><input class="readonly" readonly value="${p.quantity_deferred_to_storage ? "Confirmar na Estocagem" : "Informada no Processamento"}"></div>
     </div>`;
   }
   return `<h3 class="section-heading">Configuração</h3><div class="form-grid">
@@ -1565,7 +1565,7 @@ function processingConfigurationHtml(p, editable) {
     <div class="field"><label>Necessita Triagem?</label><select id="processingNeedsTriage"><option value="1" ${p.needs_triage ? "selected" : ""}>Sim</option><option value="0" ${!p.needs_triage ? "selected" : ""}>Não</option></select></div>
     <div class="field"><label>Necessita Etiquetagem?</label><select id="processingNeedsLabeling" onchange="toggleProcessingLabelField()"><option value="1" ${p.needs_labeling ? "selected" : ""}>Sim</option><option value="0" ${!p.needs_labeling ? "selected" : ""}>Não</option></select></div>
     <div class="field" id="processingLabelTypeField" style="display:${p.needs_labeling ? "block" : "none"}"><label>Tipo de etiqueta</label><select id="processingLabelType"><option value="BRANCA" ${p.label_type === "BRANCA" ? "selected" : ""}>Branca</option><option value="VERMELHA" ${p.label_type === "VERMELHA" ? "selected" : ""}>Vermelha</option><option value="PERSONALIZADA" ${p.label_type === "PERSONALIZADA" ? "selected" : ""}>Personalizada</option></select></div>
-    ${p.purchase_mode === "GRADE" ? `<div class="field full"><label class="check-line"><input id="processingDeferQty" type="checkbox" ${p.quantity_deferred_to_storage ? "checked" : ""}> A quantidade final da Grade será confirmada somente na Estocagem</label></div>` : ""}
+    ${p.purchase_mode === "GRADE" ? `<div class="field full"><label class="check-line"><input id="processingDeferQty" type="checkbox" ${p.quantity_deferred_to_storage ? "checked" : ""}> Os volumes finais serão confirmados somente na Estocagem</label></div>` : ""}
     <div class="field full"><label>Observações</label><textarea id="processingNotes">${esc(p.notes||"")}</textarea></div>
   </div><div class="actions"><button class="secondary" onclick="saveProcessingConfiguration()">Salvar configuração</button></div>`;
 }
@@ -1625,7 +1625,7 @@ function processingWorkerHtml(w, isOpen) {
       <div class="timer-value"><span>Permanência</span><strong>${fmtSeconds(timer.permanence_seconds)}</strong></div>
       <div class="timer-value"><span>Produção</span><strong>${w.produced_qty}</strong></div>
     </div>
-    <div class="form-grid" style="margin-top:10px"><div class="field"><label>Quantidade produzida por este colaborador</label><input id="processingWorkerQty_${w.id}" type="number" min="0" value="${w.produced_qty}" ${canEdit ? "" : "readonly"}></div></div>
+    <div class="form-grid" style="margin-top:10px"><div class="field"><label>Volumes produzidos por este colaborador</label><input id="processingWorkerQty_${w.id}" type="number" min="0" value="${w.produced_qty}" ${canEdit ? "" : "readonly"}></div></div>
     <div class="actions">
       ${canEdit ? `<button class="secondary" onclick="saveProcessingWorkerProduction(${w.id})">Salvar produção</button>` : ""}
       ${canControl && timer.state === "NAO_INICIADA" ? `<button class="primary" onclick="processingTimerAction(${w.id},'start')">Iniciar</button>` : ""}
