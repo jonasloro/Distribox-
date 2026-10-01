@@ -1622,11 +1622,20 @@ def dashboard():
     }
 
 
+def manual_card_reference(source_notes: Any) -> str:
+    marker = "Referência criada manualmente:"
+    text_value = str(source_notes or "")
+    if marker not in text_value:
+        return ""
+    value = text_value.split(marker, 1)[1].split(" | ", 1)[0].strip()
+    return value
+
+
 @app.get("/api/cards")
 def list_cards(scope: str = "receiving", search: str = ""):
     con = db_connect()
     sql = """SELECT c.id,c.purchase_id,c.supplier,c.original_type,c.purchase_mode,c.brand,c.forecast_date,c.current_sector,c.status,
-             c.receiving_type,c.quality_destination,c.casulo_current,c.source_location_summary,c.source_snapshot_at,c.updated_at,
+             c.receiving_type,c.quality_destination,c.casulo_current,c.source_location_summary,c.source_snapshot_at,c.source_notes,c.updated_at,
              (SELECT r.ten_percent_status FROM receivings r WHERE r.card_id=c.id ORDER BY r.id DESC LIMIT 1) receiving_activity,
              COALESCE(SUM(i.expected_qty),0) expected_total,COUNT(i.id) item_count,
              GROUP_CONCAT(DISTINCT NULLIF(TRIM(i.reference),'')) reference_list,
@@ -1653,8 +1662,20 @@ def list_cards(scope: str = "receiving", search: str = ""):
     rows = con.execute(sql, params).fetchall()
     transit = {r["id"]: awaiting_arrival(con, r["id"]) for r in rows if r["status"] in TRANSIT_STATUSES}
     con.close()
-    return [dict(r) | {"status_label": STATUS_LABELS.get(r["status"], r["status"]),
-                       "in_transit": transit.get(r["id"], False)} for r in rows]
+    result = []
+    for r in rows:
+        item = dict(r)
+        if not str(item.get("reference_list") or "").strip():
+            fallback_reference = manual_card_reference(item.get("source_notes"))
+            if fallback_reference:
+                item["reference_list"] = fallback_reference
+                item["material_search"] = " ".join(
+                    value for value in [item.get("material_search"), fallback_reference] if value
+                )
+        item["status_label"] = STATUS_LABELS.get(item["status"], item["status"])
+        item["in_transit"] = transit.get(item["id"], False)
+        result.append(item)
+    return result
 
 
 
@@ -1805,6 +1826,7 @@ def get_card(card_id: int):
         con.commit()
     card = dict(row)
     card["status_label"] = STATUS_LABELS.get(card["status"], card["status"])
+    card["manual_reference"] = manual_card_reference(card.get("source_notes"))
     card["items"] = [dict(r) for r in con.execute("SELECT * FROM items WHERE card_id=? ORDER BY product,color,size,id", (card_id,)).fetchall()]
     card["expected_total"] = sum(item["expected_qty"] for item in card["items"])
     card["rm_item_volumes"] = {str(item_id): qty for item_id, qty in item_allocation_totals(card_id, "RM").items()}
