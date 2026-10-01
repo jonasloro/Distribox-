@@ -229,6 +229,7 @@ def bootstrap_card_persistence(sqlite_con) -> dict:
         sync_all_cards_to_supabase(sqlite_con, include_items=True)
         return {"mode": "seeded_remote", "cards": local_count}
     if local_count > 0:
+        sync_all_cards_to_supabase(sqlite_con, include_items=False)
         return {"mode": "local", "cards": local_count}
     if remote_count == 0:
         return {"mode": "empty", "cards": 0}
