@@ -163,7 +163,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 function showQuickHelp() {
-  $("modalBody").innerHTML = `<div class="card-title"><div><h2>Ajuda rápida</h2><div class="card-subtitle">DistriLog — fluxo operacional</div></div></div><div class="help-grid"><button onclick="closeModal();goTo('receiving')"><b>Recebimento</b><span>Físico, tiragem de 10% e triagem.</span></button><button onclick="closeModal();goTo('quality')"><b>Qualidade</b><span>Inspeções, amostras e resultados.</span></button><button onclick="closeModal();goTo('storage-hub')"><b>Estocagem</b><span>Fila, mapa, consulta e capacidade.</span></button><button onclick="closeModal();goTo('returns-hub')"><b>Devoluções</b><span>Conferência, pendências e indicadores.</span></button></div>`;
+  $("modalBody").innerHTML = `<div class="card-title"><div><h2>Ajuda rápida</h2><div class="card-subtitle">DistriLog — fluxo operacional</div></div></div><div class="help-grid"><button onclick="closeModal();goTo('receiving')"><b>Recebimento</b><span>Recebimento físico e tiragem de 10%.</span></button><button onclick="closeModal();goTo('quality')"><b>Qualidade</b><span>Inspeções, amostras e resultados.</span></button><button onclick="closeModal();goTo('storage-hub')"><b>Estocagem</b><span>Fila, mapa, consulta e capacidade.</span></button><button onclick="closeModal();goTo('returns-hub')"><b>Devoluções</b><span>Conferência, pendências e indicadores.</span></button></div>`;
   $("modal").classList.remove("hidden");
 }
 
@@ -203,7 +203,7 @@ async function renderDashboardLegacy() {
       <div class="panel">
         <div class="panel-header">Regra de liberação</div>
         <div class="panel-body">
-          <div class="notice"><b>Mercadoria nova</b><br>Recebimento físico e separação dos 10% com triagem inicial podem terminar em qualquer ordem.</div>
+          <div class="notice"><b>Mercadoria nova</b><br>Recebimento físico e separação dos 10% podem terminar em qualquer ordem.</div>
           <div class="notice warn"><b>O Card só sai do Recebimento quando as duas partes estiverem concluídas.</b></div>
           <div class="notice success-box"><b>Retorno CD01</b><br>O Recebimento separa uma nova amostra de 10% sobre a quantidade retornada. A Qualidade usa essa amostra na Inspeção 2 obrigatória.</div>
         </div>
@@ -696,7 +696,7 @@ function receivingFormHtml(isReturn) {
   const operationItems = r.operation_items || [];
   return `
     <div class="panel-body">
-      <div class="notice ${isReturn ? "success-box" : ""}"><b>${isReturn ? "Recebimento do retorno CD01" : "Recebimento de mercadoria em trânsito"}</b><br>${isReturn ? "Registre o retorno e separe uma nova amostra de 10%. O Card só segue para a Inspeção 2 quando as duas partes terminarem." : "O recebimento físico e a separação dos 10% com triagem inicial podem ser concluídos em qualquer ordem. O Card só segue para a Qualidade quando ambos terminarem."}</div>
+      <div class="notice ${isReturn ? "success-box" : ""}"><b>${isReturn ? "Recebimento do retorno CD01" : "Recebimento de mercadoria em trânsito"}</b><br>${isReturn ? "Registre o retorno e separe uma nova amostra de 10%. O Card só segue para a Inspeção 2 quando as duas partes terminarem." : "O recebimento físico e a separação dos 10% podem ser concluídos em qualquer ordem. O Card só segue para a Qualidade quando ambos terminarem."}</div>
       ${!operate && !physicalDone ? `<div class="notice warn"><b>Somente o operador de Recebimento pode operar este Card.</b><br>${cardData.current_sector !== "RECEBIMENTO" ? "Este Card não está no Recebimento." : "Entre com um usuário do perfil Recebimento para usar os botões de ação."}</div>` : ""}
       ${operationItems.length ? `<div class="notice"><b>${operationItems.length} item(ns) fazem parte deste controle</b><br>Somente estes itens serão movimentados. Os demais itens da compra permanecerão em suas etapas atuais.</div>` : ""}
       <h3 class="section-heading">Recebimento físico</h3>
@@ -722,7 +722,7 @@ function sampleHtml(r, sampleDone, operate, isReturn=false) {
   const timer = r.timer || { state:"NAO_INICIADA",business_seconds:0,paused_seconds:0,permanence_seconds:0 };
   const operationTotal = (r.operation_items||[]).reduce((sum,item)=>sum+Number(item.expected_qty||0),0);
   return `
-    <h3 class="section-heading">${isReturn ? "Nova tiragem de 10% do retorno" : "Tiragem de 10% + triagem inicial"}</h3>
+    <h3 class="section-heading">${isReturn ? "Nova tiragem de 10% do retorno" : "Tiragem de 10%"}</h3>
     <div class="timer-card">
       <div class="form-grid">
         <div class="field"><label>${isReturn && operationTotal ? "Quantidade prevista do retorno" : "Quantidade esperada da compra"}</label><input class="readonly" readonly value="${isReturn && operationTotal ? operationTotal : cardData.expected_total}"></div>
@@ -736,10 +736,10 @@ function sampleHtml(r, sampleDone, operate, isReturn=false) {
         <div class="timer-value"><span>Permanência</span><strong id="timerPermanence">${fmtSeconds(timer.permanence_seconds)}</strong></div>
       </div>
       <div class="actions">
-        ${operate && !sampleDone && timer.state === "NAO_INICIADA" ? `<button class="primary" onclick="sampleAction('start')">${isReturn ? "Iniciar tiragem" : "Iniciar tiragem e triagem"}</button>` : ""}
-        ${operate && !sampleDone && timer.state === "EM_ANDAMENTO" ? `<button class="warning" onclick="sampleAction('pause')">Pausar</button><button class="success" onclick="sampleAction('finish')">${isReturn ? "Concluir tiragem" : "Concluir tiragem e triagem"}</button>` : ""}
-        ${operate && !sampleDone && timer.state === "PAUSADA" ? `<button class="primary" onclick="sampleAction('resume')">Retomar</button><button class="success" onclick="sampleAction('finish')">${isReturn ? "Concluir tiragem" : "Concluir tiragem e triagem"}</button>` : ""}
-        ${sampleDone ? `<span class="badge green">${isReturn ? "Nova amostra separada" : "Tiragem e triagem concluídas"}</span>` : `<span class="badge orange">${isReturn ? "Nova amostra pendente" : "Tiragem e triagem pendentes"}</span>`}
+        ${operate && !sampleDone && timer.state === "NAO_INICIADA" ? `<button class="primary" onclick="sampleAction('start')">${isReturn ? "Iniciar tiragem" : "Iniciar tiragem"}</button>` : ""}
+        ${operate && !sampleDone && timer.state === "EM_ANDAMENTO" ? `<button class="warning" onclick="sampleAction('pause')">Pausar</button><button class="success" onclick="sampleAction('finish')">${isReturn ? "Concluir tiragem" : "Concluir tiragem"}</button>` : ""}
+        ${operate && !sampleDone && timer.state === "PAUSADA" ? `<button class="primary" onclick="sampleAction('resume')">Retomar</button><button class="success" onclick="sampleAction('finish')">${isReturn ? "Concluir tiragem" : "Concluir tiragem"}</button>` : ""}
+        ${sampleDone ? `<span class="badge green">${isReturn ? "Nova amostra separada" : "Tiragem concluída"}</span>` : `<span class="badge orange">${isReturn ? "Nova amostra pendente" : "Tiragem pendente"}</span>`}
       </div>
     </div>`;
 }
