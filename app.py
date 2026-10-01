@@ -157,11 +157,9 @@ def normalize_header(value: Any) -> str:
 
 
 def reference_from_copied_product(value: Any, explicit_reference: Any = "") -> str:
-    """Extrai a referência comercial da primeira linha descritiva do Produto do SGO."""
+    """Extrai a referência comercial de um texto bruto do SGO."""
     text = "" if value is None else str(value)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
-    text = text.replace("**", "")
-    lines = [line.strip(" |\t") for line in text.splitlines() if line.strip(" |\t")]
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I).replace("**", "")
 
     def is_technical_code(label: str) -> bool:
         return bool(re.fullmatch(r"(?:\d+[.]){2,}\d+(?:[-_/][A-Za-z0-9À-ÿ._/-]+)?", label))
@@ -169,21 +167,73 @@ def reference_from_copied_product(value: Any, explicit_reference: Any = "") -> s
     def is_source_noise(label: str) -> bool:
         normalized = normalize_text(label)
         return (
-            normalized.startswith("no envio")
-            or normalized.startswith("lote ")
-            or normalized.startswith("id=")
-            or normalized.startswith("sku ")
-            or normalized.startswith("codigo ")
-            or normalized.startswith("código ")
+            not normalized
+            or normalized.startswith(("no envio", "lote ", "id=", "sku ",
+                                       "codigo ", "código ", "total "))
+            or normalized in {"produto", "referencia", "referência"}
+            or bool(re.fullmatch(r"\d+", normalized))
         )
 
-    for line in lines:
-        if not is_technical_code(line) and not is_source_noise(line):
-            return line
+    lines = [line.strip(" |\t") for line in text.splitlines() if line.strip(" |\t")]
+    clean = [line for line in lines if not is_technical_code(line) and not is_source_noise(line)]
+
+    # O SGO normalmente identifica a referência pelo descritivo + código da peça,
+    # por exemplo: "CONJUNTO ... 22096-BLUSA". Esse padrão tem prioridade absoluta.
+    coded = [
+        line for line in clean
+        if re.search(r"\b\d{4,8}-[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9._/-]*\b", line)
+    ]
+    if coded:
+        return coded[0]
+
+    # Segundo nível: uma linha claramente descritiva, sem ser lote/código técnico.
+    descriptive = [line for line in clean if len(line.split()) >= 2 and re.search(r"[A-Za-zÀ-ÿ]", line)]
+    if descriptive:
+        return descriptive[0]
 
     fallback = "" if explicit_reference is None else str(explicit_reference).strip()
     if fallback and not is_technical_code(fallback) and not is_source_noise(fallback):
         return fallback
+    return ""
+
+
+def reference_from_import_row(row: tuple[Any, ...], headers: dict[str, int]) -> str:
+    """Procura a referência comercial em toda a linha importada, não só na coluna Produto."""
+    priority_names = (
+        "produto", "descricao", "descrição", "mercadoria",
+        "referencia", "referência", "grupo",
+    )
+    candidates: list[tuple[int, str]] = []
+
+    for name in priority_names:
+        idx = headers.get(normalize_header(name))
+        if idx is None or idx >= len(row):
+            continue
+        raw = row[idx]
+        candidate = reference_from_copied_product(raw)
+        if candidate:
+            score = 100
+            if re.search(r"\b\d{4,8}-[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9._/-]*\b", candidate):
+                score += 50
+            candidates.append((score, candidate))
+
+    # Último recurso: varre todas as células. O lote/status pode estar em qualquer
+    # coluna dependendo da versão exportada pelo SGO, então a referência não fica
+    # presa a uma única posição do relatório.
+    for raw in row:
+        candidate = reference_from_copied_product(raw)
+        if not candidate:
+            continue
+        score = 10
+        if re.search(r"\b\d{4,8}-[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9._/-]*\b", candidate):
+            score += 80
+        if len(candidate.split()) >= 3:
+            score += 10
+        candidates.append((score, candidate))
+
+    if candidates:
+        candidates.sort(key=lambda pair: (-pair[0], -len(pair[1])))
+        return candidates[0][1]
 
     return ""
 
@@ -1215,14 +1265,13 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 product = str(cell(row, "produto", "") or "").strip()
                 sku = str(cell(row, "sku", "") or "").strip()
                 explicit_reference = str(cell(row, "referencia", "") or "").strip()
-                reference = reference_from_copied_product(product, explicit_reference)
+                reference = reference_from_import_row(row, headers) or reference_from_copied_product(product, explicit_reference)
                 source_key = "|".join([
                     purchase_id,
-                    clean_id(cell(row, "idlote")),
+                    reference,
                     sku or product,
                     str(cell(row, "cor", "") or "").strip(),
                     str(cell(row, "tamanho", "") or "").strip(),
-                    explicit_reference,
                 ])
                 source_values = {
                     "status_kanban": cell(row, "statuskanban", ""),
