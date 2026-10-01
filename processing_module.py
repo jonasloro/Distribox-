@@ -417,14 +417,21 @@ async def create_processing(card_id: int, request: Request):
     if not card:
         con.close()
         raise HTTPException(404, "Card não encontrado.")
+    rm_volumes = item_allocation_totals(card_id, "RM")
+    if not rm_volumes:
+        con.close()
+        raise HTTPException(400, "Nenhum volume foi alocado no RM para este Card.")
     source_subset = bool(card["source_snapshot_at"] and card["current_sector"] != "PROCESSAMENTO")
     eligible_items = []
     if source_subset:
-        eligible_items = con.execute(
-            """SELECT id,expected_qty FROM items WHERE card_id=?
-               AND source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO') ORDER BY id""",
-            (card_id,),
-        ).fetchall()
+        eligible_items = [
+            row for row in con.execute(
+                """SELECT id,expected_qty FROM items WHERE card_id=?
+                   AND source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO') ORDER BY id""",
+                (card_id,),
+            ).fetchall()
+            if int(rm_volumes.get(int(row["id"]), 0)) > 0
+        ]
         eligible_ids = {int(row["id"]) for row in eligible_items}
         if requested_item_ids:
             if not requested_item_ids.issubset(eligible_ids):
@@ -471,9 +478,12 @@ async def create_processing(card_id: int, request: Request):
     )
     processing_id = cur.lastrowid
     if mode == "GRADE" or source_subset:
-        items = eligible_items if source_subset else con.execute(
-            "SELECT id FROM items WHERE card_id=? ORDER BY id", (card_id,)
-        ).fetchall()
+        items = eligible_items if source_subset else [
+            row for row in con.execute(
+                "SELECT id FROM items WHERE card_id=? ORDER BY id", (card_id,)
+            ).fetchall()
+            if int(rm_volumes.get(int(row["id"]), 0)) > 0
+        ]
         for item in items:
             con.execute(
                 "INSERT INTO processing_item_quantities(processing_id,item_id) VALUES(?,?)",
