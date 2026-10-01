@@ -118,6 +118,17 @@ ITEM_COLUMNS = [
     "source_status_logistics", "source_received_qty",
 ]
 
+RECEIVING_COLUMNS = [
+    "id", "card_id", "receiving_type", "physical_status", "volumes", "received_qty",
+    "has_damage", "damage_description", "notes", "photo_paths", "ten_percent_required",
+    "ten_percent_min", "ten_percent_actual", "ten_percent_status",
+    "physical_completed_by", "physical_completed_at", "closed_at", "created_at",
+]
+
+TIMER_EVENT_COLUMNS = [
+    "id", "receiving_id", "event_type", "event_at", "user_id",
+]
+
 
 def init_card_persistence() -> None:
     """Cria as tabelas persistentes dos cards no Supabase sem substituir dados."""
