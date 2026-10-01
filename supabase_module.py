@@ -6,10 +6,10 @@ salt aleatório, 200 mil iterações, comparação segura contra timing attack.
 Não usa bcrypt/passlib de propósito, só o que já vem no Python padrão
 (mesma decisão do app original).
 
-Diferente do restante do OutLog One (que usa SQLite local), este módulo
-fala com o Postgres do Supabase — hoje só para autenticação, estrutura de
-casulos, SGO e Resumo de Estoque por Grupo. O resto do app (cards, tarefas,
-qualidade, processamento, devoluções) continua no SQLite, sem mudança.
+Além da autenticação e da estrutura física do CD, este módulo mantém no
+Postgres do Supabase uma cópia persistente dos cards e itens operacionais.
+O workflow continua usando SQLite local para compatibilidade com os módulos
+existentes, mas cards e itens são sincronizados para sobreviver a redeploy.
 """
 from __future__ import annotations
 
@@ -99,6 +99,153 @@ def seed_usuarios_supabase(usuarios_padrao: list[tuple[str, str, str]]) -> None:
                     (usuario, senha_hash, papel),
                 )
         con.commit()
+
+
+CARD_COLUMNS = [
+    "id", "purchase_id", "source_created_date", "supplier", "original_type",
+    "purchase_mode", "status_compra", "original_destination", "forecast_date",
+    "qtd_itens", "source_notes", "brand", "collection", "current_sector",
+    "status", "receiving_type", "quality_destination", "casulo_current",
+    "source_location_summary", "source_snapshot_at", "created_at", "updated_at",
+]
+
+ITEM_COLUMNS = [
+    "id", "card_id", "source_key", "product", "reference", "sku", "group_name",
+    "collection", "brand", "gender", "color", "size", "capsule", "lot", "lot_id",
+    "nf", "expected_qty", "url_photo", "status_kanban", "source_stage",
+    "source_status_purchase", "source_status_lot", "source_status_quality",
+    "source_inspection_phase", "source_status_pcp", "source_seamstress",
+    "source_status_logistics", "source_received_qty",
+]
+
+
+def init_card_persistence(sqlite_con) -> None:
+    """Cria as tabelas persistentes dos cards no Supabase sem substituir dados."""
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS outlog_cards (
+                    id BIGINT PRIMARY KEY,
+                    purchase_id TEXT NOT NULL UNIQUE,
+                    source_created_date TEXT, supplier TEXT, original_type TEXT,
+                    purchase_mode TEXT, status_compra TEXT, original_destination TEXT,
+                    forecast_date TEXT, qtd_itens INTEGER DEFAULT 0, source_notes TEXT,
+                    brand TEXT, collection TEXT, current_sector TEXT NOT NULL,
+                    status TEXT NOT NULL, receiving_type TEXT NOT NULL,
+                    quality_destination TEXT, casulo_current TEXT,
+                    source_location_summary TEXT, source_snapshot_at TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS outlog_items (
+                    id BIGINT PRIMARY KEY,
+                    card_id BIGINT NOT NULL REFERENCES outlog_cards(id) ON DELETE CASCADE,
+                    source_key TEXT NOT NULL, product TEXT, reference TEXT, sku TEXT,
+                    group_name TEXT, collection TEXT, brand TEXT, gender TEXT,
+                    color TEXT, size TEXT, capsule TEXT, lot TEXT, lot_id TEXT, nf TEXT,
+                    expected_qty INTEGER NOT NULL DEFAULT 0, url_photo TEXT,
+                    status_kanban TEXT, source_stage TEXT, source_status_purchase TEXT,
+                    source_status_lot TEXT, source_status_quality TEXT,
+                    source_inspection_phase TEXT, source_status_pcp TEXT,
+                    source_seamstress TEXT, source_status_logistics TEXT,
+                    source_received_qty INTEGER DEFAULT 0,
+                    UNIQUE(card_id, source_key)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_outlog_items_card ON outlog_items(card_id)")
+        con.commit()
+
+
+def _card_tuple(row) -> tuple:
+    return tuple(row[column] for column in CARD_COLUMNS)
+
+
+def _item_tuple(row) -> tuple:
+    return tuple(row[column] for column in ITEM_COLUMNS)
+
+
+def sync_card_to_supabase(sqlite_con, card_id: int) -> None:
+    row = sqlite_con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+    if not row:
+        return
+    init_card_persistence(sqlite_con)
+    placeholders = ",".join(["%s"] * len(CARD_COLUMNS))
+    updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in CARD_COLUMNS if column != "id")
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO outlog_cards ({",".join(CARD_COLUMNS)}) VALUES ({placeholders}) 
+                f"ON CONFLICT (id) DO UPDATE SET {updates}",
+                _card_tuple(row),
+            )
+        con.commit()
+
+
+def delete_card_from_supabase(card_id: int) -> None:
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("DELETE FROM outlog_cards WHERE id=%s", (card_id,))
+        con.commit()
+
+
+def sync_all_cards_to_supabase(sqlite_con, include_items: bool = False) -> None:
+    """Sincroniza o estado local dos cards; itens entram quando solicitado (importação)."""
+    cards = sqlite_con.execute("SELECT * FROM cards ORDER BY id").fetchall()
+    if not cards:
+        return
+    init_card_persistence(sqlite_con)
+    placeholders = ",".join(["%s"] * len(CARD_COLUMNS))
+    updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in CARD_COLUMNS if column != "id")
+    card_sql = (
+        f"INSERT INTO outlog_cards ({",".join(CARD_COLUMNS)}) VALUES ({placeholders})"
+        f" ON CONFLICT (id) DO UPDATE SET {updates}"
+    )
+    item_sql = (
+        f"INSERT INTO outlog_items ({",".join(ITEM_COLUMNS)}) VALUES ({",".join(["%s"] * len(ITEM_COLUMNS))})"
+        " ON CONFLICT (id) DO UPDATE SET "
+        + ", ".join(f"{column}=EXCLUDED.{column}" for column in ITEM_COLUMNS if column != "id")
+    )
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.executemany(card_sql, [_card_tuple(row) for row in cards])
+            if include_items:
+                items = sqlite_con.execute("SELECT * FROM items ORDER BY id").fetchall()
+                cur.executemany(item_sql, [_item_tuple(row) for row in items])
+        con.commit()
+
+
+def restore_cards_from_supabase_if_needed(sqlite_con) -> dict:
+    """Na base local vazia, restaura cards/itens preservando os IDs originais."""
+    local_count = sqlite_con.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"]
+    if int(local_count or 0) > 0:
+        sync_all_cards_to_supabase(sqlite_con, include_items=False) if _remote_cards_empty() else None
+        return {"mode": "local", "cards": int(local_count)}
+    init_card_persistence(sqlite_con)
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("SELECT * FROM outlog_cards ORDER BY id")
+            cards = cur.fetchall()
+            cur.execute("SELECT * FROM outlog_items ORDER BY id")
+            items = cur.fetchall()
+    if not cards:
+        return {"mode": "empty", "cards": 0}
+    columns = ",".join(CARD_COLUMNS)
+    marks = ",".join(["?"] * len(CARD_COLUMNS))
+    for row in cards:
+        sqlite_con.execute(f"INSERT OR IGNORE INTO cards ({columns}) VALUES ({marks})", _card_tuple(row))
+    item_columns = ",".join(ITEM_COLUMNS)
+    item_marks = ",".join(["?"] * len(ITEM_COLUMNS))
+    for row in items:
+        sqlite_con.execute(f"INSERT OR IGNORE INTO items ({item_columns}) VALUES ({item_marks})", _item_tuple(row))
+    return {"mode": "restored", "cards": len(cards), "items": len(items)}
+
+
+def _remote_cards_empty() -> bool:
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM outlog_cards")
+            return int(cur.fetchone()["n"] or 0) == 0
 
 
 def seed_warehouse_supabase(gerar_todos_casulos) -> None:
