@@ -432,3 +432,38 @@ input:disabled,select:disabled,textarea:disabled{
 .bulk-toolbar label,
 .casulo-box label{color:#b9c4d2}
 .bulk-footer{box-shadow:0 -6px 14px rgba(0,0,0,.35)}
+
+/* ===== Conversa e Calendário (collab) ===== */
+.collab-chat{display:grid;grid-template-columns:240px 1fr;gap:12px;height:calc(100vh - 150px);min-height:420px}
+.collab-side,.collab-main,.collab-cal{background:#212429;color:#eef4fb;border:1px solid #33383f;border-radius:10px}
+.collab-side{padding:8px;overflow:auto;display:flex;flex-direction:column;gap:4px}
+.collab-sep{font-size:11px;font-weight:800;text-transform:uppercase;color:#8fa0b3;margin:10px 6px 2px}
+.collab-contact{display:flex;justify-content:space-between;align-items:center;text-align:left;background:transparent;color:#eef4fb;border:0;border-radius:8px;padding:9px 10px;cursor:pointer}
+.collab-contact:hover{background:#2b3038}.collab-contact.active{background:#173654}
+.collab-badge,#chatNavBadge{background:#e5484d;color:#fff;border-radius:999px;font-size:11px;padding:1px 7px;font-weight:800}
+#chatNavBadge{display:none;margin-left:6px}
+.collab-main{display:flex;flex-direction:column;min-height:0}
+.collab-title{padding:12px 16px;border-bottom:1px solid #33383f;font-weight:800}
+.collab-msgs{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+.collab-msg{max-width:72%;background:#2b3038;border-radius:12px 12px 12px 3px;padding:8px 12px;align-self:flex-start;word-break:break-word}
+.collab-msg.mine{align-self:flex-end;background:#173654;border-radius:12px 12px 3px 12px}
+.collab-msg small{display:block;color:#8fa0b3;font-size:11px;margin-bottom:2px}
+.collab-input{display:flex;gap:8px;padding:10px;border-top:1px solid #33383f}
+.collab-input input{flex:1;background:#171a1e;color:#eef4fb;border:1px solid #33383f;border-radius:8px;padding:10px}
+.collab-empty{color:#8fa0b3;padding:14px;text-align:center}
+.collab-cal{padding:14px}
+.collab-calhead{display:flex;align-items:center;gap:8px;margin-bottom:10px}.collab-calhead h2{flex:1;text-transform:capitalize;margin:0;text-align:center}
+.collab-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.collab-wd{text-align:center;font-size:12px;font-weight:800;color:#8fa0b3;padding:4px}
+.collab-day{min-height:92px;background:#171a1e;color:#eef4fb;border:1px solid #33383f;border-radius:8px;padding:5px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.collab-day.other{opacity:.45}.collab-day.today{border-color:#62a9ff}.collab-day.sel{background:#173654}
+.collab-day span{font-weight:800;font-size:13px}.collab-day em{font-size:11px;color:#8fa0b3}
+.collab-chip{font-style:normal;font-size:11px;border-radius:5px;padding:1px 5px;background:#245a8f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.k-REUNIAO{--kc:#7b5cd6}.k-PRAZO{--kc:#e5484d}.k-LEMBRETE{--kc:#d6a529}.k-COMPROMISSO{--kc:#245a8f}
+.collab-chip.k-REUNIAO{background:#7b5cd6}.collab-chip.k-PRAZO{background:#b8353a}.collab-chip.k-LEMBRETE{background:#8f6f12}
+.collab-panel{margin-top:14px}.collab-panel h3{text-transform:capitalize}
+.collab-event{display:flex;justify-content:space-between;gap:10px;background:#171a1e;border:1px solid #33383f;border-left:4px solid var(--kc,#245a8f);border-radius:8px;padding:10px 12px;margin-bottom:8px}
+.collab-event p{margin:6px 0 0;white-space:pre-wrap}
+.collab-form{background:#171a1e;border:1px solid #33383f;border-radius:10px;padding:12px;margin-top:10px}
+.collab-check{display:flex;gap:6px;align-items:center;margin:8px 0}
+@media(max-width:760px){.collab-chat{grid-template-columns:1fr;height:auto}.collab-side{flex-direction:row;overflow-x:auto}.collab-day{min-height:62px}.collab-chip{display:none}}

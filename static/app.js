@@ -133,6 +133,8 @@ async function goTo(view) {
     if (view === "import") await renderImport();
     if (view === "test") await renderTestTools();
     if (view === "history") await renderGlobalHistory();
+    if (view === "chat") await renderChat();
+    if (view === "calendar") await renderCalendar();
   } catch (error) {
     console.error(error);
     $("mainContent").innerHTML = `<div class="state-panel error-state"><b>Não foi possível carregar esta visão.</b><span>${esc(error.message)}</span><button class="primary" onclick="refreshCurrentView()">Tentar novamente</button></div>`;

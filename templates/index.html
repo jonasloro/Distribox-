@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DistriLog — Operação Logística Integrada</title>
-  <link rel="stylesheet" href="/static/style.css?v=3.1.2">
+  <link rel="stylesheet" href="/static/style.css?v=3.2.0">
   <script src="/static/goat_card_modal.js?v=1.2.0"></script>
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 </head>
@@ -41,6 +41,9 @@
         <div class="nav-group">Saída e retorno</div>
         <button class="nav-item" data-view="shipping" onclick="goTo('shipping')"><span class="nav-icon">♧</span>Expedição</button>
         <button class="nav-item" data-view="returns-hub" onclick="goTo('returns-hub')"><span class="nav-icon">↩</span>Devoluções</button>
+        <div class="nav-group">Equipe</div>
+        <button class="nav-item" data-view="chat" onclick="goTo('chat')"><span class="nav-icon">✉</span>Conversas<span id="chatNavBadge"></span></button>
+        <button class="nav-item" data-view="calendar" onclick="goTo('calendar')"><span class="nav-icon">▤</span>Calendário</button>
         <div class="nav-group">Gestão</div>
         <button class="nav-item" data-view="goat-indicators" onclick="goTo('goat-indicators')"><span class="nav-icon">☑</span>Indicadores (GOAT)</button>
         <button class="nav-item" data-view="production" onclick="goTo('production')"><span class="nav-icon">★</span>Produção por Pessoa</button>
@@ -80,6 +83,7 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+  <script src="/static/collab.js?v=1.0.0"></script>
   <script src="/static/app.js?v=3.1.4"></script>
 </body>
 </html>
