@@ -1454,13 +1454,15 @@ async function renderProcessingTab() {
 
 function processingSetupHtml(importedItems=[]) {
   const modeLabel = cardData.purchase_mode === "GRADE" ? "Grade — importado como Private Label" : cardData.purchase_mode === "SALDO" ? "Saldo" : "Tipo não reconhecido";
+  const rmVolumes=cardData.rm_item_volumes||{};
+  importedItems=importedItems.filter(function(item){return Number(rmVolumes[String(item.id)]||0)>0;});
   const imported = importedItems.length > 0;
-  const importedQty = importedItems.reduce((sum,item)=>sum+Number(item.expected_qty||0),0);
+  const importedQty = importedItems.reduce((sum,item)=>sum+Number(rmVolumes[String(item.id)]||0),0);
   const importedPicker = !imported ? "" : cardData.purchase_mode === "GRADE" ? (
     '<div class="notice success-box"><b>Selecione as referências que entrarão nesta produção.</b><br>Somente os volumes das referências posicionadas em Aguardando Processamento serão movimentados. A composição de grade será definida posteriormente na Triagem.</div>' +
     '<div class="table-wrap compact-picker"><table class="compact-table"><thead><tr><th class="check-col"><input id="processingImportedAll" type="checkbox" checked onchange="toggleImportedProcessingItems(this.checked)"></th><th>Produto</th><th>Referência</th><th>Volumes</th></tr></thead><tbody>' +
       importedItems.map(function(item){
-        return '<tr><td><input class="processing-import-item" type="checkbox" value="'+item.id+'" checked onchange="updateImportedProcessingSummary()"></td><td><b>'+esc(item.product||"—")+'</b></td><td><b>'+esc(item.reference||item.sku||"—")+'</b></td><td><b>'+item.expected_qty+'</b></td></tr>';
+        return '<tr><td><input class="processing-import-item" type="checkbox" value="'+item.id+'" checked onchange="updateImportedProcessingSummary()"></td><td><b>'+esc(item.product||"—")+'</b></td><td><b>'+esc(item.reference||item.sku||"—")+'</b><small>'+Number(item.expected_qty||0).toLocaleString("pt-BR")+' peças</small></td><td><b>'+Number(rmVolumes[String(item.id)]||0).toLocaleString("pt-BR")+'</b></td></tr>';
       }).join("") +
     '</tbody></table></div><div id="processingImportedSummary" class="queue-counter"><b>'+importedItems.length+'</b> referência(s) • <b>'+importedQty+'</b> volume(s) selecionado(s)</div>'
   ) : (
@@ -1517,7 +1519,15 @@ async function createProcessing() {
 }
 
 function toggleImportedProcessingItems(checked){document.querySelectorAll(".processing-import-item").forEach((input)=>input.checked=checked);updateImportedProcessingSummary();}
-function updateImportedProcessingSummary(){const selected=[...document.querySelectorAll(".processing-import-item:checked")];const ids=new Set(selected.map((input)=>Number(input.value)));const items=(cardData.items||[]).filter((item)=>ids.has(item.id));const qty=items.reduce((sum,item)=>sum+Number(item.expected_qty||0),0);if($("processingImportedSummary"))$("processingImportedSummary").innerHTML=`<b>${items.length}</b> tamanho(s) • <b>${qty}</b> peça(s) selecionada(s)`;if($("processingImportedAll"))$("processingImportedAll").checked=selected.length===document.querySelectorAll(".processing-import-item").length;}
+function updateImportedProcessingSummary(){
+  const selected=[...document.querySelectorAll(".processing-import-item:checked")];
+  const ids=new Set(selected.map((input)=>Number(input.value)));
+  const items=(cardData.items||[]).filter((item)=>ids.has(Number(item.id)));
+  const rmVolumes=cardData.rm_item_volumes||{};
+  const qty=items.reduce((sum,item)=>sum+Number(rmVolumes[String(item.id)]||0),0);
+  if($("processingImportedSummary"))$("processingImportedSummary").innerHTML=`<b>${items.length}</b> referência(s) • <b>${qty}</b> volume(s) selecionado(s)`;
+  if($("processingImportedAll"))$("processingImportedAll").checked=selected.length===document.querySelectorAll(".processing-import-item").length;
+}
 
 function processingDetailHtml(p) {
   const isOpen = p.status === "ABERTO";
@@ -1679,7 +1689,7 @@ function processingQuantitiesHtml(p, editable) {
   return '<h3 class="section-heading">Volumes — Referências</h3>'+deferredNotice+
     '<div class="table-wrap"><table><thead><tr><th>Referência</th><th>Volumes previstos</th><th>Volumes processados</th><th>Volumes estocados</th></tr></thead><tbody>'+
     p.items.map(function(item){
-      return '<tr><td><b>'+esc(item.reference||item.sku||item.product||"—")+'</b></td><td>'+item.expected_qty+'</td><td><input class="table-input processing-item-qty" data-item-id="'+item.item_id+'" type="number" min="0" value="'+item.processed_qty+'" '+(editable ? "" : "readonly")+'></td><td>'+item.stored_qty+'</td></tr>';
+      return '<tr><td><b>'+esc(item.reference||item.sku||item.product||"—")+'</b><small>'+Number(item.expected_qty||0).toLocaleString("pt-BR")+' peças</small></td><td>'+Number(item.volume_expected||0).toLocaleString("pt-BR")+'</td><td><input class="table-input processing-item-qty" data-item-id="'+item.item_id+'" type="number" min="0" value="'+item.processed_qty+'" '+(editable ? "" : "readonly")+'></td><td>'+item.stored_qty+'</td></tr>';
     }).join("")+
     '</tbody></table></div><div class="actions">'+(editable ? '<button class="primary" onclick="saveProcessingQuantities()">Salvar volumes por referência</button>' : '')+copyButton+'</div>';
 }
