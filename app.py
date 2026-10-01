@@ -1662,6 +1662,7 @@ async def complete_dispatch(card_id: int, request: Request):
     volumes = data.get("volumes")
     notes = str(data.get("notes") or "").strip()
     photo_paths = data.get("photo_paths") or []
+    requested_item_ids = sorted({int(value) for value in (data.get("item_ids") or []) if str(value).isdigit() and int(value) > 0})
     if not carrier or not seamstress:
         raise HTTPException(400, "Informe a transportadora e o nome do costureiro.")
     if dispatched_qty in (None, "") or volumes in (None, ""):
@@ -1679,6 +1680,25 @@ async def complete_dispatch(card_id: int, request: Request):
     if destination not in ("CD01", "CD02"):
         con.close()
         raise HTTPException(400, "O destino da Qualidade não está definido.")
+
+    operation_items = con.execute(
+        """SELECT i.id,i.expected_qty
+           FROM receivings r
+           JOIN receiving_operation_items roi ON roi.receiving_id=r.id
+           JOIN items i ON i.id=roi.item_id
+           WHERE r.card_id=? AND r.receiving_type='COSTURA' AND r.closed_at IS NULL
+           ORDER BY i.id""",
+        (card_id,),
+    ).fetchall()
+    operation_ids = {int(row["id"]) for row in operation_items}
+    item_ids = requested_item_ids or sorted(operation_ids)
+    if operation_ids and not set(item_ids).issubset(operation_ids):
+        con.close()
+        raise HTTPException(400, "Há referências selecionadas para despacho que não pertencem ao controle da Costura.")
+    if not item_ids:
+        con.close()
+        raise HTTPException(400, "Nenhuma referência foi disponibilizada para o despacho da Costura.")
+
     return_forecast = add_business_days(date.today(), 7).isoformat() if destination == "CD01" else None
     con.execute(
         """INSERT INTO dispatches(card_id,destination,carrier,seamstress_name,dispatched_qty,volumes,photo_paths,
@@ -1686,28 +1706,40 @@ async def complete_dispatch(card_id: int, request: Request):
         (card_id, destination, carrier, seamstress, int(dispatched_qty), int(volumes), to_json(photo_paths),
          notes, return_forecast, user_id, iso_now(), iso_now()),
     )
+
+    marks = ",".join("?" for _ in item_ids)
     if destination == "CD01":
+        con.execute(
+            f"""UPDATE items SET source_stage='EM_COSTURA',source_status_quality='Concluído'
+                WHERE card_id=? AND id IN ({marks})""",
+            (card_id, *item_ids),
+        )
         next_sector, next_status = "RECEBIMENTO", "EM_COSTURA_CD01"
+        ensure_receiving(con, card_id, "COSTURA", item_ids)
         description = (
-            f"{user['name']} despachou a mercadoria para Costura CD01 pela transportadora {carrier}, "
+            f"{user['name']} despachou {len(item_ids)} referência(s) para Costura CD01 pela transportadora {carrier}, "
             f"costureiro {seamstress}. Previsão de retorno: {return_forecast}."
         )
     else:
+        con.execute(
+            f"""UPDATE items SET source_stage='CONCLUIDO',source_status_quality='Concluído'
+                WHERE card_id=? AND id IN ({marks})""",
+            (card_id, *item_ids),
+        )
         next_sector, next_status = "FORA_FLUXO", "DESPACHO_CD02"
         description = (
-            f"{user['name']} despachou a mercadoria para Costura com destino CD02 pela transportadora {carrier}, "
+            f"{user['name']} despachou {len(item_ids)} referência(s) para Costura CD02 pela transportadora {carrier}, "
             f"costureiro {seamstress}. Card encerrado no fluxo interno."
         )
+
     con.execute(
         "UPDATE cards SET current_sector=?,status=?,receiving_type=?,updated_at=? WHERE id=?",
         (next_sector, next_status, "COSTURA" if destination == "CD01" else card["receiving_type"], iso_now(), card_id),
     )
-    if destination == "CD01":
-        ensure_receiving(con, card_id, "COSTURA")
     add_history(con, card_id, "DESPACHO_COSTURA", description, user_id)
     con.commit()
     con.close()
-    return {"ok": True, "next_status": next_status}
+    return {"ok": True, "next_status": next_status, "item_ids": item_ids}
 
 
 @app.post("/api/test/cards/{card_id}/quality-return")
@@ -1756,12 +1788,24 @@ async def simulate_costura_return(card_id: int, request: Request):
     if card["status"] != "EM_COSTURA_CD01":
         con.close()
         raise HTTPException(400, "Somente Cards em Costura CD01 podem retornar.")
+    returned_ids = [int(row["id"]) for row in con.execute(
+        "SELECT id FROM items WHERE card_id=? AND source_stage='EM_COSTURA' AND expected_qty>0 ORDER BY id",
+        (card_id,),
+    ).fetchall()]
+    if not returned_ids:
+        con.close()
+        raise HTTPException(400, "Nenhuma referência em Costura disponível para retornar.")
+    marks = ",".join("?" for _ in returned_ids)
+    con.execute(
+        f"UPDATE items SET source_stage='RETORNO_COSTURA' WHERE card_id=? AND id IN ({marks})",
+        (card_id, *returned_ids),
+    )
     con.execute(
         """UPDATE cards SET current_sector='RECEBIMENTO',status='AGUARDANDO_RECEBIMENTO_RETORNO',
            receiving_type='RETORNO',updated_at=? WHERE id=?""",
         (iso_now(), card_id),
     )
-    ensure_receiving(con, card_id, "RETORNO")
+    ensure_receiving(con, card_id, "RETORNO", returned_ids)
     add_history(
         con,
         card_id,
