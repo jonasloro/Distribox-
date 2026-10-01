@@ -190,6 +190,28 @@ def delete_card_from_supabase(card_id: int) -> None:
         con.commit()
 
 
+
+def sync_card_items_to_supabase(sqlite_con, card_id: int) -> None:
+    """Substitui no Supabase exatamente os itens locais de um Card."""
+    items = sqlite_con.execute(
+        "SELECT * FROM items WHERE card_id=? ORDER BY id",
+        (card_id,),
+    ).fetchall()
+    columns_sql = ",".join(ITEM_COLUMNS)
+    placeholders = ",".join(["%s"] * len(ITEM_COLUMNS))
+    updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in ITEM_COLUMNS if column != "id")
+    item_sql = (
+        f"INSERT INTO outlog_items ({columns_sql}) VALUES ({placeholders})"
+        f" ON CONFLICT (id) DO UPDATE SET {updates}"
+    )
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("DELETE FROM outlog_items WHERE card_id=%s", (card_id,))
+            if items:
+                cur.executemany(item_sql, [_item_tuple(row) for row in items])
+        con.commit()
+
+
 def sync_all_cards_to_supabase(sqlite_con, include_items: bool = False) -> None:
     """Sincroniza o estado local dos cards; itens entram quando solicitado (importação)."""
     cards = sqlite_con.execute("SELECT * FROM cards ORDER BY id").fetchall()
