@@ -135,8 +135,11 @@ def suggest_position(setor: str, zona: Optional[str] = None) -> dict[str, Any]:
     return best
 
 
+GLOBAL_ALLOCATION_SECTORS = ("RM", "QA", "PR")
+
+
 def _card_or_404(cur, card_id: int) -> dict[str, Any]:
-    cur.execute("SELECT * FROM cards WHERE id=%s", (card_id,))
+    cur.execute("SELECT * FROM outlog_cards WHERE id=%s", (card_id,))
     card = cur.fetchone()
     if not card:
         raise HTTPException(404, "Card não encontrado.")
@@ -173,7 +176,7 @@ def allocate(card_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                         raise HTTPException(400, "Selecione a referência antes de alocar.")
 
                     cur.execute(
-                        "SELECT id,expected_qty,product,reference,sku,color,size FROM items WHERE id=%s AND card_id=%s",
+                        "SELECT id,expected_qty,product,reference,sku,color,size FROM outlog_items WHERE id=%s AND card_id=%s",
                         (item_id, card_id),
                     )
                     item = cur.fetchone()
@@ -183,8 +186,10 @@ def allocate(card_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                     cur.execute(
                         """SELECT COALESCE(SUM(quantidade),0) qty
                            FROM card_allocations
-                           WHERE card_id=%s AND setor=%s AND item_id=%s""",
-                        (card_id, setor, item_id),
+                           WHERE card_id=%s
+                             AND setor IN (%s,%s,%s)
+                             AND item_id=%s""",
+                        (card_id, *GLOBAL_ALLOCATION_SECTORS, item_id),
                     )
                     already = int(cur.fetchone()["qty"] or 0)
                     if setor != "RM":
@@ -228,7 +233,7 @@ def allocation_status(card_id: int, setor: str) -> dict[str, Any]:
                     """SELECT a.item_id,SUM(a.quantidade) qty,
                               i.product,i.reference,i.sku,i.color,i.size,i.expected_qty
                        FROM card_allocations a
-                       LEFT JOIN items i ON i.id=a.item_id
+                       LEFT JOIN outlog_items i ON i.id=a.item_id
                        WHERE a.card_id=%s AND a.setor=%s
                        GROUP BY a.item_id,i.product,i.reference,i.sku,i.color,i.size,i.expected_qty
                        ORDER BY i.product,i.reference,i.color,i.size,a.item_id""",
@@ -245,8 +250,31 @@ def allocation_status(card_id: int, setor: str) -> dict[str, Any]:
                     (card_id, setor),
                 )
                 item_positions = cur.fetchall()
+
+                cur.execute(
+                    """SELECT COALESCE(SUM(quantidade),0) total
+                       FROM card_allocations
+                       WHERE card_id=%s AND setor IN (%s,%s,%s)""",
+                    (card_id, *GLOBAL_ALLOCATION_SECTORS),
+                )
+                global_total = int(cur.fetchone()["total"] or 0)
+
+                cur.execute(
+                    """SELECT a.item_id,SUM(a.quantidade) qty,
+                              i.product,i.reference,i.sku,i.color,i.size,i.expected_qty
+                       FROM card_allocations a
+                       LEFT JOIN outlog_items i ON i.id=a.item_id
+                       WHERE a.card_id=%s
+                         AND a.setor IN (%s,%s,%s)
+                         AND a.item_id IS NOT NULL
+                       GROUP BY a.item_id,i.product,i.reference,i.sku,i.color,i.size,i.expected_qty
+                       ORDER BY i.product,i.reference,i.color,i.size,a.item_id""",
+                    (card_id, *GLOBAL_ALLOCATION_SECTORS),
+                )
+                global_item_rows = cur.fetchall()
     except RuntimeError:
         rows, item_rows, item_positions = [], [], []
+        global_total, global_item_rows = 0, []
 
     total = sum(int(r["qty"] or 0) for r in rows)
     grouped: dict[int, dict[str, Any]] = {}
@@ -277,12 +305,28 @@ def allocation_status(card_id: int, setor: str) -> dict[str, Any]:
             "quantidade": int(r["qty"] or 0),
         })
 
+    global_item_grouped: dict[int, dict[str, Any]] = {}
+    for r in global_item_rows:
+        item_id = int(r["item_id"]) if r["item_id"] is not None else 0
+        global_item_grouped[item_id] = {
+            "item_id": item_id,
+            "product": r["product"],
+            "reference": r["reference"],
+            "sku": r["sku"],
+            "color": r["color"],
+            "size": r["size"],
+            "expected_qty": int(r["expected_qty"] or 0),
+            "total_alocado": int(r["qty"] or 0),
+        }
+
     return {
         "card_id": card_id,
         "setor": setor,
         "total_alocado": total,
+        "global_total_alocado": global_total,
         "posicoes": [{"address": r["address"], "quantidade": int(r["qty"] or 0)} for r in rows],
         "item_allocations": list(grouped.values()),
+        "global_item_allocations": list(global_item_grouped.values()),
     }
 
 
