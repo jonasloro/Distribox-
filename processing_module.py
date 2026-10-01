@@ -267,7 +267,11 @@ def processing_validation(con: sqlite3.Connection, processing_id: int) -> list[s
     elif any(row["status"] != "CONCLUIDA" for row in workers):
         errors.append("Todos os colaboradores precisam finalizar sua produção.")
 
-    worker_total = sum(int(row["produced_qty"] or 0) for row in workers)
+    if record["operation_profile"] == "CADASTRO_ENTRADA" and not any(r["function"] == "CADASTRO" for r in workers):
+        errors.append("Atribua e conclua a tarefa de Cadastro.")
+    if workers and all(r["function"] == "CADASTRO" for r in workers):
+        errors.append("Atribua e conclua a tarefa de Triagem.")
+    worker_total = sum(int(row["produced_qty"] or 0) for row in workers if row["function"] != "CADASTRO")
     if record["purchase_mode"] == "SALDO":
         processed_total = int(record["processed_qty_general"] or 0)
         if processed_total <= 0:
@@ -534,10 +538,13 @@ async def add_processing_worker(processing_id: int, request: Request):
     if not record or record["status"] != "ABERTO":
         con.close()
         raise HTTPException(400, "O Processamento não está aberto.")
-    func = str(payload.get("function") or "PROCESSAMENTO").strip().upper()
-    if func not in {"PROCESSAMENTO", "TRIAGEM", "ETIQUETAGEM", "ESTOCAGEM"}:
+    func = str(payload.get("function") or "TRIAGEM").strip().upper()
+    if func not in {"CADASTRO", "TRIAGEM"}:
         con.close()
-        raise HTTPException(400, "Função inválida.")
+        raise HTTPException(400, "Função inválida. Use Cadastro ou Triagem.")
+    if func == "CADASTRO" and record["operation_profile"] != "CADASTRO_ENTRADA":
+        con.close()
+        raise HTTPException(400, "Esta compra não tem Cadastro (perfil: Somente Entrada).")
     target = con.execute("SELECT * FROM users WHERE id=?", (worker_user_id,)).fetchone()
     if not target or target["role"] != "processamento":
         con.close()
@@ -629,6 +636,14 @@ async def processing_timer_action(worker_id: int, action: str, request: Request)
     if not valid:
         con.close()
         raise HTTPException(400, f"Ação incompatível com o estado atual: {state}.")
+    if action == "start" and worker["function"] != "CADASTRO":
+        prof = con.execute("SELECT operation_profile FROM processing_records WHERE id=?", (worker["processing_id"],)).fetchone()
+        if prof and prof["operation_profile"] == "CADASTRO_ENTRADA" and not con.execute(
+            "SELECT 1 FROM processing_workers WHERE processing_id=? AND function='CADASTRO' AND status='CONCLUIDA'",
+            (worker["processing_id"],),
+        ).fetchone():
+            con.close()
+            raise HTTPException(400, "Conclua o Cadastro antes de iniciar a Triagem.")
     if action == "finish" and int(worker["produced_qty"] or 0) < 0:
         con.close()
         raise HTTPException(400, "Informe a produção do colaborador.")
@@ -657,6 +672,10 @@ async def processing_timer_action(worker_id: int, action: str, request: Request)
             print(f"[aviso] não liberou endereço do card {worker['card_id']}: {exc}")
     add_history(con, worker["card_id"], "TEMPO_PROCESSAMENTO", f"{worker['worker_name']} {verbs[action]} o Processamento.", user_id)
     refresh_processing_card_status(con, worker["processing_id"])
+    if action == "finish":
+        rec_now = con.execute("SELECT * FROM processing_records WHERE id=?", (worker["processing_id"],)).fetchone()
+        if rec_now and rec_now["status"] == "ABERTO" and not processing_validation(con, worker["processing_id"]):
+            _apply_completion(con, rec_now, actor, user_id, worker["processing_id"])
     con.commit()
     detail = processing_card_data(con, worker["card_id"])
     con.close()
@@ -748,6 +767,35 @@ async def copy_stored_to_processed(processing_id: int, request: Request):
     return detail
 
 
+def _apply_completion(con, record, actor, user_id, processing_id):
+    """Conclui o Processamento e encaminha: Etiquetagem (se precisa) ou direto à Estocagem."""
+    if record["needs_labeling"]:
+        next_sector, next_status, route_text = "ETIQUETAGEM", "AGUARDANDO_ETIQUETAGEM", "Card encaminhado à Etiquetagem."
+    else:
+        next_sector, next_status, route_text = "ESTOCAGEM", "AGUARDANDO_ESTOCAGEM", "Card encaminhado à Estocagem."
+    now = iso_now()
+    con.execute(
+        "UPDATE processing_records SET status='CONCLUIDO',completed_by=?,completed_at=? WHERE id=?",
+        (user_id, now, processing_id),
+    )
+    if "source_subset" in record.keys() and record["source_subset"]:
+        stage = "ETIQUETAGEM" if record["needs_labeling"] else "ESTOCAGEM"
+        item_ids = [row["item_id"] for row in con.execute(
+            "SELECT item_id FROM processing_item_quantities WHERE processing_id=?", (processing_id,)
+        ).fetchall()]
+        if item_ids:
+            marks = ",".join("?" for _ in item_ids)
+            con.execute(f"UPDATE items SET source_stage=? WHERE id IN ({marks})", (stage, *item_ids))
+        con.execute("UPDATE cards SET updated_at=? WHERE id=?", (now, record["card_id"]))
+        route_text = f"Itens selecionados encaminhados a {stage.title()}; o Card-mãe permanece no Recebimento."
+    else:
+        con.execute(
+            "UPDATE cards SET current_sector=?,status=?,updated_at=? WHERE id=?",
+            (next_sector, next_status, now, record["card_id"]),
+        )
+    add_history(con, record["card_id"], "PROCESSAMENTO_CONCLUIDO", f"{actor['name']} concluiu o Processamento. {route_text}", user_id)
+
+
 @router.post("/processing/{processing_id}/complete")
 async def complete_processing(processing_id: int, request: Request):
     payload = await request.json()
@@ -765,33 +813,7 @@ async def complete_processing(processing_id: int, request: Request):
     if errors:
         con.close()
         raise HTTPException(400, "Não é possível concluir: " + " | ".join(errors[:12]))
-    if record["needs_triage"]:
-        next_sector, next_status, route_text = "TRIAGEM", "AGUARDANDO_TRIAGEM", "Card encaminhado à Triagem."
-    elif record["needs_labeling"]:
-        next_sector, next_status, route_text = "ETIQUETAGEM", "AGUARDANDO_ETIQUETAGEM", "Card encaminhado à Etiquetagem."
-    else:
-        next_sector, next_status, route_text = "ESTOCAGEM", "AGUARDANDO_ESTOCAGEM", "Card encaminhado à Estocagem."
-    now = iso_now()
-    con.execute(
-        "UPDATE processing_records SET status='CONCLUIDO',completed_by=?,completed_at=? WHERE id=?",
-        (user_id, now, processing_id),
-    )
-    if "source_subset" in record.keys() and record["source_subset"]:
-        stage = "TRIAGEM" if record["needs_triage"] else "ETIQUETAGEM" if record["needs_labeling"] else "ESTOCAGEM"
-        item_ids = [row["item_id"] for row in con.execute(
-            "SELECT item_id FROM processing_item_quantities WHERE processing_id=?", (processing_id,)
-        ).fetchall()]
-        if item_ids:
-            marks = ",".join("?" for _ in item_ids)
-            con.execute(f"UPDATE items SET source_stage=? WHERE id IN ({marks})", (stage, *item_ids))
-        con.execute("UPDATE cards SET updated_at=? WHERE id=?", (now, record["card_id"]))
-        route_text = f"Itens selecionados encaminhados a {stage.title()}; o Card-mãe permanece no Recebimento."
-    else:
-        con.execute(
-            "UPDATE cards SET current_sector=?,status=?,updated_at=? WHERE id=?",
-            (next_sector, next_status, now, record["card_id"]),
-        )
-    add_history(con, record["card_id"], "PROCESSAMENTO_CONCLUIDO", f"{actor['name']} concluiu o Processamento. {route_text}", user_id)
+    _apply_completion(con, record, actor, user_id, processing_id)
     con.commit()
     detail = processing_card_data(con, record["card_id"])
     con.close()

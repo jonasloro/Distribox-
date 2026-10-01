@@ -1418,7 +1418,6 @@ function processingSetupHtml(importedItems=[]) {
       <div class="field"><label>Tipo da compra</label><input class="readonly" readonly value="${esc(modeLabel)}"></div>
       <div class="field"><label>Marca</label><input id="processingBrand" value="${esc(cardData.brand||"")}" placeholder="Informe a marca"></div>
       <div class="field"><label>Perfil da compra</label><select id="processingProfile"><option value="">Selecione</option><option value="CADASTRO_ENTRADA">Cadastro + Entrada</option><option value="SOMENTE_ENTRADA">Somente Entrada</option></select></div>
-      <div class="field"><label>Necessita Triagem?</label><select id="processingNeedsTriage"><option value="">Selecione</option><option value="1">Sim</option><option value="0">Não</option></select></div>
       <div class="field"><label>Necessita Etiquetagem?</label><select id="processingNeedsLabeling" onchange="toggleProcessingLabelField()"><option value="">Selecione</option><option value="1">Sim</option><option value="0">Não</option></select></div>
       <div class="field" id="processingLabelTypeField" style="display:none"><label>Tipo de etiqueta</label><select id="processingLabelType"><option value="">Selecione</option><option value="BRANCA">Branca — descrição, EAN e valor</option><option value="VERMELHA">Vermelha — valor</option><option value="PERSONALIZADA">Personalizada</option></select></div>
       ${cardData.purchase_mode === "GRADE" ? `<div class="field full"><label class="check-line"><input id="processingDeferQty" type="checkbox"> A quantidade final da Grade será confirmada somente na Estocagem</label></div>` : ""}
@@ -1435,7 +1434,7 @@ function toggleProcessingLabelField() {
 
 async function createProcessing() {
   try {
-    const triage = $("processingNeedsTriage").value;
+    const triage = "1";
     const labeling = $("processingNeedsLabeling").value;
     const importedChecks = [...document.querySelectorAll(".processing-import-item")];
     const itemIds = importedChecks.filter((input)=>input.checked).map((input)=>Number(input.value));
@@ -1538,12 +1537,22 @@ function processingUserOptions(selected="") {
   return processingUsers.map((u) => `<option value="${u.id}" ${String(u.id)===String(selected)?"selected":""}>${esc(u.name)}</option>`).join("");
 }
 
+function processingStagesHtml(p) {
+  const fn = (w) => (w.function === "CADASTRO" ? "CADASTRO" : "TRIAGEM");
+  const done = (st) => p.workers.some((w) => fn(w) === st && w.status === "CONCLUIDA");
+  const started = (st) => p.workers.some((w) => fn(w) === st);
+  const stages = [...(p.operation_profile === "CADASTRO_ENTRADA" ? ["CADASTRO"] : []), "TRIAGEM"];
+  const label = (st) => (st === "CADASTRO" ? "Cadastro" : "Triagem");
+  const chips = stages.map((st) => `<span class="badge ${done(st) ? "green" : started(st) ? "purple" : "gray"}">${done(st) ? "✓ " : ""}${label(st)}</span>`).join(" → ");
+  return `<div class="notice">${chips} → <span class="badge gray">${p.needs_labeling ? "Etiquetagem" : "Estocagem"}</span><br><small>Ao concluir a última tarefa (com as quantidades por tamanho informadas), o card segue sozinho.</small></div>`;
+}
+
 function processingWorkersHtml(p, isOpen) {
   const currentAlready = p.workers.some((w) => w.user_id === currentUser.id);
   const addArea = isOpen && canOperateProcessing() ? `<div class="bulk-toolbar processing-worker-add">
-    ${currentUser.role === "processamento" ? `<div class="selected-inspector"><span>Operador</span><b>${esc(currentUser.name)}</b></div><button class="primary" ${currentAlready ? "disabled" : ""} onclick="addProcessingWorker(${currentUser.id})">Assumir Card</button>` : `<div class="field"><label>Função</label><select id="processingFunctionSelect"><option value="PROCESSAMENTO">Processamento</option><option value="TRIAGEM">Triagem</option><option value="ETIQUETAGEM">Etiquetagem</option><option value="ESTOCAGEM">Estocagem</option></select></div><div class="field"><label>Adicionar colaborador</label><select id="processingWorkerSelect"><option value="">Selecione</option>${processingUserOptions()}</select></div><button class="primary" onclick="addProcessingWorker(Number($(\"processingWorkerSelect\").value||0))">Adicionar</button>`}
+    ${currentUser.role === "processamento" ? `<div class="selected-inspector"><span>Operador</span><b>${esc(currentUser.name)}</b></div><button class="primary" ${currentAlready ? "disabled" : ""} onclick="addProcessingWorker(${currentUser.id})">Assumir Card</button>` : `<div class="field"><label>Tarefa</label><select id="processingFunctionSelect">${p.operation_profile==="CADASTRO_ENTRADA"?'<option value="CADASTRO">Cadastro</option>':""}<option value="TRIAGEM">Triagem</option></select></div><div class="field"><label>Adicionar colaborador</label><select id="processingWorkerSelect"><option value="">Selecione</option>${processingUserOptions()}</select></div><button class="primary" onclick="addProcessingWorker(Number($(\"processingWorkerSelect\").value||0))">Adicionar</button>`}
   </div>` : "";
-  return `<h3 class="section-heading">Colaboradores e produção</h3>${addArea}${p.workers.length ? p.workers.map((w)=>processingWorkerHtml(w,isOpen)).join("") : '<div class="notice">Nenhum colaborador assumiu o Card.</div>'}`;
+  return `<h3 class="section-heading">Tarefas do Processamento</h3>${processingStagesHtml(p)}${addArea}${p.workers.length ? p.workers.map((w)=>`<small>Tarefa: <b>${w.function === "CADASTRO" ? "Cadastro" : "Triagem"}</b></small>`+processingWorkerHtml(w,isOpen)).join("") : '<div class="notice">Nenhum colaborador assumiu o Card.</div>'}`;
 }
 
 function processingWorkerHtml(w, isOpen) {
