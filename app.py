@@ -997,6 +997,14 @@ def update_new_receiving_flow(con: sqlite3.Connection, receiving_id: int, user_i
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    # Após a normalização das referências na base local, replica cards e itens
+    # para o Supabase para manter o espelho atualizado entre redeploys.
+    try:
+        con = db_connect()
+        sync_all_cards_to_supabase(con, include_items=True)
+        con.close()
+    except Exception as e:
+        print(f"[aviso] não consegui sincronizar cards/itens no startup: {e}")
     init_quality_db()
     init_processing_db()
     ensure_worker_function_column()
