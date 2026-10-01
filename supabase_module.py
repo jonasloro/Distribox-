@@ -170,15 +170,16 @@ def sync_card_to_supabase(sqlite_con, card_id: int) -> None:
     if not row:
         return
     init_card_persistence(sqlite_con)
+    columns_sql = ",".join(CARD_COLUMNS)
     placeholders = ",".join(["%s"] * len(CARD_COLUMNS))
     updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in CARD_COLUMNS if column != "id")
+    sql = (
+        f"INSERT INTO outlog_cards ({columns_sql}) VALUES ({placeholders})"
+        f" ON CONFLICT (id) DO UPDATE SET {updates}"
+    )
     with pg_connect() as con:
         with con.cursor() as cur:
-            cur.execute(
-                f"INSERT INTO outlog_cards ({",".join(CARD_COLUMNS)}) VALUES ({placeholders}) 
-                f"ON CONFLICT (id) DO UPDATE SET {updates}",
-                _card_tuple(row),
-            )
+            cur.execute(sql, _card_tuple(row))
         con.commit()
 
 
@@ -195,16 +196,19 @@ def sync_all_cards_to_supabase(sqlite_con, include_items: bool = False) -> None:
     if not cards:
         return
     init_card_persistence(sqlite_con)
+    card_columns_sql = ",".join(CARD_COLUMNS)
+    item_columns_sql = ",".join(ITEM_COLUMNS)
     placeholders = ",".join(["%s"] * len(CARD_COLUMNS))
+    item_placeholders = ",".join(["%s"] * len(ITEM_COLUMNS))
     updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in CARD_COLUMNS if column != "id")
+    item_updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in ITEM_COLUMNS if column != "id")
     card_sql = (
-        f"INSERT INTO outlog_cards ({",".join(CARD_COLUMNS)}) VALUES ({placeholders})"
+        f"INSERT INTO outlog_cards ({card_columns_sql}) VALUES ({placeholders})"
         f" ON CONFLICT (id) DO UPDATE SET {updates}"
     )
     item_sql = (
-        f"INSERT INTO outlog_items ({",".join(ITEM_COLUMNS)}) VALUES ({",".join(["%s"] * len(ITEM_COLUMNS))})"
-        " ON CONFLICT (id) DO UPDATE SET "
-        + ", ".join(f"{column}=EXCLUDED.{column}" for column in ITEM_COLUMNS if column != "id")
+        f"INSERT INTO outlog_items ({item_columns_sql}) VALUES ({item_placeholders})"
+        f" ON CONFLICT (id) DO UPDATE SET {item_updates}"
     )
     with pg_connect() as con:
         with con.cursor() as cur:
