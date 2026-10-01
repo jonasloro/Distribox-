@@ -259,45 +259,57 @@ def processing_validation(con: sqlite3.Connection, processing_id: int) -> list[s
         errors.append("Informe o perfil da compra.")
     if record["needs_labeling"] and record["label_type"] not in {"BRANCA", "VERMELHA", "PERSONALIZADA"}:
         errors.append("Informe o tipo de etiqueta.")
-    workers = con.execute(
-        "SELECT * FROM processing_workers WHERE processing_id=? ORDER BY id", (processing_id,)
-    ).fetchall()
+    workers = con.execute("SELECT * FROM processing_workers WHERE processing_id=? ORDER BY id", (processing_id,)).fetchall()
     if not workers:
         errors.append("Nenhum colaborador assumiu o Processamento.")
     elif any(row["status"] != "CONCLUIDA" for row in workers):
         errors.append("Todos os colaboradores precisam finalizar sua produção.")
-
     if record["operation_profile"] == "CADASTRO_ENTRADA" and not any(r["function"] == "CADASTRO" for r in workers):
         errors.append("Atribua e conclua a tarefa de Cadastro.")
     if workers and all(r["function"] == "CADASTRO" for r in workers):
         errors.append("Atribua e conclua a tarefa de Triagem.")
+
     worker_total = sum(int(row["produced_qty"] or 0) for row in workers if row["function"] != "CADASTRO")
+    rm_volumes = item_allocation_totals(record["card_id"], "RM")
+    rm_total = sum(rm_volumes.values())
+
     if record["purchase_mode"] == "SALDO":
         processed_total = int(record["processed_qty_general"] or 0)
         if processed_total <= 0:
-            errors.append("Informe a quantidade geral processada.")
+            errors.append("Informe os volumes gerais processados.")
+        if processed_total > rm_total:
+            errors.append(f"Os volumes processados ({processed_total}) não podem superar os volumes liberados pelo RM ({rm_total}).")
     else:
         item_rows = con.execute(
-            """SELECT pi.*,i.product,i.color,i.size FROM processing_item_quantities pi
-               JOIN items i ON i.id=pi.item_id WHERE pi.processing_id=? ORDER BY pi.id""",
+            """SELECT pi.*,i.product,i.reference,i.color,i.size
+               FROM processing_item_quantities pi
+               JOIN items i ON i.id=pi.item_id
+               WHERE pi.processing_id=? ORDER BY pi.id""",
             (processing_id,),
         ).fetchall()
         processed_total = sum(int(row["processed_qty"] or 0) for row in item_rows)
-        if not record["quantity_deferred_to_storage"]:
-            pending = [row for row in item_rows if int(row["processed_qty"] or 0) <= 0]
-            if pending:
-                errors.append(f"Informe os volumes processados de todas as referências ({len(pending)} pendente(s)).")
-        elif processed_total == 0:
-            # Regra aprovada: em algumas Grades a quantidade final será conhecida somente na Estocagem.
-            processed_total = 0
+        pending = []
+        for row in item_rows:
+            available = int(rm_volumes.get(int(row["item_id"]), 0))
+            processed = int(row["processed_qty"] or 0)
+            if processed > available:
+                errors.append(
+                    f"A referência {row['reference'] or row['product'] or row['item_id']} recebeu "
+                    f"{processed} volume(s) processados, mas o RM liberou somente {available} volume(s)."
+                )
+            if available > 0 and processed <= 0:
+                pending.append(row)
+        if not record["quantity_deferred_to_storage"] and pending:
+            errors.append(f"Informe os volumes processados de todas as referências ({len(pending)} pendente(s)).")
+        elif not record["quantity_deferred_to_storage"] and item_rows and not rm_volumes:
+            errors.append("Nenhum volume do RM foi encontrado para este Processamento.")
 
     if processed_total > 0 and worker_total != processed_total:
-        errors.append(
-            f"A produção dos colaboradores ({worker_total}) deve fechar a quantidade processada ({processed_total})."
-        )
+        errors.append(f"A produção dos colaboradores ({worker_total}) deve fechar os volumes processados ({processed_total}).")
     if processed_total == 0 and worker_total > 0:
-        errors.append("Há produção apontada por colaboradores, mas nenhuma quantidade processada registrada.")
+        errors.append("Há produção apontada por colaboradores, mas nenhum volume processado registrado.")
     return errors
+
 
 
 def processing_card_data(con: sqlite3.Connection, card_id: int) -> Optional[dict[str, Any]]:
@@ -312,13 +324,21 @@ def processing_card_data(con: sqlite3.Connection, card_id: int) -> Optional[dict
     if not record:
         return None
     data = dict(record)
+    rm_volumes = item_allocation_totals(card_id, "RM")
     item_rows = con.execute(
         """SELECT pi.*,i.product,i.reference,i.sku,i.color,i.size,i.expected_qty
            FROM processing_item_quantities pi JOIN items i ON i.id=pi.item_id
            WHERE pi.processing_id=? ORDER BY i.product,i.color,i.size,i.id""",
         (record["id"],),
     ).fetchall()
-    data["items"] = [dict(row) for row in item_rows]
+    item_data=[]
+    for row in item_rows:
+        item=dict(row)
+        item["volume_expected"]=int(rm_volumes.get(int(row["item_id"]),0))
+        item_data.append(item)
+    data["items"]=item_data
+    data["rm_item_volumes"]={str(k):v for k,v in rm_volumes.items()}
+
     worker_rows = con.execute(
         """SELECT pw.*,u.name user_name FROM processing_workers pw
            JOIN users u ON u.id=pw.user_id WHERE pw.processing_id=? ORDER BY pw.id""",
@@ -330,27 +350,27 @@ def processing_card_data(con: sqlite3.Connection, card_id: int) -> Optional[dict
         worker["timer"] = worker_timer_summary(con, row["id"])
         workers.append(worker)
     data["workers"] = workers
-    if data.get("source_subset"):
-        expected_total = sum(int(row["expected_qty"] or 0) for row in item_rows)
-    else:
-        expected_total = con.execute(
-            "SELECT COALESCE(SUM(expected_qty),0) total FROM items WHERE card_id=?", (card_id,)
-        ).fetchone()["total"]
+
+    expected_total = (
+        sum(int(item["volume_expected"] or 0) for item in item_data)
+        if data.get("source_subset")
+        else sum(rm_volumes.values())
+    )
     processed_total = (
         int(record["processed_qty_general"] or 0)
         if record["purchase_mode"] == "SALDO"
-        else sum(int(row["processed_qty"] or 0) for row in item_rows)
+        else sum(int(row["processed_qty"] or 0) for row in item_data)
     )
     stored_total = (
         int(record["stored_qty_general"] or 0)
         if record["purchase_mode"] == "SALDO"
-        else sum(int(row["stored_qty"] or 0) for row in item_rows)
+        else sum(int(row["stored_qty"] or 0) for row in item_data)
     )
-    data["totals"] = {
-        "expected": int(expected_total or 0),
-        "processed": processed_total,
-        "stored": stored_total,
-        "worker_production": sum(int(row["produced_qty"] or 0) for row in worker_rows),
+    data["totals"]={
+        "expected":int(expected_total or 0),
+        "processed":processed_total,
+        "stored":stored_total,
+        "worker_production":sum(int(row["produced_qty"] or 0) for row in worker_rows),
     }
     data["validation_errors"] = processing_validation(con, record["id"]) if record["status"] == "ABERTO" else []
     return data
