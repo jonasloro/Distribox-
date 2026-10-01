@@ -32,6 +32,7 @@ from supabase_module import (
     seed_warehouse_supabase,
     bootstrap_card_persistence,
     sync_all_cards_to_supabase,
+    sync_card_items_to_supabase,
     delete_card_from_supabase,
 )
 from warehouse_structure import gerar_todos_casulos
@@ -1772,6 +1773,10 @@ def get_card(card_id: int):
     repaired = repair_stored_reference_items(con, card_id)
     if repaired:
         con.commit()
+        try:
+            sync_card_items_to_supabase(con, card_id)
+        except Exception as exc:
+            print(f"[aviso] não consegui sincronizar os itens reparados do Card {card_id}: {exc}")
     row = con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
     if not row:
         con.close()
