@@ -473,8 +473,14 @@ async function openCard(cardId, tab = "receiving") {
   cardData = await api(`/api/cards/${cardId}`);
   receivingPhotos = cardData.receiving?.photo_paths || [];
   dispatchPhotos = cardData.dispatch?.photo_paths || [];
+  const cardReference = String(
+    cardData.manual_reference ||
+    cardData.items?.find((item) => String(item.reference || "").trim())?.reference ||
+    ""
+  ).trim();
+  const cardDisplayName = cardReference || cardData.purchase_id;
   $("modalBody").innerHTML = `
-    <div class="card-title"><div><h2>Card da Compra ${esc(cardData.purchase_id)}</h2><div class="card-subtitle">${esc(cardData.supplier||"—")} • ${esc(cardData.brand||"—")} • ${cardData.expected_total} peças</div></div><div class="card-title-actions"><span class="badge ${statusClass(cardData.status)}">${esc(cardData.status_label)}</span>${currentUser?.role==="admin"?`<button class="danger small-btn" onclick="deleteCard(${cardData.id})">Excluir Card</button>`:""}</div></div>
+    <div class="card-title"><div><h2>Card ${esc(cardDisplayName)}</h2><div class="card-subtitle">${esc(cardData.supplier||"—")} • ${esc(cardData.brand||"—")} • ${cardData.expected_total} peças</div></div><div class="card-title-actions"><span class="badge ${statusClass(cardData.status)}">${esc(cardData.status_label)}</span>${currentUser?.role==="admin"?`<button class="danger small-btn" onclick="deleteCard(${cardData.id})">Excluir Card</button>`:""}</div></div>
     <div class="summary-grid">
       <div class="summary-box"><span>Setor atual</span><strong>${esc(cardData.current_sector)}</strong></div>
       <div class="summary-box"><span>Tipo de entrada</span><strong>${cardData.receiving_type === "RETORNO" ? "Retorno da Costura" : "Mercadoria nova"}</strong></div>
