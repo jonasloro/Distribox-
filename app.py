@@ -58,6 +58,22 @@ async def disable_stale_interface_cache(request: Request, call_next):
 
 @app.middleware("http")
 async def persist_card_state(request: Request, call_next):
+    allocation_card_id = None
+    allocation_path = request.method == "POST" and request.url.path.startswith("/api/positions/cards/") and request.url.path.endswith("/allocate")
+    if allocation_path:
+        try:
+            allocation_card_id = int(request.url.path.rstrip("/").split("/")[-2])
+        except (TypeError, ValueError):
+            allocation_card_id = None
+
+    if allocation_card_id:
+        try:
+            con = db_connect()
+            sync_card_items_to_supabase(con, allocation_card_id)
+            con.close()
+        except Exception as e:
+            print(f"[aviso] não consegui sincronizar os itens do Card {allocation_card_id} antes da alocação: {e}")
+
     response = await call_next(request)
     if (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
