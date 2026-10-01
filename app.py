@@ -166,12 +166,26 @@ def reference_from_copied_product(value: Any, explicit_reference: Any = "") -> s
     def is_technical_code(label: str) -> bool:
         return bool(re.fullmatch(r"(?:\d+[.]){2,}\d+(?:[-_/][A-Za-z0-9À-ÿ._/-]+)?", label))
 
+    def is_source_noise(label: str) -> bool:
+        normalized = normalize_text(label)
+        return (
+            normalized.startswith("no envio")
+            or normalized.startswith("lote ")
+            or normalized.startswith("id=")
+            or normalized.startswith("sku ")
+            or normalized.startswith("codigo ")
+            or normalized.startswith("código ")
+        )
+
     for line in lines:
-        if not is_technical_code(line):
+        if not is_technical_code(line) and not is_source_noise(line):
             return line
 
     fallback = "" if explicit_reference is None else str(explicit_reference).strip()
-    return fallback if fallback and not is_technical_code(fallback) else (lines[0] if lines else "")
+    if fallback and not is_technical_code(fallback) and not is_source_noise(fallback):
+        return fallback
+
+    return ""
 
 def kanban_matches(value: Any) -> bool:
     return normalize_text(value) == normalize_text(KANBAN_TRANSITO)
