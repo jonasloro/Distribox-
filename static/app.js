@@ -2475,17 +2475,16 @@ function renderAllocationItemPicker(){
 
   box.innerHTML=items.map(function(item){
     const allocated=itemAllocatedQty(item.id);
-    const remaining=itemRemainingQty(item);
     const selected=Number(ctx.selectedItemId)===Number(item.id);
-    return '<button type="button" class="allocation-item-card ' + (selected?'is-selected ':'') + (remaining===0?'is-complete':'') +
+    return '<button type="button" class="allocation-item-card ' + (selected?'is-selected ':'') +
       '" onclick="selectAllocationItem(' + Number(item.id) + ')">' +
         '<div class="allocation-item-main">' +
           '<span class="allocation-item-ref">' + esc(referenceLabel(item)) + '</span>' +
-          '<small>' + esc(referenceSecondaryLabel(item) || "Sem detalhe") + '</small>' +
+          '<small>'+esc(referenceSecondaryLabel(item) || "Sem detalhe")+'</small>' +
         '</div>' +
         '<div class="allocation-item-numbers">' +
-          '<b>' + allocated.toLocaleString("pt-BR") + '</b><span>alocadas</span>' +
-          '<b>' + remaining.toLocaleString("pt-BR") + '</b><span>restantes</span>' +
+          '<b>'+allocated.toLocaleString("pt-BR")+'</b><span>volumes alocados</span>' +
+          '<b>'+Number(item.expected_qty||0).toLocaleString("pt-BR")+'</b><span>peças da referência</span>' +
         '</div>' +
       '</button>';
   }).join("");
@@ -2640,8 +2639,9 @@ async function loadPositionAllocator(cardId,setor){
   const items=(cardData.items||[]).filter(function(i){return Number(i.expected_qty||0)>0;});
   const opIds=(rcv.operation_items||[]).map(function(i){return Number(i.id);}).filter(Boolean);
   const sourceItems=opIds.length?items.filter(function(i){return opIds.includes(Number(i.id));}):items;
-  const sourceTotal=sourceItems.reduce(function(sum,i){return sum+Number(i.expected_qty||0);},0);
-  const firstAvailable=sourceItems.find(function(i){return itemRemainingQty(i)>0;}) || sourceItems[0] || null;
+  const receivingVolumes=Number(rcv.volumes||0);
+  const sourceTotal=receivingVolumes;
+  const firstAvailable=sourceItems[0] || null;
   const firstAllocated=status.item_allocations?.find(function(i){return Number(i.total_alocado||0)>0;}) || null;
 
   window.allocCtx={
@@ -2721,8 +2721,8 @@ function updateReferenceRemaining(){
   const item=selectedAllocationItem();
   if(!ctx||!item) return;
   const remaining=itemRemainingQty(item);
-  if($("positionReferenceRemainingStat")) $("positionReferenceRemainingStat").textContent=remaining.toLocaleString("pt-BR");
-  if($("positionReferenceRemainingLabel")) $("positionReferenceRemainingLabel").textContent=remaining.toLocaleString("pt-BR")+" volumes restantes";
+  if($("positionReferenceRemainingStat")) $("positionReferenceRemainingStat").textContent=itemAllocatedQty(item.id).toLocaleString("pt-BR");
+  if($("positionReferenceRemainingLabel")) $("positionReferenceRemainingLabel").textContent=itemAllocatedQty(item.id).toLocaleString("pt-BR")+" volumes alocados";
   if($("positionSelectedItemLabel")) $("positionSelectedItemLabel").textContent=referenceDetailLabel(item);
 }
 
@@ -2753,11 +2753,11 @@ function updateAllocHint(){
   const item=selectedAllocationItem();
   if(!el||!ctx||!item)return;
   const raw=Number($("posQty")?.value||0);
-  const remaining=itemRemainingQty(item);
-  el.textContent="Saldo da referência: "+remaining.toLocaleString("pt-BR")+" volumes";
-  if(raw>remaining) el.textContent+=" — quantidade acima do saldo.";
+  el.textContent="Volumes restantes no Card: "+Number(ctx.remaining||0).toLocaleString("pt-BR");
+  if(raw>Number(ctx.remaining||0)) el.textContent+=" — quantidade acima do saldo do Card.";
   updateReferenceRemaining();
 }
+
 async function submitAllocation(cardId,setor){
   const ctx=window.allocCtx||{};
   const item=selectedAllocationItem();
