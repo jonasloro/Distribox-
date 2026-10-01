@@ -212,6 +212,41 @@ def sync_card_items_to_supabase(sqlite_con, card_id: int) -> None:
         con.commit()
 
 
+def sync_card_with_items_to_supabase(sqlite_con, card_id: int) -> None:
+    """Persiste um Card e todos os seus itens no mesmo commit do Supabase."""
+    card = sqlite_con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+    if not card:
+        return
+    items = sqlite_con.execute(
+        "SELECT * FROM items WHERE card_id=? ORDER BY id",
+        (card_id,),
+    ).fetchall()
+
+    card_columns_sql = ",".join(CARD_COLUMNS)
+    item_columns_sql = ",".join(ITEM_COLUMNS)
+    card_placeholders = ",".join(["%s"] * len(CARD_COLUMNS))
+    item_placeholders = ",".join(["%s"] * len(ITEM_COLUMNS))
+    card_updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in CARD_COLUMNS if column != "id")
+    item_updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in ITEM_COLUMNS if column != "id")
+
+    card_sql = (
+        f"INSERT INTO outlog_cards ({card_columns_sql}) VALUES ({card_placeholders})"
+        f" ON CONFLICT (id) DO UPDATE SET {card_updates}"
+    )
+    item_sql = (
+        f"INSERT INTO outlog_items ({item_columns_sql}) VALUES ({item_placeholders})"
+        f" ON CONFLICT (id) DO UPDATE SET {item_updates}"
+    )
+
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute(card_sql, _card_tuple(card))
+            cur.execute("DELETE FROM outlog_items WHERE card_id=%s", (card_id,))
+            if items:
+                cur.executemany(item_sql, [_item_tuple(row) for row in items])
+        con.commit()
+
+
 def sync_all_cards_to_supabase(sqlite_con, include_items: bool = False) -> None:
     """Sincroniza o estado local dos cards; itens entram quando solicitado (importação)."""
     cards = sqlite_con.execute("SELECT * FROM cards ORDER BY id").fetchall()
