@@ -119,7 +119,7 @@ ITEM_COLUMNS = [
 ]
 
 
-def init_card_persistence(sqlite_con) -> None:
+def init_card_persistence() -> None:
     """Cria as tabelas persistentes dos cards no Supabase sem substituir dados."""
     with pg_connect() as con:
         with con.cursor() as cur:
@@ -169,7 +169,6 @@ def sync_card_to_supabase(sqlite_con, card_id: int) -> None:
     row = sqlite_con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
     if not row:
         return
-    init_card_persistence(sqlite_con)
     columns_sql = ",".join(CARD_COLUMNS)
     placeholders = ",".join(["%s"] * len(CARD_COLUMNS))
     updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in CARD_COLUMNS if column != "id")
@@ -195,7 +194,6 @@ def sync_all_cards_to_supabase(sqlite_con, include_items: bool = False) -> None:
     cards = sqlite_con.execute("SELECT * FROM cards ORDER BY id").fetchall()
     if not cards:
         return
-    init_card_persistence(sqlite_con)
     card_columns_sql = ",".join(CARD_COLUMNS)
     item_columns_sql = ",".join(ITEM_COLUMNS)
     placeholders = ",".join(["%s"] * len(CARD_COLUMNS))
@@ -219,21 +217,28 @@ def sync_all_cards_to_supabase(sqlite_con, include_items: bool = False) -> None:
         con.commit()
 
 
-def restore_cards_from_supabase_if_needed(sqlite_con) -> dict:
-    """Na base local vazia, restaura cards/itens preservando os IDs originais."""
-    local_count = sqlite_con.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"]
-    if int(local_count or 0) > 0:
-        sync_all_cards_to_supabase(sqlite_con, include_items=True) if _remote_cards_empty() else None
-        return {"mode": "local", "cards": int(local_count)}
-    init_card_persistence(sqlite_con)
+def bootstrap_card_persistence(sqlite_con) -> dict:
+    """Inicializa o espelho e decide se deve enviar a base local ou restaurar do Supabase."""
+    init_card_persistence()
+    local_count = int(sqlite_con.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"] or 0)
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM outlog_cards")
+            remote_count = int(cur.fetchone()["n"] or 0)
+    if local_count > 0 and remote_count == 0:
+        sync_all_cards_to_supabase(sqlite_con, include_items=True)
+        return {"mode": "seeded_remote", "cards": local_count}
+    if local_count > 0:
+        return {"mode": "local", "cards": local_count}
+    if remote_count == 0:
+        return {"mode": "empty", "cards": 0}
+
     with pg_connect() as con:
         with con.cursor() as cur:
             cur.execute("SELECT * FROM outlog_cards ORDER BY id")
             cards = cur.fetchall()
             cur.execute("SELECT * FROM outlog_items ORDER BY id")
             items = cur.fetchall()
-    if not cards:
-        return {"mode": "empty", "cards": 0}
     columns = ",".join(CARD_COLUMNS)
     marks = ",".join(["?"] * len(CARD_COLUMNS))
     for row in cards:
@@ -243,13 +248,6 @@ def restore_cards_from_supabase_if_needed(sqlite_con) -> dict:
     for row in items:
         sqlite_con.execute(f"INSERT OR IGNORE INTO items ({item_columns}) VALUES ({item_marks})", _item_tuple(row))
     return {"mode": "restored", "cards": len(cards), "items": len(items)}
-
-
-def _remote_cards_empty() -> bool:
-    with pg_connect() as con:
-        with con.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM outlog_cards")
-            return int(cur.fetchone()["n"] or 0) == 0
 
 
 def seed_warehouse_supabase(gerar_todos_casulos) -> None:
