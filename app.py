@@ -23,7 +23,7 @@ from downstream_module import downstream_card_data, init_downstream_db, register
 from production_module import init_production_db, register_production_routes
 from processing_module import ensure_worker_function_column
 from goat_module import init_goat_db, register_goat_routes
-from positions_module import init_positions_db, register_positions_routes, total_allocated
+from positions_module import init_positions_db, register_positions_routes, total_allocated, item_allocation_totals
 from collab_module import init_collab_db, register_collab_routes
 from unified_module import init_unified_db, register_unified_routes
 from supabase_module import (
@@ -1782,6 +1782,7 @@ def get_card(card_id: int):
     card["status_label"] = STATUS_LABELS.get(card["status"], card["status"])
     card["items"] = [dict(r) for r in con.execute("SELECT * FROM items WHERE card_id=? ORDER BY product,color,size,id", (card_id,)).fetchall()]
     card["expected_total"] = sum(item["expected_qty"] for item in card["items"])
+    card["rm_item_volumes"] = {str(item_id): qty for item_id, qty in item_allocation_totals(card_id, "RM").items()}
     card["receiving"] = current_receiving(con, card_id)
     card["in_transit"] = awaiting_arrival(con, card_id)
     card["dispatch"] = current_dispatch(con, card_id)
