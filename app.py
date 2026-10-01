@@ -157,16 +157,15 @@ def normalize_header(value: Any) -> str:
 
 
 def reference_from_copied_product(value: Any) -> str:
-    """Extrai a referência do código completo copiado do SGO."""
+    """Extrai o descritivo da primeira linha do Produto copiado do SGO."""
     text = "" if value is None else str(value)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = text.replace("**", "")
-    match = re.search(
-        r"(?:\d+\.){3,}([0-9]+(?:-[^\s|<>]+)?)",
-        text,
-        flags=re.I,
-    )
-    return match.group(1).strip() if match else ""
+    for line in text.splitlines():
+        label = line.strip(" |\t")
+        if label:
+            return label
+    return ""
 
 def kanban_matches(value: Any) -> bool:
     return normalize_text(value) == normalize_text(KANBAN_TRANSITO)
@@ -541,6 +540,13 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO users(username,password,name,role) VALUES(?,?,?,?)",
             (username, password, name, role),
         )
+    # Normaliza referências já existentes: a referência visual é o descritivo
+    # da primeira linha do Produto, não o código técnico 258.xxx...
+    existing_items = con.execute("SELECT id,product,reference FROM items").fetchall()
+    for item in existing_items:
+        normalized_reference = reference_from_copied_product(item["product"]) or (item["reference"] or "").strip()
+        if normalized_reference and normalized_reference != (item["reference"] or "").strip():
+            con.execute("UPDATE items SET reference=? WHERE id=?", (normalized_reference, item["id"]))
     # Migração funcional V4: Cards CD01 permanecem na aba Recebimento enquanto estão em Costura.
     con.execute(
         "UPDATE cards SET current_sector='RECEBIMENTO' WHERE status='EM_COSTURA_CD01'"
@@ -1181,11 +1187,7 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 product = str(cell(row, "produto", "") or "").strip()
                 sku = str(cell(row, "sku", "") or "").strip()
                 explicit_reference = str(cell(row, "referencia", "") or "").strip()
-                reference = (
-                    reference_from_copied_product(product)
-                    or reference_from_copied_product(sku)
-                    or explicit_reference
-                )
+                reference = reference_from_copied_product(product) or explicit_reference
                 source_key = "|".join([
                     purchase_id,
                     clean_id(cell(row, "idlote")),
@@ -1621,6 +1623,26 @@ async def sample_timer(receiving_id: int, action: str, request: Request):
     con.commit()
     con.close()
     return summary | {"next_status": next_status}
+@app.delete("/api/cards/{card_id}")
+async def delete_card(card_id: int, request: Request):
+    user_id = int(request.query_params.get("user_id", "0") or 0)
+    con = db_connect()
+    require_role(con, user_id, {"admin"})
+    card = con.execute("SELECT id,purchase_id FROM cards WHERE id=?", (card_id,)).fetchone()
+    if not card:
+        con.close()
+        raise HTTPException(404, "Card não encontrado.")
+    purchase_id = card["purchase_id"]
+    try:
+        delete_card_from_supabase(card_id)
+    except Exception as exc:
+        con.close()
+        raise HTTPException(503, f"Não foi possível remover o Card do armazenamento persistente: {exc}")
+    delete_card_with_downstream(con, card_id)
+    con.commit()
+    con.close()
+    return {"ok": True, "card_id": card_id, "purchase_id": purchase_id}
+
 @app.post("/api/cards/{card_id}/purchase-mode")
 async def set_purchase_mode(card_id: int, request: Request):
     """Define manualmente Grade/Saldo quando o tipo não foi reconhecido na importação."""
