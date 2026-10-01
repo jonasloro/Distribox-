@@ -736,8 +736,8 @@ function sampleHtml(r, sampleDone, operate, isReturn=false) {
         <div class="timer-value"><span>Permanência</span><strong id="timerPermanence">${fmtSeconds(timer.permanence_seconds)}</strong></div>
       </div>
       <div class="actions">
-        ${operate && !sampleDone && timer.state === "NAO_INICIADA" ? `<button class="primary" onclick="sampleAction('start')">${isReturn ? "Iniciar tiragem" : "Iniciar tiragem"}</button>` : ""}
-        ${operate && !sampleDone && timer.state === "EM_ANDAMENTO" ? `<button class="warning" onclick="sampleAction('pause')">Pausar</button><button class="success" onclick="sampleAction('finish')">${isReturn ? "Concluir tiragem" : "Concluir tiragem"}</button>` : ""}
+        ${operate && !sampleDone && timer.state === "NAO_INICIADA" ? `<button class="primary" onclick="sampleAction('start')">Iniciar tiragem</button>` : ""}
+        ${operate && !sampleDone && timer.state === "EM_ANDAMENTO" ? `<button class="warning" onclick="sampleAction('pause')">Pausar</button><button class="success" onclick="sampleAction('finish')">Concluir tiragem</button>` : ""}
         ${operate && !sampleDone && timer.state === "PAUSADA" ? `<button class="primary" onclick="sampleAction('resume')">Retomar</button><button class="success" onclick="sampleAction('finish')">${isReturn ? "Concluir tiragem" : "Concluir tiragem"}</button>` : ""}
         ${sampleDone ? `<span class="badge green">${isReturn ? "Nova amostra separada" : "Tiragem concluída"}</span>` : `<span class="badge orange">${isReturn ? "Nova amostra pendente" : "Tiragem pendente"}</span>`}
       </div>
