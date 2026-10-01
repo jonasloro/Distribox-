@@ -563,3 +563,233 @@ input:disabled,select:disabled,textarea:disabled{
   .position-editor-action{grid-column:auto}
   .position-allocation-list{grid-template-columns:1fr}
 }
+
+
+/* V11 — paleta operacional unificada */
+:root{
+  --blue:#ff8a3d;
+  --accent:#ff8a3d;
+  --accent-soft:#3a2a20;
+  --surface:#212429;
+  --surface-2:#191b1f;
+  --surface-3:#15171a;
+}
+.primary{
+  background:#ff8a3d!important;
+  color:#1a120c!important;
+  border:1px solid #ff9a5a!important;
+}
+.secondary{
+  background:#2a2d32!important;
+  color:#e7edf4!important;
+  border:1px solid #3b424a!important;
+}
+.ghost{
+  background:#23272c!important;
+  color:#d7e0e9!important;
+  border:1px solid #353c44!important;
+}
+.success{
+  background:#279b52!important;
+  color:#f2fff5!important;
+  border-color:#39b968!important;
+}
+.warning{
+  background:#9f7610!important;
+  color:#fff3c4!important;
+  border-color:#c2961c!important;
+}
+.danger{
+  background:#b83d46!important;
+  color:#fff0f1!important;
+  border-color:#d6555e!important;
+}
+.badge{
+  background:#2a2d32!important;
+  color:#d5dee7!important;
+  border-color:#414951!important;
+}
+.badge.green{background:#173b25!important;color:#79df94!important;border-color:#2c7544!important}
+.badge.orange{background:#3c2b0e!important;color:#ffc477!important;border-color:#775815!important}
+.badge.red{background:#3d1d22!important;color:#ff888f!important;border-color:#73353c!important}
+.badge.purple{background:#2d2d31!important;color:#d0d3da!important;border-color:#484b53!important}
+.notice{
+  background:#24282d!important;
+  color:#ccd6e0!important;
+  border:1px solid #363d45;
+}
+.notice.warn{
+  background:#3a2b0e!important;
+  color:#f6c77b!important;
+  border-color:#6f5417;
+}
+.notice.success-box{
+  background:#173423!important;
+  color:#7cdd95!important;
+  border-color:#2a6840;
+}
+.notice.error{
+  background:#3b1c21!important;
+  color:#ff8b92!important;
+  border-color:#73353c;
+}
+.module-tabs{
+  background:#15171a!important;
+  border-color:#30363d!important;
+}
+.module-tabs button{
+  color:#9eaab7!important;
+}
+.module-tabs button.active,
+.module-tabs button:hover{
+  background:#2a2d32!important;
+  color:#fff!important;
+}
+.global-search,
+.queue-search,
+.position-search{
+  background:#171a1e!important;
+  border-color:#343b43!important;
+}
+.global-search:focus-within,
+.queue-search:focus-within,
+.position-search:focus-within{
+  border-color:#59616a!important;
+  box-shadow:0 0 0 3px #ff8a3d18!important;
+}
+.top-icon:hover{
+  background:#25292e!important;
+  border-color:#3b4249!important;
+}
+.hero-icon{
+  border-color:#554034!important;
+  color:#ffab7a!important;
+  background:#2a211d!important;
+}
+.hero-icon.teal{
+  border-color:#395844!important;
+  color:#7fd58f!important;
+}
+.panel-count{
+  background:#2d2f34!important;
+  color:#e5e9ee!important;
+  border:1px solid #464c53!important;
+}
+.red-count{background:#5a2429!important;color:#ffd4d7!important;border-color:#81363e!important}
+.online-pill{
+  background:#193824!important;
+  color:#77dc91!important;
+  border-color:#2e6c42!important;
+}
+.type-tag{
+  border-color:#376042!important;
+  background:#193322!important;
+  color:#7bdd92!important;
+}
+.position-allocator{
+  background:linear-gradient(145deg,#23272c,#1b1e22);
+  border-color:#363d45;
+}
+.position-suggest{
+  background:#28231f;
+  border-color:#614833;
+}
+.position-suggest span,
+.position-kicker{
+  color:#c99a72;
+}
+.position-stat{
+  background:#1a1d21;
+  border-color:#333a42;
+}
+.position-controls select{
+  background:#171a1e;
+  border-color:#343b43;
+}
+.position-dot.selected{
+  background:#4a2f20;
+  border-color:#e18a55;
+}
+.position-dot.item{
+  background:#24382a;
+  border-color:#5ba06a;
+}
+.position-cell.is-selected{
+  background:#4a2f20;
+  border-color:#f39a62;
+  box-shadow:0 0 0 2px #ff8a3d33,0 6px 15px #0005;
+}
+.position-cell.is-item{
+  background:#223126;
+  border-color:#4f865d;
+  color:#e3f3e6;
+}
+.position-cell.is-card{
+  background:#282b2f;
+  border-color:#4a5058;
+}
+.position-selected{
+  background:#2e241e;
+  border-color:#634837;
+}
+.position-selected span{
+  color:#d8a37d;
+}
+.allocation-item-card{
+  background:#191d21;
+  border-color:#343b43;
+  color:#e9eef4;
+}
+.allocation-item-card:hover{
+  background:#23272c;
+  border-color:#5a626b;
+}
+.allocation-item-card.is-selected{
+  background:#35261d;
+  border-color:#db8651;
+  box-shadow:inset 3px 0 #ff8a3d;
+}
+.allocation-item-card.is-complete{
+  opacity:.56;
+}
+.reference-allocation-summary{
+  background:#1a1e22;
+  border-color:#333a42;
+}
+.reference-allocation-addresses button{
+  background:#25292e;
+  border-color:#3b4249;
+  color:#d6dfe8;
+}
+.reference-allocation-addresses button:hover{
+  background:#30353b;
+  border-color:#626a72;
+}
+.selection-bar{
+  background:#202429!important;
+  border-color:#3b4249!important;
+}
+.selection-bar b{
+  color:#f0f4f8;
+}
+.photo-link{
+  background:#25292e!important;
+  border-color:#3a4149!important;
+  color:#dbe4ed!important;
+}
+.stage-chip{
+  background:#23272c!important;
+  border-color:#3a4149!important;
+  color:#dbe4ed!important;
+}
+.stage-chip:hover{
+  border-color:#686f77!important;
+  background:#2c3035!important;
+}
+.size-token,
+.type-pill,
+.row-open{
+  background:#272b30!important;
+  color:#e4eaf0!important;
+  border-color:#40474f!important;
+}
