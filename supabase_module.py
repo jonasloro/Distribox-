@@ -154,6 +154,39 @@ def init_card_persistence() -> None:
                 )
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_outlog_items_card ON outlog_items(card_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS outlog_receivings (
+                    id BIGINT PRIMARY KEY,
+                    card_id BIGINT NOT NULL REFERENCES outlog_cards(id) ON DELETE CASCADE,
+                    receiving_type TEXT NOT NULL,
+                    physical_status TEXT NOT NULL DEFAULT 'PENDENTE',
+                    volumes INTEGER,
+                    received_qty INTEGER,
+                    has_damage INTEGER,
+                    damage_description TEXT,
+                    notes TEXT,
+                    photo_paths TEXT,
+                    ten_percent_required INTEGER NOT NULL DEFAULT 0,
+                    ten_percent_min INTEGER NOT NULL DEFAULT 0,
+                    ten_percent_actual INTEGER,
+                    ten_percent_status TEXT NOT NULL DEFAULT 'NAO_INICIADA',
+                    physical_completed_by INTEGER,
+                    physical_completed_at TEXT,
+                    closed_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_outlog_receivings_card ON outlog_receivings(card_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS outlog_timer_events (
+                    id BIGINT PRIMARY KEY,
+                    receiving_id BIGINT NOT NULL REFERENCES outlog_receivings(id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL,
+                    event_at TEXT NOT NULL,
+                    user_id INTEGER NOT NULL
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_outlog_timer_events_receiving ON outlog_timer_events(receiving_id)")
         con.commit()
 
 
@@ -163,6 +196,74 @@ def _card_tuple(row) -> tuple:
 
 def _item_tuple(row) -> tuple:
     return tuple(row[column] for column in ITEM_COLUMNS)
+
+
+def _receiving_tuple(row) -> tuple:
+    return tuple(row[column] for column in RECEIVING_COLUMNS)
+
+
+def _timer_event_tuple(row) -> tuple:
+    return tuple(row[column] for column in TIMER_EVENT_COLUMNS)
+
+
+def sync_all_receiving_state_to_supabase(sqlite_con) -> None:
+    """Persiste os controles de Recebimento e os eventos dos cronômetros."""
+    receivings = sqlite_con.execute("SELECT * FROM receivings ORDER BY id").fetchall()
+    timer_events = sqlite_con.execute("SELECT * FROM timer_events ORDER BY id").fetchall()
+
+    receiving_columns_sql = ",".join(RECEIVING_COLUMNS)
+    timer_columns_sql = ",".join(TIMER_EVENT_COLUMNS)
+    receiving_marks = ",".join(["%s"] * len(RECEIVING_COLUMNS))
+    timer_marks = ",".join(["%s"] * len(TIMER_EVENT_COLUMNS))
+    receiving_updates = ", ".join(
+        f"{column}=EXCLUDED.{column}" for column in RECEIVING_COLUMNS if column != "id"
+    )
+    timer_updates = ", ".join(
+        f"{column}=EXCLUDED.{column}" for column in TIMER_EVENT_COLUMNS if column != "id"
+    )
+    receiving_sql = (
+        f"INSERT INTO outlog_receivings ({receiving_columns_sql}) VALUES ({receiving_marks})"
+        f" ON CONFLICT (id) DO UPDATE SET {receiving_updates}"
+    )
+    timer_sql = (
+        f"INSERT INTO outlog_timer_events ({timer_columns_sql}) VALUES ({timer_marks})"
+        f" ON CONFLICT (id) DO UPDATE SET {timer_updates}"
+    )
+
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            if receivings:
+                cur.executemany(receiving_sql, [_receiving_tuple(row) for row in receivings])
+            if timer_events:
+                cur.executemany(timer_sql, [_timer_event_tuple(row) for row in timer_events])
+        con.commit()
+
+
+def restore_receiving_state_from_supabase(sqlite_con) -> int:
+    """Restaura os controles de Recebimento persistidos."""
+    with pg_connect() as con:
+        with con.cursor() as cur:
+            cur.execute("SELECT * FROM outlog_receivings ORDER BY id")
+            receivings = cur.fetchall()
+            cur.execute("SELECT * FROM outlog_timer_events ORDER BY id")
+            timer_events = cur.fetchall()
+
+    receiving_columns = ",".join(RECEIVING_COLUMNS)
+    receiving_marks = ",".join(["?"] * len(RECEIVING_COLUMNS))
+    for row in receivings:
+        sqlite_con.execute(
+            f"INSERT OR IGNORE INTO receivings ({receiving_columns}) VALUES ({receiving_marks})",
+            _receiving_tuple(row),
+        )
+
+    timer_columns = ",".join(TIMER_EVENT_COLUMNS)
+    timer_marks = ",".join(["?"] * len(TIMER_EVENT_COLUMNS))
+    for row in timer_events:
+        sqlite_con.execute(
+            f"INSERT OR IGNORE INTO timer_events ({timer_columns}) VALUES ({timer_marks})",
+            _timer_event_tuple(row),
+        )
+    return len(receivings)
 
 
 def sync_card_to_supabase(sqlite_con, card_id: int) -> None:
@@ -285,9 +386,11 @@ def bootstrap_card_persistence(sqlite_con) -> dict:
             remote_count = int(cur.fetchone()["n"] or 0)
     if local_count > 0 and remote_count == 0:
         sync_all_cards_to_supabase(sqlite_con, include_items=True)
+        sync_all_receiving_state_to_supabase(sqlite_con)
         return {"mode": "seeded_remote", "cards": local_count}
     if local_count > 0:
         sync_all_cards_to_supabase(sqlite_con, include_items=False)
+        sync_all_receiving_state_to_supabase(sqlite_con)
         return {"mode": "local", "cards": local_count}
     if remote_count == 0:
         return {"mode": "empty", "cards": 0}
@@ -306,7 +409,8 @@ def bootstrap_card_persistence(sqlite_con) -> dict:
     item_marks = ",".join(["?"] * len(ITEM_COLUMNS))
     for row in items:
         sqlite_con.execute(f"INSERT OR IGNORE INTO items ({item_columns}) VALUES ({item_marks})", _item_tuple(row))
-    return {"mode": "restored", "cards": len(cards), "items": len(items)}
+    receiving_count = restore_receiving_state_from_supabase(sqlite_con)
+    return {"mode": "restored", "cards": len(cards), "items": len(items), "receivings": receiving_count}
 
 
 def seed_warehouse_supabase(gerar_todos_casulos) -> None:
