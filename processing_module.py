@@ -286,7 +286,7 @@ def processing_validation(con: sqlite3.Connection, processing_id: int) -> list[s
         if not record["quantity_deferred_to_storage"]:
             pending = [row for row in item_rows if int(row["processed_qty"] or 0) <= 0]
             if pending:
-                errors.append(f"Informe a quantidade processada de todos os itens da Grade ({len(pending)} pendente(s)).")
+                errors.append(f"Informe os volumes processados de todas as referências ({len(pending)} pendente(s)).")
         elif processed_total == 0:
             # Regra aprovada: em algumas Grades a quantidade final será conhecida somente na Estocagem.
             processed_total = 0
@@ -596,7 +596,7 @@ async def save_worker_production(worker_id: int, request: Request):
         con.close()
         raise HTTPException(403, "Você pode alterar somente a sua produção.")
     con.execute("UPDATE processing_workers SET produced_qty=? WHERE id=?", (produced_qty, worker_id))
-    add_history(con, worker["card_id"], "PRODUCAO_PROCESSAMENTO", f"Produção de {worker['worker_name']} atualizada para {produced_qty} peças.", user_id)
+    add_history(con, worker["card_id"], "PRODUCAO_PROCESSAMENTO", f"Produção de {worker['worker_name']} atualizada para {produced_qty} volumes.", user_id)
     con.commit()
     detail = processing_card_data(con, worker["card_id"])
     con.close()
@@ -698,7 +698,7 @@ async def save_processing_quantities(processing_id: int, request: Request):
             con.close()
             raise HTTPException(400, "A quantidade não pode ser negativa.")
         con.execute("UPDATE processing_records SET processed_qty_general=? WHERE id=?", (qty, processing_id))
-        description = f"{actor['name']} registrou {qty} peças processadas na compra Saldo."
+        description = f"{actor['name']} registrou {qty} volumes processados na compra Saldo."
     else:
         entries = payload.get("items") or []
         valid_ids = {
@@ -725,7 +725,7 @@ async def save_processing_quantities(processing_id: int, request: Request):
                 "UPDATE processing_item_quantities SET processed_qty=? WHERE processing_id=? AND item_id=?",
                 (qty, processing_id, item_id),
             )
-        description = f"{actor['name']} atualizou as quantidades processadas por item da Grade."
+        description = f"{actor['name']} atualizou os volumes processados por referência."
     add_history(con, record["card_id"], "QUANTIDADE_PROCESSADA", description, user_id)
     con.commit()
     detail = processing_card_data(con, record["card_id"])
