@@ -1451,6 +1451,10 @@ async function renderProcessingTab() {
   }
   $("cardTab").innerHTML = processingDetailHtml(p);
   toggleProcessingLabelField();
+  if (canOperateProcessing()) {
+    $("cardTab").insertAdjacentHTML("beforeend", '<div class="panel-body"><h3 class="section-heading">Endereçamento no Processamento (PR)</h3><div id="posAllocBox" class="notice">Carregando posições…</div></div>');
+    loadPositionAllocator(cardData.id, "PR");
+  }
 }
 
 
@@ -2452,8 +2456,14 @@ function itemAllocatedQty(itemId){
   return Number(itemAllocationInfo(itemId)?.total_alocado||0);
 }
 
+function globalItemAllocatedQty(itemId){
+  const rows=window.allocCtx?.status?.global_item_allocations||[];
+  const row=rows.find(function(r){return Number(r.item_id)===Number(itemId);});
+  return Number(row?.total_alocado||0);
+}
+
 function itemRemainingQty(item){
-  return Math.max(0, Number(item.expected_qty||0) - itemAllocatedQty(item.id));
+  return Math.max(0, Number(item.expected_qty||0) - globalItemAllocatedQty(item.id));
 }
 
 function selectedAllocationItem(){
@@ -2486,7 +2496,7 @@ function renderAllocationItemPicker(){
   }
 
   box.innerHTML=items.map(function(item){
-    const allocated=itemAllocatedQty(item.id);
+    const allocated=globalItemAllocatedQty(item.id);
     const selected=Number(ctx.selectedItemId)===Number(item.id);
     return '<button type="button" class="allocation-item-card ' + (selected?'is-selected ':'') +
       '" onclick="selectAllocationItem(' + Number(item.id) + ')">' +
@@ -2658,7 +2668,7 @@ async function loadPositionAllocator(cardId,setor){
 
   window.allocCtx={
     cardId:cardId,setor:setor,
-    remaining:setor==="RM"?Math.max(0,sourceTotal-Number(status.total_alocado||0)):0,
+    remaining:Math.max(0,sourceTotal-Number(status.global_total_alocado||0)),
     positions:positions,status:status,suggestion:suggestion,
     selectedItemId:Number(firstAvailable?.id||firstAllocated?.item_id||0),
     selectedAddress:suggestion?.address||firstAllocated?.posicoes?.[0]?.address||"",
@@ -2670,7 +2680,7 @@ async function loadPositionAllocator(cardId,setor){
     '<div class="position-allocator">' +
       '<div class="position-allocator-head">' +
         '<div><div class="position-kicker">ENDEREÇAMENTO FÍSICO</div>' +
-          '<h3>'+(setor==="QA"?"Alocar na Qualidade":"Alocar no Recebimento")+'</h3>' +
+          '<h3>'+({RM:"Alocar no Recebimento",QA:"Alocar na Qualidade",PR:"Alocar no Processamento"}[setor]||("Alocar no "+setor))+'</h3>' +
           '<p>Escolha primeiro a referência, depois a posição. O controle desta etapa é feito em volumes da referência.</p>' +
         '</div>' +
         '<div class="position-suggest">'+
@@ -2686,8 +2696,8 @@ async function loadPositionAllocator(cardId,setor){
       '</div>' +
 
       '<div class="position-stat-grid">' +
-        '<div class="position-stat"><span>Total alocado</span><strong id="positionAllocatedTotal">'+Number(status.total_alocado||0).toLocaleString("pt-BR")+
-          '</strong><small>volumes no setor</small></div>' +
+        '<div class="position-stat"><span>Total alocado</span><strong id="positionAllocatedTotal">'+Number(status.global_total_alocado||0).toLocaleString("pt-BR")+
+          '</strong><small>volumes globais · RM + QA + PR</small></div>' +
         '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">'+(status.posicoes?.length||0)+
           '</strong><small>endereços</small></div>' +
         '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemainingStat">—</strong><small>volumes restantes</small></div>' +
@@ -2717,7 +2727,7 @@ async function loadPositionAllocator(cardId,setor){
       '</div>' +
 
       '<div class="position-current-allocations">' +
-        '<div class="position-section-title"><b>Alocações deste Card</b><span>separadas por referência</span></div>' +
+        '<div class="position-section-title"><b>Alocações nesta área</b><span>separadas por referência</span></div>' +
         '<div id="positionCurrentAllocations"></div>' +
       '</div>' +
     '</div>';
@@ -2733,8 +2743,8 @@ function updateReferenceRemaining(){
   const item=selectedAllocationItem();
   if(!ctx||!item) return;
   const remaining=itemRemainingQty(item);
-  if($("positionReferenceRemainingStat")) $("positionReferenceRemainingStat").textContent=itemAllocatedQty(item.id).toLocaleString("pt-BR");
-  if($("positionReferenceRemainingLabel")) $("positionReferenceRemainingLabel").textContent=itemAllocatedQty(item.id).toLocaleString("pt-BR")+" volumes alocados";
+  if($("positionReferenceRemainingStat")) $("positionReferenceRemainingStat").textContent=globalItemAllocatedQty(item.id).toLocaleString("pt-BR");
+  if($("positionReferenceRemainingLabel")) $("positionReferenceRemainingLabel").textContent=globalItemAllocatedQty(item.id).toLocaleString("pt-BR")+" volumes alocados globalmente";
   if($("positionSelectedItemLabel")) $("positionSelectedItemLabel").textContent=referenceDetailLabel(item);
 }
 
@@ -2805,7 +2815,7 @@ async function submitAllocation(cardId,setor){
       })
     });
     ctx.status=result;
-    ctx.remaining=setor==="RM"?Math.max(0,ctx.remaining-qty):ctx.remaining;
+    ctx.remaining=Math.max(0,Number(cardData?.receiving?.volumes||0)-Number(result.global_total_alocado||0));
     $("posQty").value="";
     toast("Referência "+referenceLabel(item)+" alocada em "+address+" com "+qty.toLocaleString("pt-BR")+" volume(s).");
     renderAllocationItemPicker();
