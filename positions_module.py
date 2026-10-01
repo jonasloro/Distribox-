@@ -55,7 +55,6 @@ def init_positions_db() -> None:
                     CREATE INDEX IF NOT EXISTS idx_card_allocations_card ON card_allocations(card_id, setor);
                     """
                 )
-                allocation_columns = {row["column_name"] for row in []}
                 try:
                     cur.execute("ALTER TABLE card_allocations ADD COLUMN item_id INTEGER")
                 except Exception:
