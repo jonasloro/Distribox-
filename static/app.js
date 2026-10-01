@@ -461,6 +461,7 @@ async function openCard(cardId, tab = "receiving") {
       <div class="summary-box"><span>Tipo da compra</span>${["GRADE", "SALDO"].includes(cardData.purchase_mode)     ? `<strong>${cardData.purchase_mode === "GRADE" ? "Grade" : "Saldo"}</strong>`     : (["recebimento", "qualidade", "supervisor", "admin"].includes(currentUser.role)         ? `<select id="cardPurchaseMode" onchange="setCardPurchaseMode(this.value)"><option value="">Não reconhecido — definir</option><option value="GRADE">Grade</option><option value="SALDO">Saldo</option></select>`         : "<strong>Não reconhecido</strong>")}</div>
       <div class="summary-box"><span>Itens</span><strong>${cardData.items.length}</strong></div>
       <div class="summary-box"><span>Quantidade esperada</span><strong>${cardData.expected_total}</strong></div>
+      <div class="summary-box"><span>Volumes</span><strong>${cardData.receiving?.volumes ?? cardData.receiving?.volume_count ?? "Não informado"}</strong></div>
       <div class="summary-box"><span>Casulo atual</span><strong>${esc(cardData.casulo_current||"Não informado")}</strong></div>
     </div>
     <div class="tabs">
@@ -957,7 +958,7 @@ function qualitySetupHtml(previousInspection=null, sourceSubset=false) {
   const defaultType = cardData.receiving_type === "RETORNO" ? 2 : 1;
   const defaultMode = cardData.purchase_mode || previousInspection?.purchase_mode || "";
   return `<div class="panel-body">
-    ${sourceSubset ? `<div class="notice success-box"><b>Controle dos itens importados na Qualidade</b><br>Somente os ${((cardData.items||[]).filter((item)=>["QUALIDADE","QUALIDADE_RETRABALHO","QUALIDADE_REJEITADO"].includes(item.source_stage))).length} item(ns) posicionados neste setor entrarão na inspeção. Os demais itens da compra não serão alterados.</div>` : ""}
+    ${sourceSubset ? `<div class="notice success-box"><b>Controle por referência</b><br>Selecione abaixo quais referências entrarão nesta inspeção. As referências não selecionadas não serão movimentadas.</div>${qualitySourceItemsHtml()}` : ""}
     ${previousInspection ? `<div class="notice success-box">A Inspeção ${previousInspection.inspection_type} anterior foi concluída em ${fmtDateTime(previousInspection.completed_at)}. O Card retornou à Qualidade para uma nova rodada.</div>` : ""}
     <div class="notice"><b>Configuração da inspeção</b><br>O tipo da compra vem automaticamente da coluna <b>Tipo</b> do Excel: Private Label = Grade e Saldo = Saldo.</div>
     ${cardData.receiving_type === "RETORNO"
@@ -984,6 +985,57 @@ function toggleDevelopmentSetup() {
   if ($("developmentSeparatedField")) $("developmentSeparatedField").style.display = required ? "block" : "none";
 }
 
+function qualitySourceItemsHtml() {
+  const items = (cardData.items || []).filter((item) => ['QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO'].includes(item.source_stage) && Number(item.expected_qty || 0) > 0);
+  if (!items.length) return '<div class="notice warn">Nenhuma referência disponível na Qualidade para iniciar a inspeção.</div>';
+  return '<h3 class="section-heading">Referências que entrarão nesta inspeção</h3>' +
+    '<div class="notice success-box"><b>Selecione por referência.</b> Somente as referências marcadas serão movimentadas ao concluir esta inspeção. As demais permanecem nos setores atuais.</div>' +
+    '<div class="queue-toolbar"><div class="queue-search"><span>⌕</span><input id="qualitySourceSearch" placeholder="Produto, referência, cor ou tamanho" oninput="filterQualitySourceItems()"></div><div class="actions compact-actions"><button class="secondary" onclick="toggleAllQualitySourceItems(true)">Selecionar todas</button><button class="ghost" onclick="toggleAllQualitySourceItems(false)">Limpar seleção</button></div></div>' +
+    '<div class="table-wrap compact-picker"><table class="compact-table" id="qualitySourceItemsTable"><thead><tr><th class="check-col"><input id="qualitySourceAll" type="checkbox" checked onchange="toggleAllQualitySourceItems(this.checked)"></th><th>Produto</th><th>Referência</th><th>Cor</th><th>Tamanho</th><th>Quantidade</th><th>Etapa atual</th></tr></thead><tbody>' +
+    items.map((item) => '<tr class="quality-source-row" data-search="' + esc([item.product,item.reference,item.sku,item.color,item.size].join(' ').toLowerCase()) + '"><td><input class="quality-source-check" type="checkbox" value="' + item.id + '" checked onchange="updateQualitySourceSummary()"></td><td><b>' + esc(item.product || '—') + '</b></td><td>' + esc(item.reference || item.sku || '—') + '</td><td>' + esc(item.color || '—') + '</td><td><span class="size-token">' + esc(item.size || '—') + '</span></td><td><b>' + item.expected_qty + '</b></td><td><span class="type-pill">' + esc(sourceStageLabel(item.source_stage)) + '</span></td></tr>').join('') +
+    '</tbody></table></div><div id="qualitySourceSummary" class="queue-counter"></div>';
+}
+function filterQualitySourceItems() {
+  const term = normalizeSearch($("qualitySourceSearch")?.value || '');
+  document.querySelectorAll('.quality-source-row').forEach((row) => row.classList.toggle('hidden', !!term && !normalizeSearch(row.dataset.search || '').includes(term)));
+}
+function toggleAllQualitySourceItems(checked) {
+  document.querySelectorAll('.quality-source-check').forEach((input) => { input.checked = checked; });
+  if ($('qualitySourceAll')) $('qualitySourceAll').checked = checked;
+  updateQualitySourceSummary();
+}
+function updateQualitySourceSummary() {
+  const selected = [...document.querySelectorAll('.quality-source-check:checked')];
+  const ids = new Set(selected.map((input) => Number(input.value)));
+  const qty = (cardData.items || []).filter((item) => ids.has(Number(item.id))).reduce((sum, item) => sum + Number(item.expected_qty || 0), 0);
+  const total = document.querySelectorAll('.quality-source-check').length;
+  if ($('qualitySourceSummary')) $('qualitySourceSummary').innerHTML = selected.length ? '<b>' + selected.length + '</b> referência(s) selecionada(s) • <b>' + qty + '</b> peça(s)' : 'Nenhuma referência selecionada.';
+  if ($('qualitySourceAll')) $('qualitySourceAll').checked = selected.length === total;
+}
+function selectedQualitySourceItemIds() {
+  return [...document.querySelectorAll('.quality-source-check:checked')].map((input) => Number(input.value)).filter((id) => id > 0);
+}
+function qualityItemRoutesHtml(q, isOpen, canOperate) {
+  if (!q.source_subset || q.inspection_type !== 1) return '';
+  const rows = q.item_routes || [];
+  if (!rows.length) return '';
+  const editable = isOpen && canOperate;
+  return '<h3 class="section-heading">Destino por referência</h3><div class="notice"><b>Cada referência pode seguir por um caminho diferente.</b> A escolha abaixo não movimenta o Card inteiro.</div><div class="table-wrap compact-picker"><table class="compact-table"><thead><tr><th>Produto</th><th>Referência</th><th>Cor</th><th>Tamanho</th><th>Qtd.</th><th>Destino</th></tr></thead><tbody>' +
+    rows.map((row) => '<tr><td><b>' + esc(row.product || '—') + '</b></td><td>' + esc(row.reference || row.sku || '—') + '</td><td>' + esc(row.color || '—') + '</td><td><span class="size-token">' + esc(row.size || '—') + '</span></td><td>' + row.expected_qty + '</td><td>' +
+      (editable ? '<select class="quality-route-select" data-item-id="' + row.item_id + '"><option value="">Selecione</option><option value="COSTURA" ' + (String(row.destination || '').toUpperCase() === 'COSTURA' ? 'selected' : '') + '>Costura</option><option value="PROCESSAMENTO" ' + (String(row.destination || '').toUpperCase() === 'PROCESSAMENTO' ? 'selected' : '') + '>Processamento</option></select>' : '<span class="badge ' + (String(row.destination || '').toUpperCase() === 'COSTURA' ? 'purple' : 'green') + '">' + esc(row.destination || 'Não definido') + '</span>') + '</td></tr>').join('') +
+    '</tbody></table></div>' + (editable ? '<div class="actions"><button class="secondary" onclick="saveQualityItemRoutes()">Salvar destinos por referência</button></div>' : '');
+}
+async function saveQualityItemRoutes() {
+  const q = cardData.quality;
+  const routes = [...document.querySelectorAll('.quality-route-select')].map((select) => ({ item_id: Number(select.dataset.itemId), destination: select.value }));
+  if (!routes.length || routes.some((row) => !row.destination)) { toast('Defina o destino de todas as referências.'); return; }
+  try {
+    await api('/api/quality/inspections/' + q.id + '/routes', { method:'PATCH', body:JSON.stringify({user_id:currentUser.id, routes}) });
+    toast('Destinos por referência salvos.');
+    await openCard(currentCardId, 'quality');
+  } catch (error) { toast(error.message); }
+}
+
 async function createQualityInspection() {
   try {
     const requiredValue = $("developmentRequired").value;
@@ -997,6 +1049,7 @@ async function createQualityInspection() {
         development_required: requiredValue === "" ? null : requiredValue === "1",
         development_separated: requiredValue !== "1" ? null : (separatedValue === "" ? null : separatedValue === "1"),
         source_subset: Boolean(window.qualitySourceSubset),
+        item_ids: window.qualitySourceSubset ? selectedQualitySourceItemIds() : [],
         purchase_mode: $("qualityPurchaseMode")?.tagName === "SELECT" ? $("qualityPurchaseMode").value : undefined,
       }),
     });
@@ -1031,6 +1084,7 @@ function qualityInspectionHtml(q) {
     ${developmentQualityHtml(q, canOperate)}
     ${qualityPreviousInspectionsHtml(q)}
     ${qualitySampleHtml(q, isOpen, canOperate)}
+    ${qualityItemRoutesHtml(q, isOpen, canOperate)}
     ${qualityAssignmentAreaHtml(q, isOpen, canOperate)}
     ${qualityWorkersHtml(q, isOpen)}
     <h3 class="section-heading">Conclusão geral da inspeção</h3>
