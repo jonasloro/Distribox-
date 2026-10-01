@@ -2687,7 +2687,7 @@ async function loadPositionAllocator(cardId,setor){
           '</strong><small>peças no setor</small></div>' +
         '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">'+(status.posicoes?.length||0)+
           '</strong><small>endereços</small></div>' +
-        '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemaining">—</strong><small>peças restantes</small></div>' +
+        '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemainingStat">—</strong><small>peças restantes</small></div>' +
         '<div class="position-stat"><span>Relação volume</span><strong>'+(ppv?Math.round(ppv*10)/10:"—")+
           '</strong><small>'+(ppv?"peças / volume":"informe volumes e peças")+'</small></div>' +
       '</div>' +
@@ -2707,7 +2707,7 @@ async function loadPositionAllocator(cardId,setor){
 
       '<div class="position-allocation-editor">' +
         '<div class="position-selected"><span>REFERÊNCIA SELECIONADA</span><strong id="positionSelectedItemLabel">'+
-          esc(firstAvailable?referenceDetailLabel(firstAvailable):"Nenhuma")+'</strong><small id="positionReferenceRemaining"></small><em id="positionSelectedLabel">'+
+          esc(firstAvailable?referenceDetailLabel(firstAvailable):"Nenhuma")+'</strong><small id="positionReferenceRemainingLabel"></small><em id="positionSelectedLabel">'+
           esc(window.allocCtx.selectedAddress||"Nenhuma")+'</em></div>' +
         '<div class="position-editor-fields">' +
           '<div class="field"><label>Marcar por</label><select id="posUnit" onchange="updateAllocHint()"><option value="PECAS">Peças</option>'+
@@ -2737,7 +2737,8 @@ function updateReferenceRemaining(){
   const item=selectedAllocationItem();
   if(!ctx||!item) return;
   const remaining=itemRemainingQty(item);
-  if($("positionReferenceRemaining")) $("positionReferenceRemaining").textContent=remaining.toLocaleString("pt-BR")+" peças restantes";
+  if($("positionReferenceRemainingStat")) $("positionReferenceRemainingStat").textContent=remaining.toLocaleString("pt-BR");
+  if($("positionReferenceRemainingLabel")) $("positionReferenceRemainingLabel").textContent=remaining.toLocaleString("pt-BR")+" peças restantes";
   if($("positionSelectedItemLabel")) $("positionSelectedItemLabel").textContent=referenceDetailLabel(item);
 }
 
