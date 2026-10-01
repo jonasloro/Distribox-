@@ -219,7 +219,7 @@ def restore_cards_from_supabase_if_needed(sqlite_con) -> dict:
     """Na base local vazia, restaura cards/itens preservando os IDs originais."""
     local_count = sqlite_con.execute("SELECT COUNT(*) AS n FROM cards").fetchone()["n"]
     if int(local_count or 0) > 0:
-        sync_all_cards_to_supabase(sqlite_con, include_items=False) if _remote_cards_empty() else None
+        sync_all_cards_to_supabase(sqlite_con, include_items=True) if _remote_cards_empty() else None
         return {"mode": "local", "cards": int(local_count)}
     init_card_persistence(sqlite_con)
     with pg_connect() as con:
