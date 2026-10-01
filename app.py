@@ -33,6 +33,7 @@ from supabase_module import (
     bootstrap_card_persistence,
     sync_all_cards_to_supabase,
     sync_card_items_to_supabase,
+    sync_all_receiving_state_to_supabase,
     delete_card_from_supabase,
 )
 from warehouse_structure import gerar_todos_casulos
@@ -85,6 +86,7 @@ async def persist_card_state(request: Request, call_next):
                 con,
                 include_items=request.url.path == "/api/import-excel",
             )
+            sync_all_receiving_state_to_supabase(con)
             con.close()
         except Exception as e:
             print(f"[aviso] não consegui sincronizar cards com o Supabase: {e}")
@@ -1158,6 +1160,7 @@ def startup() -> None:
     try:
         con = db_connect()
         sync_all_cards_to_supabase(con, include_items=True)
+        sync_all_receiving_state_to_supabase(con)
         con.close()
     except Exception as e:
         print(f"[aviso] não consegui sincronizar cards/itens no startup: {e}")
