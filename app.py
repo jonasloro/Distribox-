@@ -1266,12 +1266,23 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 sku = str(cell(row, "sku", "") or "").strip()
                 explicit_reference = str(cell(row, "referencia", "") or "").strip()
                 reference = reference_from_import_row(row, headers) or reference_from_copied_product(product, explicit_reference)
+                color_value = str(cell(row, "cor", "") or "").strip()
+                size_value = str(cell(row, "tamanho", "") or "").strip()
+                lot_id_value = clean_id(cell(row, "idlote"))
                 source_key = "|".join([
                     purchase_id,
                     reference,
                     sku or product,
-                    str(cell(row, "cor", "") or "").strip(),
-                    str(cell(row, "tamanho", "") or "").strip(),
+                    color_value,
+                    size_value,
+                ])
+                legacy_source_key = "|".join([
+                    purchase_id,
+                    lot_id_value,
+                    sku or product,
+                    color_value,
+                    size_value,
+                    explicit_reference,
                 ])
                 source_values = {
                     "status_kanban": cell(row, "statuskanban", ""),
@@ -1290,11 +1301,11 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                     str(cell(row, "colecao", "") or "").strip(),
                     str(cell(row, "marca", "") or "").strip(),
                     str(cell(row, "genero", "") or "").strip(),
-                    str(cell(row, "cor", "") or "").strip(),
-                    str(cell(row, "tamanho", "") or "").strip(),
+                    color_value,
+                    size_value,
                     str(cell(row, "capsula", "") or "").strip(),
                     str(cell(row, "lote", "") or "").strip(),
-                    clean_id(cell(row, "idlote")),
+                    lot_id_value,
                     str(cell(row, "nf", "") or "").strip(),
                     clean_int(cell(row, "qtdesperada")),
                     str(cell(row, "urlfoto", "") or "").strip(),
@@ -1310,6 +1321,18 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                     clean_int(cell(row, "qtdrecebida")),
                 )
                 item = con.execute("SELECT id FROM items WHERE card_id=? AND source_key=?", (card_id, source_key)).fetchone()
+                if not item and legacy_source_key != source_key:
+                    # Migra o item importado pela chave antiga (que usava lote) para
+                    # a nova identidade operacional baseada na referência comercial.
+                    item = con.execute(
+                        "SELECT id FROM items WHERE card_id=? AND source_key=?",
+                        (card_id, legacy_source_key),
+                    ).fetchone()
+                    if item:
+                        con.execute(
+                            "UPDATE items SET source_key=? WHERE id=?",
+                            (source_key, item["id"]),
+                        )
                 if item:
                     con.execute(
                         """UPDATE items SET product=?,reference=?,sku=?,group_name=?,collection=?,brand=?,gender=?,color=?,
