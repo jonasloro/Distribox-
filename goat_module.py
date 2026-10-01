@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
 from openpyxl import load_workbook
 
-from supabase_module import pg_connect
+from supabase_module import pg_connect, sync_card_with_items_to_supabase
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("OUTLOG_DATA_DIR", str(BASE_DIR / "data"))).resolve() / "controle_logistica.db"
@@ -432,6 +432,9 @@ def create_manual_card(payload: dict[str, Any]) -> dict[str, Any]:
                 now,
             ),
         )
+        # Persiste card e grade no Supabase antes do commit local.
+        # Se a persistência remota falhar, a transação SQLite também é revertida.
+        sync_card_with_items_to_supabase(con, card_id)
         con.commit()
     finally:
         con.close()
