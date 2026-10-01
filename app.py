@@ -26,7 +26,13 @@ from goat_module import init_goat_db, register_goat_routes
 from positions_module import init_positions_db, register_positions_routes, total_allocated
 from collab_module import init_collab_db, register_collab_routes
 from unified_module import init_unified_db, register_unified_routes
-from supabase_module import verificar_login_supabase, seed_usuarios_supabase, seed_warehouse_supabase
+from supabase_module import (
+    verificar_login_supabase,
+    seed_usuarios_supabase,
+    seed_warehouse_supabase,
+    restore_cards_from_supabase_if_needed,
+    sync_all_cards_to_supabase,
+)
 from warehouse_structure import gerar_todos_casulos
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -45,6 +51,25 @@ async def disable_stale_interface_cache(request: Request, call_next):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    return response
+
+
+@app.middleware("http")
+async def persist_card_state(request: Request, call_next):
+    response = await call_next(request)
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path.startswith("/api/")
+    ):
+        try:
+            con = db_connect()
+            sync_all_cards_to_supabase(
+                con,
+                include_items=request.url.path == "/api/import-excel",
+            )
+            con.close()
+        except Exception as e:
+            print(f"[aviso] não consegui sincronizar cards com o Supabase: {e}")
     return response
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
@@ -480,6 +505,19 @@ def init_db() -> None:
         );
         """
     )
+    # Cards/itens persistidos no Supabase são restaurados antes das migrações
+    # de estado abaixo, para que Recebimento/Qualidade/Processamento encontrem
+    # a mesma base lógica após um redeploy.
+    try:
+        persistence = restore_cards_from_supabase_if_needed(con)
+        if persistence.get("mode") == "restored":
+            print(
+                f"[persistencia] {persistence.get('cards', 0)} card(s) e "
+                f"{persistence.get('items', 0)} item(ns) restaurados do Supabase."
+            )
+    except Exception as e:
+        print(f"[aviso] não consegui restaurar cards do Supabase ainda: {e}")
+
     for username, password, name, role in [
         ("admin", "1234", "Administrador", "admin"),
         ("recebimento", "1234", "Operador do Recebimento", "recebimento"),
