@@ -1613,6 +1613,7 @@ def list_cards(scope: str = "receiving", search: str = ""):
              c.receiving_type,c.quality_destination,c.casulo_current,c.source_location_summary,c.source_snapshot_at,c.updated_at,
              (SELECT r.ten_percent_status FROM receivings r WHERE r.card_id=c.id ORDER BY r.id DESC LIMIT 1) receiving_activity,
              COALESCE(SUM(i.expected_qty),0) expected_total,COUNT(i.id) item_count,
+             GROUP_CONCAT(DISTINCT NULLIF(TRIM(i.reference),'')) reference_list,
              GROUP_CONCAT(DISTINCT COALESCE(i.product,'') || ' ' || COALESCE(i.reference,'') || ' ' || COALESCE(i.sku,'')) material_search
              FROM cards c LEFT JOIN items i ON i.card_id=c.id WHERE 1=1"""
     params: list[Any] = []

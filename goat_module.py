@@ -352,38 +352,100 @@ def _iso_now() -> str:
 @router.post("/create-card")
 def create_manual_card(payload: dict[str, Any]) -> dict[str, Any]:
     """Cria um Card manual: uma única referência com uma grade dinâmica."""
-    reference=str(payload.get("reference") or "").strip()
-    grade=payload.get("grade") or []
-    if not reference: raise HTTPException(400,"Informe a referência.")
-    if not isinstance(grade,list) or not grade: raise HTTPException(400,"Informe a grade da referência.")
-    normalized=[]; total=0
+    reference = str(payload.get("reference") or "").strip()
+    supplier = str(payload.get("supplier") or "").strip()
+    nf = str(payload.get("nf") or "").strip()
+    lot = str(payload.get("lot") or "").strip()
+    grade = payload.get("grade") or []
+
+    if not reference:
+        raise HTTPException(400, "Informe a referência.")
+    if not supplier:
+        raise HTTPException(400, "Informe o fornecedor.")
+    if not isinstance(grade, list) or not grade:
+        raise HTTPException(400, "Informe a grade da referência.")
+
+    normalized = []
+    total = 0
     for row in grade:
-        color=str(row.get("color") or "").strip(); size=str(row.get("size") or "").strip()
-        try: quantity=int(row.get("quantity") or 0)
-        except (TypeError,ValueError): raise HTTPException(400,"As quantidades da grade precisam ser números inteiros.")
-        if not color or not size: raise HTTPException(400,"Cada item da grade precisa ter cor e tamanho.")
-        if quantity < 0: raise HTTPException(400,"As quantidades da grade não podem ser negativas.")
-        if quantity: normalized.append((color,size,quantity)); total += quantity
-    if total <= 0: raise HTTPException(400,"A grade precisa ter pelo menos uma quantidade maior que zero.")
-    now=_iso_now(); purchase_id=_manual_card_purchase_id(reference)
-    con=db_connect()
+        color = str(row.get("color") or "").strip()
+        size = str(row.get("size") or "").strip()
+        try:
+            quantity = int(row.get("quantity") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "As quantidades da grade precisam ser números inteiros.")
+        if not color or not size:
+            raise HTTPException(400, "Cada item da grade precisa ter cor e tamanho.")
+        if quantity < 0:
+            raise HTTPException(400, "As quantidades da grade não podem ser negativas.")
+        if quantity:
+            normalized.append((color, size, quantity))
+            total += quantity
+
+    if total <= 0:
+        raise HTTPException(400, "A grade precisa ter pelo menos uma quantidade maior que zero.")
+
+    now = _iso_now()
+    purchase_id = _manual_card_purchase_id(reference)
+    source_notes = f"Referência criada manualmente: {reference}"
+    source_notes += f" | Fornecedor: {supplier}"
+    if nf:
+        source_notes += f" | NF: {nf}"
+    if lot:
+        source_notes += f" | Lote: {lot}"
+
+    con = db_connect()
     try:
         con.execute("PRAGMA foreign_keys=ON")
-        cur=con.execute("""INSERT INTO cards(purchase_id,source_created_date,supplier,original_type,purchase_mode,status_compra,qtd_itens,source_notes,current_sector,status,receiving_type,created_at,updated_at)
-                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                       (purchase_id,now[:10],"Cadastro manual","Grade","GRADE","Em Trânsito",total,f"Referência criada manualmente: {reference}","RECEBIMENTO","EM_TRANSITO","NOVA",now,now))
-        card_id=cur.lastrowid
-        for color,size,quantity in normalized:
-            con.execute("""INSERT INTO items(card_id,source_key,product,reference,sku,color,size,expected_qty,status_kanban,source_stage,source_status_purchase)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                        (card_id,f"{purchase_id}|{reference}|{color}|{size}",reference,reference,"",color,size,quantity,"1.3 Compras - Em Trânsito","TRANSITO","Em Trânsito"))
-        con.execute("INSERT INTO history(card_id,user_id,event_type,description,created_at) VALUES(?,?,?,?,?)",
-                    (card_id,None,"CRIACAO_MANUAL",f"Card criado manualmente para a referência {reference}, com {total} peças.",now))
-        con.commit()
-    finally: con.close()
-    return {"card_id":card_id,"purchase_id":purchase_id,"reference":reference,
-            "grade":[{"color":c,"size":s,"quantity":q} for c,s,q in normalized],"expected_total":total}
+        cur = con.execute(
+            """INSERT INTO cards(
+                purchase_id,source_created_date,supplier,original_type,purchase_mode,status_compra,
+                qtd_itens,source_notes,current_sector,status,receiving_type,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                purchase_id, now[:10], supplier, "Grade", "GRADE", "Em Trânsito",
+                total, source_notes, "RECEBIMENTO", "EM_TRANSITO", "NOVA", now, now
+            ),
+        )
+        card_id = cur.lastrowid
 
+        for color, size, quantity in normalized:
+            con.execute(
+                """INSERT INTO items(
+                    card_id,source_key,product,reference,sku,color,size,lot,nf,expected_qty,
+                    status_kanban,source_stage,source_status_purchase
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    card_id, f"{purchase_id}|{reference}|{color}|{size}",
+                    reference, reference, "", color, size, lot, nf, quantity,
+                    "1.3 Compras - Em Trânsito", "TRANSITO", "Em Trânsito",
+                ),
+            )
+
+        con.execute(
+            "INSERT INTO history(card_id,user_id,event_type,description,created_at) VALUES(?,?,?,?,?)",
+            (
+                card_id, None, "CRIACAO_MANUAL",
+                f"Card criado manualmente para a referência {reference}, com {total} peças. Fornecedor {supplier}."
+                + (f" NF {nf}." if nf else "")
+                + (f" Lote {lot}." if lot else ""),
+                now,
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    return {
+        "card_id": card_id,
+        "purchase_id": purchase_id,
+        "reference": reference,
+        "supplier": supplier,
+        "nf": nf,
+        "lot": lot,
+        "grade": [{"color": c, "size": s, "quantity": q} for c, s, q in normalized],
+        "expected_total": total,
+    }
 
 def register_goat_routes(app: FastAPI) -> None:
     init_goat_db()
