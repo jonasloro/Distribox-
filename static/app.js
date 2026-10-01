@@ -424,6 +424,25 @@ async function renderGlobalHistory() {
     ${rows.map((event) => `<div class="timeline-event"><b>Compra ${esc(event.purchase_id)} — ${esc(event.description)}</b><br><small>${fmtDateTime(event.created_at)} ${event.user_name ? "• "+esc(event.user_name) : ""}</small></div>`).join("") || '<div class="notice">Nenhum evento.</div>'}
   </div></div></div>`;
 }
+async function deleteCard(cardId){
+  if(currentUser?.role!=="admin"){
+    toast("Somente o Administrador pode excluir Cards.");
+    return;
+  }
+  const id=Number(cardId);
+  const label=cardData?.purchase_id || ("#" + id);
+  if(!confirm("Excluir definitivamente o Card "+label+"?\n\nIsso removerá o card, seus itens, andamento e alocações físicas.")) return;
+  try{
+    const result=await api("/api/cards/"+id+"?user_id="+encodeURIComponent(currentUser.id),{method:"DELETE"});
+    toast("Card "+(result.purchase_id||label)+" excluído.");
+    $("modal")?.classList.add("hidden");
+    currentCardId=null;
+    cardData=null;
+    await renderCards(currentView||"receiving");
+  }catch(e){
+    toast(e.message||"Não foi possível excluir o Card.");
+  }
+}
 async function setCardPurchaseMode(mode) {
   if (!mode) return;
   try {
@@ -454,7 +473,7 @@ async function openCard(cardId, tab = "receiving") {
   receivingPhotos = cardData.receiving?.photo_paths || [];
   dispatchPhotos = cardData.dispatch?.photo_paths || [];
   $("modalBody").innerHTML = `
-    <div class="card-title"><div><h2>Card da Compra ${esc(cardData.purchase_id)}</h2><div class="card-subtitle">${esc(cardData.supplier||"—")} • ${esc(cardData.brand||"—")} • ${cardData.expected_total} peças</div></div><span class="badge ${statusClass(cardData.status)}">${esc(cardData.status_label)}</span></div>
+    <div class="card-title"><div><h2>Card da Compra ${esc(cardData.purchase_id)}</h2><div class="card-subtitle">${esc(cardData.supplier||"—")} • ${esc(cardData.brand||"—")} • ${cardData.expected_total} peças</div></div><div class="card-title-actions"><span class="badge ${statusClass(cardData.status)}">${esc(cardData.status_label)}</span>${currentUser?.role==="admin"?`<button class="danger small-btn" onclick="deleteCard(${cardData.id})">Excluir Card</button>`:""}</div></div>
     <div class="summary-grid">
       <div class="summary-box"><span>Setor atual</span><strong>${esc(cardData.current_sector)}</strong></div>
       <div class="summary-box"><span>Tipo de entrada</span><strong>${cardData.receiving_type === "RETORNO" ? "Retorno da Costura" : "Mercadoria nova"}</strong></div>
@@ -2414,15 +2433,15 @@ function selectedAllocationItem(){
 }
 
 function referenceLabel(item){
-  return item?.reference || item?.sku || item?.product || ("Item " + item?.id);
+  return item?.reference || item?.product || item?.sku || ("Item " + item?.id);
 }
 
 function referenceDetailLabel(item){
-  return [
-    referenceLabel(item),
-    item?.color || null,
-    item?.size || null
-  ].filter(Boolean).join(" • ");
+  return referenceLabel(item);
+}
+
+function referenceSecondaryLabel(item){
+  return [item?.sku || null, item?.color || null, item?.size || null].filter(Boolean).join(" • ");
 }
 
 function renderAllocationItemPicker(){
@@ -2444,7 +2463,7 @@ function renderAllocationItemPicker(){
       '" onclick="selectAllocationItem(' + Number(item.id) + ')">' +
         '<div class="allocation-item-main">' +
           '<span class="allocation-item-ref">' + esc(referenceLabel(item)) + '</span>' +
-          '<small>' + esc([item.product,item.color,item.size].filter(Boolean).join(" • ") || "Sem detalhe") + '</small>' +
+          '<small>' + esc(referenceSecondaryLabel(item) || "Sem detalhe") + '</small>' +
         '</div>' +
         '<div class="allocation-item-numbers">' +
           '<b>' + allocated.toLocaleString("pt-BR") + '</b><span>alocadas</span>' +
@@ -2563,6 +2582,7 @@ function selectAllocationItem(itemId){
   if($("positionSelectedLabel")) $("positionSelectedLabel").textContent=ctx.selectedAddress||"Nenhuma";
   renderAllocationItemPicker();
   renderPositionMap();
+  updateReferenceRemaining();
   updateAllocHint();
 }
 
