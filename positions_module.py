@@ -308,6 +308,31 @@ def card_trail(card_id: int) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+
+def item_allocation_totals(card_id: int, setor: str = "RM") -> dict[int, int]:
+    """Retorna a quantidade física alocada por item no setor.
+    
+    Para RM, a unidade é volume (caixa/bag). O módulo não transforma
+    quantidade de peças em volume.
+    """
+    try:
+        with pg_connect() as con:
+            with con.cursor() as cur:
+                cur.execute(
+                    """SELECT item_id,COALESCE(SUM(quantidade),0) qty
+                       FROM card_allocations
+                       WHERE card_id=%s AND setor=%s AND item_id IS NOT NULL
+                       GROUP BY item_id""",
+                    (card_id, setor.upper()),
+                )
+                return {
+                    int(row["item_id"]): int(row["qty"] or 0)
+                    for row in cur.fetchall()
+                }
+    except RuntimeError:
+        return {}
+
+
 def total_allocated(setor: str, card_id: int) -> int:
     """Helper síncrono usado pelos gates de avanço de setor em app.py."""
     try:
