@@ -187,13 +187,14 @@ def allocate(card_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                         (card_id, setor, item_id),
                     )
                     already = int(cur.fetchone()["qty"] or 0)
-                    expected = int(item["expected_qty"] or 0)
-                    if already + qty > expected:
-                        label = item["reference"] or item["sku"] or item["product"] or str(item_id)
-                        raise HTTPException(
-                            400,
-                            f"A referência {label} possui {expected} volumes previstos e já tem {already} volumes alocados.",
-                        )
+                    if setor != "RM":
+                        expected = int(item["expected_qty"] or 0)
+                        if already + qty > expected:
+                            label = item["reference"] or item["sku"] or item["product"] or str(item_id)
+                            raise HTTPException(
+                                400,
+                                f"A referência {label} possui {expected} peças previstas e já tem {already} alocadas.",
+                            )
 
                     cur.execute(
                         """INSERT INTO card_allocations(
