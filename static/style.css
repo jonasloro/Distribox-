@@ -419,3 +419,16 @@ input:disabled,select:disabled,textarea:disabled{
     width: 100%;
     margin-top: 8px;
 }
+
+/* Correção: blocos que ficavam brancos no tema escuro (atribuição em lote, casulo, zonas, upload) */
+.bulk-toolbar,
+.casulo-box,
+.zone-card,
+.import-zone{
+  background:#212429;
+  color:#eef4fb;
+  border-color:#33383f;
+}
+.bulk-toolbar label,
+.casulo-box label{color:#b9c4d2}
+.bulk-footer{box-shadow:0 -6px 14px rgba(0,0,0,.35)}

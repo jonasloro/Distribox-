@@ -588,19 +588,35 @@ async function loadPositionAllocator(cardId, setor){
     safeApi(`/api/positions/suggest?setor=${setor}`,null),
   ]);
   const positions=await safeApi(`/api/positions?setor=${setor}`,[]);
+  const rcv=cardData?.receiving||{};
+  const volsTotal=Number($("recVolumes")?.value||rcv.volumes||0), qtyTotal=Number($("recQty")?.value||rcv.received_qty||0);
+  const ppv=(volsTotal>0&&qtyTotal>0)?qtyTotal/volsTotal:0;
+  window.allocCtx={ppv,remaining:setor==="RM"?Math.max(0,qtyTotal-(status.total_alocado||0)):0};
   box.innerHTML=`
-    <div class="notice">Total alocado: <b>${status.total_alocado}</b> peças${suggestion?` · sugestão: <b>${esc(suggestion.address)}</b>`:''}</div>
-    ${status.posicoes.length?`<table class="dash-table"><tbody>${status.posicoes.map(p=>`<tr><td>${esc(p.address)}</td><td>${p.quantidade} pçs</td></tr>`).join('')}</tbody></table>`:''}
+    <div class="notice">Total alocado: <b>${status.total_alocado}</b> peças${ppv?` (≈ ${Math.round(status.total_alocado/ppv*10)/10} volumes)`:''}${suggestion?` · sugestão: <b>${esc(suggestion.address)}</b>`:''}</div>
+    ${status.posicoes.length?`<table class="dash-table"><tbody>${status.posicoes.map(p=>`<tr><td>${esc(p.address)}</td><td>${p.quantidade} pçs${ppv?` · ≈ ${Math.round(p.quantidade/ppv*10)/10} vol.`:''}</td></tr>`).join('')}</tbody></table>`:''}
     <div class="form-grid">
       <div class="field"><label>Posição</label><select id="posAddress">${positions.map(p=>`<option value="${esc(p.address)}" ${suggestion&&p.address===suggestion.address?'selected':''}>${esc(p.address)} (${p.ocupado} ocupado)</option>`).join('')}</select></div>
-      <div class="field"><label>Quantidade nessa posição</label><input id="posQty" type="number" min="1" placeholder="ex: 30"></div>
+      <div class="field"><label>Marcar por</label><select id="posUnit" onchange="updateAllocHint()"><option value="PECAS">Peças</option>${ppv?'<option value="VOLUMES">Volumes</option>':''}</select></div>
+      <div class="field"><label>Quantidade nessa posição</label><input id="posQty" type="number" min="1" placeholder="ex: 30" oninput="updateAllocHint()"><small id="posHint" class="muted">${ppv?`1 volume ≈ ${Math.round(ppv*10)/10} peças (quantidade recebida ÷ volumes)`:'Informe volumes e quantidade recebida para marcar por volume.'}</small></div>
     </div>
     <div class="actions"><button class="primary" onclick="submitAllocation(${cardId},'${setor}')">+ Adicionar posição</button></div>`;
 }
 
+function allocPieces(){
+  const raw=Number($("posQty")?.value||0), ctx=window.allocCtx||{ppv:0,remaining:0};
+  if($("posUnit")?.value!=="VOLUMES"||!ctx.ppv) return raw;
+  let pieces=Math.round(raw*ctx.ppv);
+  if(ctx.remaining>0&&Math.abs(ctx.remaining-pieces)<ctx.ppv/2) pieces=ctx.remaining;
+  return pieces;
+}
+function updateAllocHint(){
+  const el=$("posHint"); if(!el||$("posUnit")?.value!=="VOLUMES") return;
+  const n=allocPieces(); el.textContent=n>0?`${$("posQty").value} volume(s) = ${n} peças`:`1 volume ≈ ${Math.round((window.allocCtx?.ppv||0)*10)/10} peças`;
+}
 async function submitAllocation(cardId,setor){
   const address=$("posAddress")?.value;
-  const qty=Number($("posQty")?.value||0);
+  const qty=allocPieces();
   if(!address||qty<=0){toast("Escolha a posição e informe a quantidade.");return;}
   try{
     await api(`/api/positions/cards/${cardId}/allocate`,{method:'POST',body:JSON.stringify({setor,responsavel:currentUser?.name,allocations:[{address,quantidade:qty}]}),headers:{'Content-Type':'application/json'}});
@@ -929,6 +945,10 @@ async function renderQualityTab() {
     return;
   }
   $("cardTab").innerHTML = qualityInspectionHtml(q);
+  if (canOperateQuality() && !$("posAllocBox")) {
+    $("cardTab").insertAdjacentHTML("beforeend", '<div class="panel-body"><h3 class="section-heading">Endereçamento na Qualidade (QA)</h3><div id="posAllocBox" class="notice">Carregando posições…</div></div>');
+    loadPositionAllocator(cardData.id, "QA");
+  }
 }
 
 function qualitySetupHtml(previousInspection=null, sourceSubset=false) {
