@@ -1152,7 +1152,7 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                     sku or product,
                     str(cell(row, "cor", "") or "").strip(),
                     str(cell(row, "tamanho", "") or "").strip(),
-                    reference,
+                    explicit_reference,
                 ])
                 source_values = {
                     "status_kanban": cell(row, "statuskanban", ""),
