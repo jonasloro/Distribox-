@@ -232,6 +232,9 @@ def reference_blocks_from_copied_product(value: Any) -> list[dict[str, Any]]:
             if match_qty:
                 block["expected_qty"] = _clean_sgo_quantity(match_qty.group(1))
                 break
+            if block["sku"] is not None and re.fullmatch(r"\d{1,3}(?:\.\d{3})*|\d+", look):
+                block["expected_qty"] = _clean_sgo_quantity(look)
+                break
 
         blocks.append(block)
 
