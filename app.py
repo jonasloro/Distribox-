@@ -156,16 +156,22 @@ def normalize_header(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", normalize_text(value))
 
 
-def reference_from_copied_product(value: Any) -> str:
-    """Extrai o descritivo da primeira linha do Produto copiado do SGO."""
+def reference_from_copied_product(value: Any, explicit_reference: Any = "") -> str:
+    """Extrai a referência comercial da primeira linha descritiva do Produto do SGO."""
     text = "" if value is None else str(value)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = text.replace("**", "")
-    for line in text.splitlines():
-        label = line.strip(" |\t")
-        if label:
-            return label
-    return ""
+    lines = [line.strip(" |\t") for line in text.splitlines() if line.strip(" |\t")]
+
+    def is_technical_code(label: str) -> bool:
+        return bool(re.fullmatch(r"(?:\d+[.]){2,}\d+(?:[-_/][A-Za-z0-9À-ÿ._/-]+)?", label))
+
+    for line in lines:
+        if not is_technical_code(line):
+            return line
+
+    fallback = "" if explicit_reference is None else str(explicit_reference).strip()
+    return fallback if fallback and not is_technical_code(fallback) else (lines[0] if lines else "")
 
 def kanban_matches(value: Any) -> bool:
     return normalize_text(value) == normalize_text(KANBAN_TRANSITO)
@@ -1195,7 +1201,7 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 product = str(cell(row, "produto", "") or "").strip()
                 sku = str(cell(row, "sku", "") or "").strip()
                 explicit_reference = str(cell(row, "referencia", "") or "").strip()
-                reference = reference_from_copied_product(product) or explicit_reference
+                reference = reference_from_copied_product(product, explicit_reference)
                 source_key = "|".join([
                     purchase_id,
                     clean_id(cell(row, "idlote")),
@@ -1565,11 +1571,11 @@ async def complete_physical(receiving_id: int, request: Request):
         con.close()
         raise HTTPException(400, "Descreva os danos ou avarias.")
     alocado = total_allocated("RM", rec["card_id"])
-    if alocado < rec["received_qty"]:
+    if alocado < rec["volumes"]:
         con.close()
         raise HTTPException(
             400,
-            f"Aloque o endereço físico (casulo) antes de concluir — {alocado}/{rec['received_qty']} peças alocadas no Recebimento.",
+            f"Aloque o endereço físico (casulo) antes de concluir — {alocado}/{rec['volumes']} volumes alocados no Recebimento.",
         )
     con.execute(
         """UPDATE receivings SET physical_status='CONCLUIDO',physical_completed_by=?,physical_completed_at=?
