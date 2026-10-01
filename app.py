@@ -603,7 +603,6 @@ def init_db() -> None:
             ten_percent_min INTEGER NOT NULL DEFAULT 0,
             ten_percent_actual INTEGER,
             ten_percent_status TEXT NOT NULL DEFAULT 'NAO_INICIADA',
-            triage_completed INTEGER NOT NULL DEFAULT 0,
             physical_completed_by INTEGER,
             physical_completed_at TEXT,
             closed_at TEXT,
@@ -725,8 +724,6 @@ def init_db() -> None:
         if name not in item_columns:
             con.execute(f"ALTER TABLE items ADD COLUMN {name} {definition}")
     receiving_columns = {row["name"] for row in con.execute("PRAGMA table_info(receivings)").fetchall()}
-    if "triage_completed" not in receiving_columns:
-        con.execute("ALTER TABLE receivings ADD COLUMN triage_completed INTEGER NOT NULL DEFAULT 0")
     if "source_subset" not in receiving_columns:
         con.execute("ALTER TABLE receivings ADD COLUMN source_subset INTEGER NOT NULL DEFAULT 0")
     con.execute(
@@ -1116,7 +1113,7 @@ def update_new_receiving_flow(con: sqlite3.Connection, receiving_id: int, user_i
                 description = "Itens retornados da Costura recebidos e nova amostra de 10% separada. Somente esses itens foram encaminhados à Inspeção 2."
             else:
                 event_type = "RECEBIMENTO_PARCIAL_CONCLUIDO"
-                description = "Itens em trânsito recebidos, triados e com amostra de 10% separada. Somente esses itens foram encaminhados à Qualidade."
+                description = "Itens em trânsito recebidos e com amostra de 10% separada. Somente esses itens foram encaminhados à Qualidade."
             add_history(con, rec["card_id"], event_type, description, user_id)
             return status
         status = "RETORNO_CONCLUIDO" if is_return else "AGUARDANDO_QUALIDADE"
@@ -1131,7 +1128,7 @@ def update_new_receiving_flow(con: sqlite3.Connection, receiving_id: int, user_i
             "RECEBIMENTO_CONCLUIDO",
             ("Retorno CD01 recebido e nova amostra de 10% separada. Card encaminhado à Inspeção 2."
              if is_return else
-             "Recebimento físico, separação dos 10% e triagem inicial concluídos. Card encaminhado automaticamente à Qualidade."),
+             "Recebimento físico e separação dos 10% concluídos. Card encaminhado automaticamente à Qualidade."),
             user_id,
         )
     elif physical_done:
@@ -1988,13 +1985,12 @@ async def sample_timer(receiving_id: int, action: str, request: Request):
             raise HTTPException(400, f"A quantidade separada deve ser no mínimo {rec['ten_percent_min']} peças.")
     summary = timer_action(con, receiving_id, action, user_id)
     status_map = {"start": "EM_ANDAMENTO", "pause": "PAUSADA", "resume": "EM_ANDAMENTO", "finish": "CONCLUIDA"}
-    triage_done = 1 if action == "finish" and rec["receiving_type"] == "NOVA" else rec["triage_completed"]
-    con.execute("UPDATE receivings SET ten_percent_status=?,triage_completed=? WHERE id=?",
-                (status_map[action],triage_done,receiving_id))
+    con.execute("UPDATE receivings SET ten_percent_status=? WHERE id=?",
+                (status_map[action],receiving_id))
     verbs = {"start": "iniciou", "pause": "pausou", "resume": "retomou", "finish": "concluiu"}
     activity = (
         "o controle de produção da Costura" if rec["receiving_type"] == "COSTURA"
-        else "a separação dos 10% e a triagem inicial" if rec["receiving_type"] == "NOVA"
+        else "a separação dos 10%" if rec["receiving_type"] == "NOVA"
         else "a separação da nova amostra de 10% do retorno CD01"
     )
     add_history(con, rec["card_id"], "SEPARACAO_10", f"Operador {verbs[action]} {activity}.", user_id)
