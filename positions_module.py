@@ -55,14 +55,13 @@ def init_positions_db() -> None:
                     CREATE INDEX IF NOT EXISTS idx_card_allocations_card ON card_allocations(card_id, setor);
                     """
                 )
-                try:
-                    cur.execute("ALTER TABLE card_allocations ADD COLUMN item_id INTEGER")
-                except Exception:
-                    pass
-                try:
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_card_allocations_item ON card_allocations(item_id, setor, address)")
-                except Exception:
-                    pass
+                cur.execute(
+                    "ALTER TABLE card_allocations ADD COLUMN IF NOT EXISTS item_id INTEGER"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_card_allocations_item "
+                    "ON card_allocations(item_id, setor, address)"
+                )
                 cur.execute("SELECT COUNT(*) c FROM sector_positions")
                 if cur.fetchone()["c"] == 0:
                     rows = []
