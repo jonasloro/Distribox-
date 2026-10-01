@@ -62,6 +62,20 @@ def init_positions_db() -> None:
                     "CREATE INDEX IF NOT EXISTS idx_card_allocations_item "
                     "ON card_allocations(item_id, setor, address)"
                 )
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS outlog_migrations (
+                        version TEXT PRIMARY KEY,
+                        applied_at TEXT NOT NULL DEFAULT now()::text
+                    )"""
+                )
+                cur.execute(
+                    """INSERT INTO outlog_migrations(version)
+                       VALUES(%s) ON CONFLICT (version) DO NOTHING""",
+                    ("reset-card-allocations-2026-10-01",),
+                )
+                if cur.rowcount == 1:
+                    cur.execute("DELETE FROM card_allocations")
+                    print("[migracao] Alocações de peças zeradas; tabela card_allocations preservada.")
                 cur.execute("SELECT COUNT(*) c FROM sector_positions")
                 if cur.fetchone()["c"] == 0:
                     rows = []
