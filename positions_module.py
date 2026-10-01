@@ -192,7 +192,7 @@ def allocate(card_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                         label = item["reference"] or item["sku"] or item["product"] or str(item_id)
                         raise HTTPException(
                             400,
-                            f"A referência {label} possui {expected} peças previstas e já tem {already} alocadas.",
+                            f"A referência {label} possui {expected} volumes previstos e já tem {already} volumes alocados.",
                         )
 
                     cur.execute(
