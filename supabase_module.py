@@ -185,6 +185,7 @@ def sync_card_to_supabase(sqlite_con, card_id: int) -> None:
 def delete_card_from_supabase(card_id: int) -> None:
     with pg_connect() as con:
         with con.cursor() as cur:
+            cur.execute("DELETE FROM card_allocations WHERE card_id=%s", (card_id,))
             cur.execute("DELETE FROM outlog_cards WHERE id=%s", (card_id,))
         con.commit()
 
