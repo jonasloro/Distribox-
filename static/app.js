@@ -1451,30 +1451,38 @@ async function renderProcessingTab() {
   toggleProcessingLabelField();
 }
 
+
 function processingSetupHtml(importedItems=[]) {
   const modeLabel = cardData.purchase_mode === "GRADE" ? "Grade — importado como Private Label" : cardData.purchase_mode === "SALDO" ? "Saldo" : "Tipo não reconhecido";
   const imported = importedItems.length > 0;
   const importedQty = importedItems.reduce((sum,item)=>sum+Number(item.expected_qty||0),0);
-  const importedPicker = !imported ? "" : cardData.purchase_mode === "GRADE" ? `
-    <div class="notice success-box"><b>Selecione os tamanhos que entrarão nesta produção.</b><br>Somente os itens posicionados em Aguardando Processamento serão movimentados. Os demais permanecem nos setores atuais.</div>
-    <div class="table-wrap compact-picker"><table class="compact-table"><thead><tr><th class="check-col"><input id="processingImportedAll" type="checkbox" checked onchange="toggleImportedProcessingItems(this.checked)"></th><th>Produto</th><th>Cor</th><th>Tamanho</th><th>Quantidade</th></tr></thead><tbody>
-      ${importedItems.map((item)=>`<tr><td><input class="processing-import-item" type="checkbox" value="${item.id}" checked onchange="updateImportedProcessingSummary()"></td><td><b>${esc(item.product||'—')}</b><small>${esc(item.reference||item.sku||'')}</small></td><td>${esc(item.color||'—')}</td><td><span class="size-token">${esc(item.size||'—')}</span></td><td><b>${item.expected_qty}</b></td></tr>`).join("")}
-    </tbody></table></div><div id="processingImportedSummary" class="queue-counter"><b>${importedItems.length}</b> tamanho(s) • <b>${importedQty}</b> peça(s) selecionada(s)</div>` : `
-    <div class="notice success-box"><b>Saldo disponível para produção</b><br>${importedItems.length} linha(s), total de ${importedQty} peça(s). O apontamento continuará por quantidade geral.</div>`;
-  return `<div class="panel-body">
-    <div class="notice"><b>Configuração inicial do Processamento</b><br>O tipo da compra vem automaticamente do Excel e não pode ser alterado neste setor.${imported ? " O Card-mãe continuará no Recebimento porque esta compra possui itens em etapas diferentes." : ""}</div>
-    ${importedPicker}
-    <div class="form-grid">
-      <div class="field"><label>Tipo da compra</label><input class="readonly" readonly value="${esc(modeLabel)}"></div>
-      <div class="field"><label>Marca</label><input id="processingBrand" value="${esc(cardData.brand||"")}" placeholder="Informe a marca"></div>
-      <div class="field"><label>Perfil da compra</label><select id="processingProfile"><option value="">Selecione</option><option value="CADASTRO_ENTRADA">Cadastro + Entrada</option><option value="SOMENTE_ENTRADA">Somente Entrada</option></select></div>
-      <div class="field"><label>Necessita Etiquetagem?</label><select id="processingNeedsLabeling" onchange="toggleProcessingLabelField()"><option value="">Selecione</option><option value="1">Sim</option><option value="0">Não</option></select></div>
-      <div class="field" id="processingLabelTypeField" style="display:none"><label>Tipo de etiqueta</label><select id="processingLabelType"><option value="">Selecione</option><option value="BRANCA">Branca — descrição, EAN e valor</option><option value="VERMELHA">Vermelha — valor</option><option value="PERSONALIZADA">Personalizada</option></select></div>
-      ${cardData.purchase_mode === "GRADE" ? `<div class="field full"><label class="check-line"><input id="processingDeferQty" type="checkbox"> A quantidade final da Grade será confirmada somente na Estocagem</label></div>` : ""}
-      <div class="field full"><label>Observações</label><textarea id="processingNotes"></textarea></div>
-    </div>
-    <div class="actions"><button class="primary" onclick="createProcessing()">Configurar Processamento</button></div>
-  </div>`;
+  const importedPicker = !imported ? "" : cardData.purchase_mode === "GRADE" ? (
+    '<div class="notice success-box"><b>Selecione as referências que entrarão nesta produção.</b><br>Somente os volumes das referências posicionadas em Aguardando Processamento serão movimentados. A composição de grade será definida posteriormente na Triagem.</div>' +
+    '<div class="table-wrap compact-picker"><table class="compact-table"><thead><tr><th class="check-col"><input id="processingImportedAll" type="checkbox" checked onchange="toggleImportedProcessingItems(this.checked)"></th><th>Produto</th><th>Referência</th><th>Volumes</th></tr></thead><tbody>' +
+      importedItems.map(function(item){
+        return '<tr><td><input class="processing-import-item" type="checkbox" value="'+item.id+'" checked onchange="updateImportedProcessingSummary()"></td><td><b>'+esc(item.product||"—")+'</b></td><td><b>'+esc(item.reference||item.sku||"—")+'</b></td><td><b>'+item.expected_qty+'</b></td></tr>';
+      }).join("") +
+    '</tbody></table></div><div id="processingImportedSummary" class="queue-counter"><b>'+importedItems.length+'</b> referência(s) • <b>'+importedQty+'</b> volume(s) selecionado(s)</div>'
+  ) : (
+    '<div class="notice success-box"><b>Volumes disponíveis para produção</b><br>'+importedItems.length+' referência(s), total de '+importedQty+' volume(s). O apontamento continuará por quantidade geral.</div>'
+  );
+
+  return '<div class="panel-body">' +
+    '<div class="notice"><b>Configuração inicial do Processamento</b><br>O tipo da compra vem automaticamente do Excel e não pode ser alterado neste setor.'+
+      (imported ? ' O Card-mãe continuará no Recebimento porque esta compra possui itens em etapas diferentes.' : '') +
+    '</div>' +
+    importedPicker +
+    '<div class="form-grid">' +
+      '<div class="field"><label>Tipo da compra</label><input class="readonly" readonly value="'+esc(modeLabel)+'"></div>' +
+      '<div class="field"><label>Marca</label><input id="processingBrand" value="'+esc(cardData.brand||"")+'" placeholder="Informe a marca"></div>' +
+      '<div class="field"><label>Perfil da compra</label><select id="processingProfile"><option value="">Selecione</option><option value="CADASTRO_ENTRADA">Cadastro + Entrada</option><option value="SOMENTE_ENTRADA">Somente Entrada</option></select></div>' +
+      '<div class="field"><label>Necessita Etiquetagem?</label><select id="processingNeedsLabeling" onchange="toggleProcessingLabelField()"><option value="">Selecione</option><option value="1">Sim</option><option value="0">Não</option></select></div>' +
+      '<div class="field" id="processingLabelTypeField" style="display:none"><label>Tipo de etiqueta</label><select id="processingLabelType"><option value="">Selecione</option><option value="BRANCA">Branca — descrição, EAN e valor</option><option value="VERMELHA">Vermelha — valor</option><option value="PERSONALIZADA">Personalizada</option></select></div>' +
+      (cardData.purchase_mode === "GRADE" ? '<div class="field full"><label class="check-line"><input id="processingDeferQty" type="checkbox"> Os volumes finais serão confirmados somente na Estocagem</label></div>' : '') +
+      '<div class="field full"><label>Observações</label><textarea id="processingNotes"></textarea></div>' +
+    '</div>' +
+    '<div class="actions"><button class="primary" onclick="createProcessing()">Configurar Processamento</button></div>' +
+  '</div>';
 }
 
 function toggleProcessingLabelField() {
@@ -1652,18 +1660,28 @@ async function processingTimerAction(workerId, action) {
   } catch (error) { toast(error.message); }
 }
 
+
 function processingQuantitiesHtml(p, editable) {
-  const copyButton = `<button class="ghost" ${p.totals.stored > 0 && editable ? "" : "disabled"} onclick="copyStoredToProcessed()">Copiar Estocada → Processada</button>`;
+  const copyButton = '<button class="ghost" '+(p.totals.stored > 0 && editable ? "" : "disabled")+' onclick="copyStoredToProcessed()">Copiar Estocada → Processada</button>';
+
   if (p.purchase_mode === "SALDO") {
-    return `<h3 class="section-heading">Quantidades — Saldo</h3><div class="notice">Para compras Saldo, o controle é feito somente pela quantidade geral.</div>
-      <div class="form-grid"><div class="field"><label>Quantidade prevista</label><input class="readonly" readonly value="${p.totals.expected}"></div><div class="field"><label>Quantidade processada</label><input id="processingGeneralQty" type="number" min="0" value="${p.processed_qty_general}" ${editable ? "" : "readonly"}></div><div class="field"><label>Quantidade estocada</label><input class="readonly" readonly value="${p.stored_qty_general}"></div></div>
-      <div class="actions">${editable ? '<button class="primary" onclick="saveProcessingQuantities()">Salvar quantidade</button>' : ""}${copyButton}</div>`;
+    return '<h3 class="section-heading">Volumes — Saldo</h3><div class="notice">Para compras Saldo, o controle é feito somente pelo volume geral.</div>' +
+      '<div class="form-grid"><div class="field"><label>Volumes previstos</label><input class="readonly" readonly value="'+p.totals.expected+'"></div>' +
+      '<div class="field"><label>Volumes processados</label><input id="processingGeneralQty" type="number" min="0" value="'+p.processed_qty_general+'" '+(editable ? "" : "readonly")+'></div>' +
+      '<div class="field"><label>Volumes estocados</label><input class="readonly" readonly value="'+p.stored_qty_general+'"></div></div>' +
+      '<div class="actions">'+(editable ? '<button class="primary" onclick="saveProcessingQuantities()">Salvar volumes</button>' : '')+copyButton+'</div>';
   }
-  const deferredNotice = p.quantity_deferred_to_storage ? '<div class="notice warn">A quantidade final desta Grade será confirmada na Estocagem. É permitido concluir o Processamento sem preencher todos os itens.</div>' : '<div class="notice">Informe a quantidade processada por item da Grade.</div>';
-  return `<h3 class="section-heading">Quantidades — Grade</h3>${deferredNotice}<div class="table-wrap"><table>
-    <thead><tr><th>Produto</th><th>Referência / SKU</th><th>Cor</th><th>Tamanho</th><th>Prevista</th><th>Processada</th><th>Estocada</th></tr></thead>
-    <tbody>${p.items.map((item)=>`<tr><td>${esc(item.product||"—")}</td><td>${esc(item.reference||item.sku||"—")}</td><td>${esc(item.color||"—")}</td><td>${esc(item.size||"—")}</td><td>${item.expected_qty}</td><td><input class="table-input processing-item-qty" data-item-id="${item.item_id}" type="number" min="0" value="${item.processed_qty}" ${editable ? "" : "readonly"}></td><td>${item.stored_qty}</td></tr>`).join("")}</tbody>
-  </table></div><div class="actions">${editable ? '<button class="primary" onclick="saveProcessingQuantities()">Salvar quantidades da Grade</button>' : ""}${copyButton}</div>`;
+
+  const deferredNotice = p.quantity_deferred_to_storage
+    ? '<div class="notice warn">Os volumes finais serão confirmados na Estocagem. É permitido concluir o Processamento sem preencher todas as referências.</div>'
+    : '<div class="notice">Informe os volumes processados por referência.</div>';
+
+  return '<h3 class="section-heading">Volumes — Referências</h3>'+deferredNotice+
+    '<div class="table-wrap"><table><thead><tr><th>Referência</th><th>Volumes previstos</th><th>Volumes processados</th><th>Volumes estocados</th></tr></thead><tbody>'+
+    p.items.map(function(item){
+      return '<tr><td><b>'+esc(item.reference||item.sku||item.product||"—")+'</b></td><td>'+item.expected_qty+'</td><td><input class="table-input processing-item-qty" data-item-id="'+item.item_id+'" type="number" min="0" value="'+item.processed_qty+'" '+(editable ? "" : "readonly")+'></td><td>'+item.stored_qty+'</td></tr>';
+    }).join("")+
+    '</tbody></table></div><div class="actions">'+(editable ? '<button class="primary" onclick="saveProcessingQuantities()">Salvar volumes por referência</button>' : '')+copyButton+'</div>';
 }
 
 async function saveProcessingQuantities() {
@@ -2485,6 +2503,7 @@ function positionItemQty(address,itemId){
   return Number(row?.quantidade||0);
 }
 
+
 function positionCellHtml(p,ctx){
   const occupied=Number(p.ocupado||0);
   const cardQty=positionCardQty(p.address);
@@ -2498,8 +2517,8 @@ function positionCellHtml(p,ctx){
     selected?"is-selected":""
   ].filter(Boolean).join(" ");
   const title=(ctx.selectedItemId && itemQty>0)
-    ? p.address+" • "+itemQty+" pçs desta referência • "+occupied+" pçs no setor"
-    : p.address+" • "+occupied+" pçs no setor";
+    ? p.address+" • "+itemQty+" volume(s) desta referência • "+occupied+" volume(s) no setor"
+    : p.address+" • "+occupied+" volume(s) no setor";
   return '<button type="button" class="'+classes+'" title="'+esc(title)+'" onclick="selectAllocationPosition(\''+esc(p.address)+'\')">' +
     '<span class="position-level">'+esc(p.nivel)+'</span>' +
     '<strong>'+esc(p.address)+'</strong>' +
@@ -2618,19 +2637,16 @@ async function loadPositionAllocator(cardId,setor){
   const suggestion=results[1];
   const positions=results[2];
   const rcv=cardData?.receiving||{};
-  const volsTotal=Number($("recVolumes")?.value||rcv.volumes||0);
-  const qtyTotal=Number($("recQty")?.value||rcv.received_qty||0);
-  const ppv=(volsTotal>0&&qtyTotal>0)?qtyTotal/volsTotal:0;
-
   const items=(cardData.items||[]).filter(function(i){return Number(i.expected_qty||0)>0;});
   const opIds=(rcv.operation_items||[]).map(function(i){return Number(i.id);}).filter(Boolean);
   const sourceItems=opIds.length?items.filter(function(i){return opIds.includes(Number(i.id));}):items;
+  const sourceTotal=sourceItems.reduce(function(sum,i){return sum+Number(i.expected_qty||0);},0);
   const firstAvailable=sourceItems.find(function(i){return itemRemainingQty(i)>0;}) || sourceItems[0] || null;
   const firstAllocated=status.item_allocations?.find(function(i){return Number(i.total_alocado||0)>0;}) || null;
 
   window.allocCtx={
-    cardId:cardId,setor:setor,ppv:ppv,
-    remaining:setor==="RM"?Math.max(0,qtyTotal-Number(status.total_alocado||0)):0,
+    cardId:cardId,setor:setor,
+    remaining:setor==="RM"?Math.max(0,sourceTotal-Number(status.total_alocado||0)):0,
     positions:positions,status:status,suggestion:suggestion,
     selectedItemId:Number(firstAvailable?.id||firstAllocated?.item_id||0),
     selectedAddress:suggestion?.address||firstAllocated?.posicoes?.[0]?.address||"",
@@ -2643,11 +2659,11 @@ async function loadPositionAllocator(cardId,setor){
       '<div class="position-allocator-head">' +
         '<div><div class="position-kicker">ENDEREÇAMENTO FÍSICO</div>' +
           '<h3>'+(setor==="QA"?"Alocar na Qualidade":"Alocar no Recebimento")+'</h3>' +
-          '<p>Escolha primeiro a referência, depois a posição. Cada item possui seu próprio saldo de peças alocadas.</p>' +
+          '<p>Escolha primeiro a referência, depois a posição. O controle desta etapa é feito em volumes da referência.</p>' +
         '</div>' +
         '<div class="position-suggest">'+
           (suggestion?'<span>SUGESTÃO AUTOMÁTICA</span><b>'+esc(suggestion.address)+'</b><small>'+
-            Number(suggestion.ocupado||0).toLocaleString("pt-BR")+' peça(s) já ocupada(s)</small>':
+            Number(suggestion.ocupado||0).toLocaleString("pt-BR")+' volume(s) já ocupado(s)</small>':
             '<span>SEM SUGESTÃO DISPONÍVEL</span>')+
         '</div>' +
       '</div>' +
@@ -2659,12 +2675,10 @@ async function loadPositionAllocator(cardId,setor){
 
       '<div class="position-stat-grid">' +
         '<div class="position-stat"><span>Total alocado</span><strong id="positionAllocatedTotal">'+Number(status.total_alocado||0).toLocaleString("pt-BR")+
-          '</strong><small>peças no setor</small></div>' +
+          '</strong><small>volumes no setor</small></div>' +
         '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">'+(status.posicoes?.length||0)+
           '</strong><small>endereços</small></div>' +
-        '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemainingStat">—</strong><small>peças restantes</small></div>' +
-        '<div class="position-stat"><span>Relação volume</span><strong>'+(ppv?Math.round(ppv*10)/10:"—")+
-          '</strong><small>'+(ppv?"peças / volume":"informe volumes e peças")+'</small></div>' +
+        '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemainingStat">—</strong><small>volumes restantes</small></div>' +
       '</div>' +
 
       '<div class="position-controls">' +
@@ -2685,12 +2699,7 @@ async function loadPositionAllocator(cardId,setor){
           esc(firstAvailable?referenceDetailLabel(firstAvailable):"Nenhuma")+'</strong><small id="positionReferenceRemainingLabel"></small><em id="positionSelectedLabel">'+
           esc(window.allocCtx.selectedAddress||"Nenhuma")+'</em></div>' +
         '<div class="position-editor-fields">' +
-          '<div class="field"><label>Marcar por</label><select id="posUnit" onchange="updateAllocHint()"><option value="PECAS">Peças</option>'+
-            (ppv?'<option value="VOLUMES">Volumes</option>': '')+
-          '</select></div>' +
-          '<div class="field"><label>Quantidade nessa posição</label><input id="posQty" type="number" min="1" placeholder="Ex.: 30" oninput="updateAllocHint()"><small id="posHint" class="muted">'+
-            (ppv?"1 volume ≈ "+Math.round(ppv*10)/10+" peças":"Informe volumes e quantidade recebida para habilitar a conversão.")+
-          '</small></div>' +
+          '<div class="field"><label>Volumes nessa posição</label><input id="posQty" type="number" min="1" placeholder="Ex.: 30" oninput="updateAllocHint()"><small id="posHint" class="muted">Saldo da referência: '+(firstAvailable?itemRemainingQty(firstAvailable).toLocaleString("pt-BR"):"—")+' volumes</small></div>' +
           '<div class="position-editor-action"><button class="primary" onclick="submitAllocation('+cardId+',\''+setor+'\')">+ Alocar referência</button></div>' +
         '</div>' +
       '</div>' +
@@ -2713,7 +2722,7 @@ function updateReferenceRemaining(){
   if(!ctx||!item) return;
   const remaining=itemRemainingQty(item);
   if($("positionReferenceRemainingStat")) $("positionReferenceRemainingStat").textContent=remaining.toLocaleString("pt-BR");
-  if($("positionReferenceRemainingLabel")) $("positionReferenceRemainingLabel").textContent=remaining.toLocaleString("pt-BR")+" peças restantes";
+  if($("positionReferenceRemainingLabel")) $("positionReferenceRemainingLabel").textContent=remaining.toLocaleString("pt-BR")+" volumes restantes";
   if($("positionSelectedItemLabel")) $("positionSelectedItemLabel").textContent=referenceDetailLabel(item);
 }
 
@@ -2729,10 +2738,10 @@ function renderCurrentItemAllocations(){
   box.innerHTML=rows.map(function(row){
     return '<div class="reference-allocation-summary">' +
       '<div><b>'+esc(referenceDetailLabel(row))+'</b><small>'+(row.product?esc(row.product):"")+'</small></div>' +
-      '<strong>'+Number(row.total_alocado||0).toLocaleString("pt-BR")+' pçs</strong>' +
+      '<strong>'+Number(row.total_alocado||0).toLocaleString("pt-BR")+' volumes</strong>' +
       '<div class="reference-allocation-addresses">'+(row.posicoes||[]).map(function(p){
         return '<button type="button" onclick="selectAllocationItem('+Number(row.item_id)+');selectAllocationPosition(\''+esc(p.address)+'\')">'+
-          esc(p.address)+' · '+Number(p.quantidade||0).toLocaleString("pt-BR")+'</button>';
+          esc(p.address)+' · '+Number(p.quantidade||0).toLocaleString("pt-BR")+' volumes</button>';
       }).join("")+'</div>' +
     '</div>';
   }).join("");
@@ -2743,31 +2752,17 @@ function updateAllocHint(){
   const ctx=window.allocCtx;
   const item=selectedAllocationItem();
   if(!el||!ctx||!item)return;
-  const unit=$("posUnit")?.value||"PECAS";
   const raw=Number($("posQty")?.value||0);
-  if(unit==="VOLUMES"&&ctx.ppv){
-    const n=Math.round(raw*ctx.ppv);
-    el.textContent=raw>0?raw+" volume(s) = "+n+" peças":"1 volume ≈ "+Math.round(ctx.ppv*10)/10+" peças";
-  }else{
-    el.textContent="Saldo da referência: "+itemRemainingQty(item).toLocaleString("pt-BR")+" peças";
-  }
+  const remaining=itemRemainingQty(item);
+  el.textContent="Saldo da referência: "+remaining.toLocaleString("pt-BR")+" volumes";
+  if(raw>remaining) el.textContent+=" — quantidade acima do saldo.";
   updateReferenceRemaining();
 }
-
-function allocPieces(){
-  const raw=Number($("posQty")?.value||0);
-  const ctx=window.allocCtx||{ppv:0,remaining:0};
-  if($("posUnit")?.value!=="VOLUMES"||!ctx.ppv)return raw;
-  let pieces=Math.round(raw*ctx.ppv);
-  if(ctx.remaining>0&&Math.abs(ctx.remaining-pieces)<ctx.ppv/2)pieces=ctx.remaining;
-  return pieces;
-}
-
 async function submitAllocation(cardId,setor){
   const ctx=window.allocCtx||{};
   const item=selectedAllocationItem();
   const address=ctx.selectedAddress||"";
-  const qty=allocPieces();
+  const qty=Number($("posQty")?.value||0);
   if(!item){
     toast("Selecione a referência que será alocada.");
     return;
@@ -2782,11 +2777,11 @@ async function submitAllocation(cardId,setor){
   }
   const remaining=itemRemainingQty(item);
   if(qty>remaining){
-    toast("A referência "+referenceLabel(item)+" possui somente "+remaining.toLocaleString("pt-BR")+" peça(s) restantes.");
+    toast("A referência "+referenceLabel(item)+" possui somente "+remaining.toLocaleString("pt-BR")+" volume(s) restantes.");
     return;
   }
   if(ctx.remaining>0&&qty>ctx.remaining){
-    toast("A quantidade ultrapassa o saldo geral de "+ctx.remaining.toLocaleString("pt-BR")+" peças.");
+    toast("A quantidade ultrapassa o saldo geral de "+ctx.remaining.toLocaleString("pt-BR")+" volumes.");
     return;
   }
   try{
@@ -2801,7 +2796,7 @@ async function submitAllocation(cardId,setor){
     ctx.status=result;
     ctx.remaining=setor==="RM"?Math.max(0,ctx.remaining-qty):ctx.remaining;
     $("posQty").value="";
-    toast("Referência "+referenceLabel(item)+" alocada em "+address+".");
+    toast("Referência "+referenceLabel(item)+" alocada em "+address+" com "+qty.toLocaleString("pt-BR")+" volume(s).");
     renderAllocationItemPicker();
     renderCurrentItemAllocations();
     updateReferenceRemaining();
