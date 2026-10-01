@@ -140,6 +140,15 @@ def init_quality_db() -> None:
             FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS quality_item_routes (
+            inspection_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            destination TEXT,
+            PRIMARY KEY(inspection_id,item_id),
+            FOREIGN KEY(inspection_id) REFERENCES quality_inspections(id) ON DELETE CASCADE,
+            FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS quality_workers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             inspection_id INTEGER NOT NULL,
@@ -413,6 +422,21 @@ def inspection_validation(con: sqlite3.Connection, inspection_id: int) -> list[s
     errors: list[str] = []
     if inspection["inspection_type"] == 1 and inspection["destination"] not in ("CD01", "CD02"):
         errors.append("Defina o destino CD01 ou CD02.")
+    if inspection["inspection_type"] == 1 and not inspection["source_subset"] and inspection["destination"] not in ("CD01", "CD02"):
+        errors.append("Defina o destino da Inspeção 1.")
+    if inspection["source_subset"] and inspection["inspection_type"] == 1:
+        mapped = [int(row["item_id"]) for row in con.execute(
+            "SELECT item_id FROM quality_inspection_items WHERE inspection_id=?", (inspection_id,)
+        ).fetchall()]
+        routes = {
+            int(row["item_id"]): str(row["destination"] or "").upper()
+            for row in con.execute(
+                "SELECT item_id,destination FROM quality_item_routes WHERE inspection_id=?", (inspection_id,)
+            ).fetchall()
+        }
+        missing = [item_id for item_id in mapped if routes.get(item_id) not in {"COSTURA","PROCESSAMENTO"}]
+        if missing:
+            errors.append(f"Defina o destino de {len(missing)} referência(s) antes de concluir.")
     sample_rows = sample_item_rows(con, inspection_id)
     sample_total = sum(int(row["sample_qty"]) for row in sample_rows)
     if sample_total != int(inspection["sample_target_total"]):
@@ -567,6 +591,12 @@ def quality_card_data(con: sqlite3.Connection, card_id: int) -> Optional[dict[st
         """,
         (card_id, inspection["id"]),
     ).fetchall()
+    data["item_routes"] = [dict(row) for row in con.execute(
+        """SELECT qir.item_id,qir.destination,i.product,i.reference,i.sku,i.color,i.size,i.expected_qty
+           FROM quality_item_routes qir JOIN items i ON i.id=qir.item_id
+           WHERE qir.inspection_id=? ORDER BY i.product,i.reference,i.color,i.size,i.id""",
+        (inspection["id"],),
+    ).fetchall()]
     data["sample_items"] = samples
     data["workers"] = workers
     data["totals"] = totals
@@ -596,6 +626,7 @@ async def create_inspection(card_id: int, request: Request):
     development_required_raw = payload.get("development_required")
     development_separated_raw = payload.get("development_separated")
     source_subset_requested = bool(payload.get("source_subset"))
+    requested_item_ids = sorted({int(value) for value in (payload.get("item_ids") or []) if str(value).isdigit() and int(value) > 0})
     if inspection_type not in (1, 2):
         raise HTTPException(400, "Selecione Inspeção 1 ou Inspeção 2.")
     if development_required_raw is None:
@@ -620,18 +651,34 @@ async def create_inspection(card_id: int, request: Request):
         raise HTTPException(404, "Card não encontrado.")
     source_items: list[sqlite3.Row] = []
     source_subset = False
-    if card["current_sector"] != "QUALIDADE":
-        if source_subset_requested and card["source_snapshot_at"]:
-            source_items = con.execute(
-                """SELECT id,expected_qty FROM items WHERE card_id=?
-                   AND source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO')
-                   AND expected_qty>0 ORDER BY id""",
-                (card_id,),
-            ).fetchall()
-            source_subset = bool(source_items)
+    if source_subset_requested:
+        stage_filter = (
+            "source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO')"
+            if card["current_sector"] != "QUALIDADE"
+            else "source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO','') OR source_stage IS NULL"
+        )
+        available_rows = con.execute(
+            f"""SELECT id,expected_qty,product,reference,sku,color,size
+               FROM items WHERE card_id=? AND ({stage_filter})
+               AND expected_qty>0 ORDER BY product,reference,color,size,id""",
+            (card_id,),
+        ).fetchall()
+        available_ids = {int(row["id"]) for row in available_rows}
+        if requested_item_ids:
+            invalid = [item_id for item_id in requested_item_ids if item_id not in available_ids]
+            if invalid:
+                con.close()
+                raise HTTPException(400, "Uma ou mais referências selecionadas não estão disponíveis na Qualidade.")
+            source_items = [row for row in available_rows if int(row["id"]) in requested_item_ids]
+        else:
+            source_items = available_rows
+        source_subset = bool(source_items)
         if not source_subset:
             con.close()
-            raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
+            raise HTTPException(400, "Selecione pelo menos uma referência disponível na Qualidade.")
+    elif card["current_sector"] != "QUALIDADE":
+        con.close()
+        raise HTTPException(400, "O Card não possui itens disponíveis para iniciar na Qualidade.")
 
     purchase_mode = str(card["purchase_mode"] or "").upper()
     if purchase_mode not in {"GRADE", "SALDO"}:
@@ -659,6 +706,10 @@ async def create_inspection(card_id: int, request: Request):
     if card["receiving_type"] == "RETORNO" and inspection_type != 2:
         con.close()
         raise HTTPException(400, "Após o retorno da Costura, a inspeção obrigatória é a Inspeção 2.")
+
+    if card["receiving_type"] != "RETORNO" and inspection_type == 2:
+        con.close()
+        raise HTTPException(400, "A Inspeção 2 só existe para mercadoria que retornou da Costura.")
 
     # A origem da amostra depende do momento do fluxo, não apenas do número da inspeção.
     # - Mercadoria nova: tanto a Inspeção 1 quanto a Inspeção 2 usam os 10% já
@@ -724,6 +775,12 @@ async def create_inspection(card_id: int, request: Request):
             "INSERT INTO quality_inspection_items(inspection_id,item_id) VALUES(?,?)",
             [(inspection_id, item_id) for item_id in source_item_ids],
         )
+    if source_subset:
+        default_route = "PROCESSAMENTO" if inspection_type == 2 else None
+        con.executemany(
+            "INSERT INTO quality_item_routes(inspection_id,item_id,destination) VALUES(?,?,?)",
+            [(inspection_id, item_id, default_route) for item_id in source_item_ids],
+        )
     target = create_automatic_sample(
         con, inspection_id, card_id, purchase_mode, requested_target,
         source_item_ids if source_subset else None,
@@ -765,6 +822,53 @@ async def create_inspection(card_id: int, request: Request):
     )
     con.commit()
     detail = quality_card_data(con, card_id)
+    con.close()
+    return detail
+
+
+@router.patch("/quality/inspections/{inspection_id}/routes")
+async def save_item_routes(inspection_id: int, request: Request):
+    payload = await request.json()
+    user_id = int(payload.get("user_id") or 0)
+    routes = payload.get("routes") or []
+    con = db_connect()
+    require_role(con, user_id, QUALITY_ROLES)
+    inspection = con.execute("SELECT * FROM quality_inspections WHERE id=?", (inspection_id,)).fetchone()
+    if not inspection:
+        con.close()
+        raise HTTPException(404, "Inspeção não encontrada.")
+    if inspection["status"] != "ABERTA":
+        con.close()
+        raise HTTPException(400, "A inspeção já foi concluída.")
+    if not inspection["source_subset"] or inspection["inspection_type"] != 1:
+        con.close()
+        raise HTTPException(400, "O destino por referência só é necessário na Inspeção 1 por referência.")
+    mapped = {int(row["item_id"]) for row in con.execute(
+        "SELECT item_id FROM quality_inspection_items WHERE inspection_id=?", (inspection_id,)
+    ).fetchall()}
+    normalized = {}
+    for entry in routes:
+        item_id = int(entry.get("item_id") or 0)
+        destination = str(entry.get("destination") or "").strip().upper()
+        if item_id not in mapped:
+            con.close()
+            raise HTTPException(400, "Uma referência informada não pertence a esta inspeção.")
+        if destination not in {"COSTURA","PROCESSAMENTO"}:
+            con.close()
+            raise HTTPException(400, "O destino deve ser COSTURA ou PROCESSAMENTO.")
+        normalized[item_id] = destination
+    if set(normalized) != mapped:
+        con.close()
+        raise HTTPException(400, "Defina o destino para todas as referências selecionadas.")
+    con.execute("DELETE FROM quality_item_routes WHERE inspection_id=?", (inspection_id,))
+    con.executemany(
+        "INSERT INTO quality_item_routes(inspection_id,item_id,destination) VALUES(?,?,?)",
+        [(inspection_id, item_id, destination) for item_id, destination in normalized.items()],
+    )
+    add_history(con, inspection["card_id"], "DESTINO_QUALIDADE_POR_REFERENCIA",
+                f"Destinos definidos para {len(normalized)} referência(s).", user_id)
+    con.commit()
+    detail = quality_card_data(con, inspection["card_id"])
     con.close()
     return detail
 
@@ -1248,29 +1352,62 @@ async def complete_inspection(inspection_id: int, request: Request):
         (user_id, now, 1 if pending else 0, inspection_id),
     )
     if inspection["source_subset"]:
-        mapped_ids = [row["item_id"] for row in con.execute(
+        mapped_ids = [int(row["item_id"]) for row in con.execute(
             "SELECT item_id FROM quality_inspection_items WHERE inspection_id=?", (inspection_id,)
         ).fetchall()]
-        next_stage = (
-            "AGUARDANDO_COSTURA" if inspection["inspection_type"] == 1 and inspection["destination"] == "CD01"
-            else "CONCLUIDO" if inspection["inspection_type"] == 1
-            else "AGUARDANDO_PROCESSAMENTO"
-        )
-        if mapped_ids:
-            marks = ",".join("?" for _ in mapped_ids)
+        if inspection["inspection_type"] == 2:
+            costura_ids = []
+            processing_ids = mapped_ids
+        else:
+            route_rows = con.execute(
+                "SELECT item_id,destination FROM quality_item_routes WHERE inspection_id=?",
+                (inspection_id,),
+            ).fetchall()
+            route_map = {int(row["item_id"]): str(row["destination"] or "").upper() for row in route_rows}
+            missing_routes = [item_id for item_id in mapped_ids if route_map.get(item_id) not in {"COSTURA","PROCESSAMENTO"}]
+            if missing_routes:
+                con.close()
+                raise HTTPException(400, "Defina o destino de todas as referências antes de concluir.")
+            costura_ids = [item_id for item_id in mapped_ids if route_map[item_id] == "COSTURA"]
+            processing_ids = [item_id for item_id in mapped_ids if route_map[item_id] == "PROCESSAMENTO"]
+        for item_ids, stage in ((costura_ids, "AGUARDANDO_COSTURA"), (processing_ids, "AGUARDANDO_PROCESSAMENTO")):
+            if item_ids:
+                marks = ",".join("?" for _ in item_ids)
+                con.execute(
+                    f"UPDATE items SET source_stage=?,source_status_quality='Concluído' WHERE id IN ({marks})",
+                    (stage, *item_ids),
+                )
+        remaining_quality = int(con.execute(
+            """SELECT COUNT(*) n FROM items
+               WHERE card_id=? AND expected_qty>0
+                 AND source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO')""",
+            (inspection["card_id"],),
+        ).fetchone()["n"])
+        if costura_ids:
+            from app import ensure_receiving
+            ensure_receiving(con, inspection["card_id"], "COSTURA", costura_ids)
             con.execute(
-                f"UPDATE items SET source_stage=?,source_status_quality='Concluído' WHERE id IN ({marks})",
-                (next_stage, *mapped_ids),
+                """UPDATE cards SET current_sector='RECEBIMENTO',status='AGUARDANDO_DESPACHO_COSTURA',
+                   quality_destination='CD01',receiving_type='COSTURA',updated_at=? WHERE id=?""",
+                (now, inspection["card_id"]),
             )
-        con.execute(
-            "UPDATE cards SET status='ORIGEM_MISTO',updated_at=? WHERE id=?",
-            (now, inspection["card_id"]),
-        )
-        route_text = (
-            f"Itens importados encaminhados para Costura ({inspection['destination']})."
-            if inspection["inspection_type"] == 1
-            else "Itens importados encaminhados ao Processamento."
-        )
+            route_text = f"{len(costura_ids)} referência(s) encaminhada(s) para Costura; {len(processing_ids)} referência(s) liberada(s) ao Processamento."
+            if remaining_quality:
+                route_text += f" {remaining_quality} referência(s) permanecem na Qualidade."
+        elif remaining_quality:
+            con.execute(
+                """UPDATE cards SET current_sector='QUALIDADE',status='ORIGEM_MISTO',
+                   quality_destination=NULL,updated_at=? WHERE id=?""",
+                (now, inspection["card_id"]),
+            )
+            route_text = f"{len(processing_ids)} referência(s) liberada(s) ao Processamento; {remaining_quality} referência(s) permanecem na Qualidade."
+        else:
+            con.execute(
+                """UPDATE cards SET current_sector='PROCESSAMENTO',status='AGUARDANDO_PROCESSAMENTO',
+                   quality_destination=NULL,receiving_type='NOVA',updated_at=? WHERE id=?""",
+                (now, inspection["card_id"]),
+            )
+            route_text = f"{len(processing_ids)} referência(s) encaminhada(s) ao Processamento."
     elif inspection["inspection_type"] == 1:
         con.execute(
             """UPDATE cards SET current_sector='RECEBIMENTO',status='AGUARDANDO_DESPACHO_COSTURA',
