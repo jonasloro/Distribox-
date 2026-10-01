@@ -2428,104 +2428,167 @@ async function confirmarRecebimentoBackend(payload) {
 
 
 
-/* V9 — mapa visual de endereçamento */
-function positionCardQty(address){
-  const rows = window.allocCtx?.status?.posicoes || [];
-  const row = rows.find(function(p){ return p.address === address; });
-  return Number(row?.quantidade || 0);
+/* V10 — endereçamento por referência + mapa visual */
+function allocationItemRows(){
+  const ctx=window.allocCtx;
+  if(!ctx || !cardData) return [];
+  const opIds=(cardData.receiving?.operation_items||[]).map(function(i){return Number(i.id);}).filter(Boolean);
+  const source=opIds.length
+    ? (cardData.items||[]).filter(function(i){return opIds.includes(Number(i.id));})
+    : (cardData.items||[]);
+  return source.filter(function(i){return Number(i.expected_qty||0)>0;});
 }
 
-function positionCellHtml(p, ctx){
-  const occupied = Number(p.ocupado || 0);
-  const cardQty = positionCardQty(p.address);
-  const selected = ctx.selectedAddress === p.address;
-  const classes = [
+function itemAllocationInfo(itemId){
+  const rows=window.allocCtx?.status?.item_allocations||[];
+  return rows.find(function(r){return Number(r.item_id)===Number(itemId);}) || null;
+}
+
+function itemAllocatedQty(itemId){
+  return Number(itemAllocationInfo(itemId)?.total_alocado||0);
+}
+
+function itemRemainingQty(item){
+  return Math.max(0, Number(item.expected_qty||0) - itemAllocatedQty(item.id));
+}
+
+function selectedAllocationItem(){
+  const rows=allocationItemRows();
+  const id=Number(window.allocCtx?.selectedItemId||0);
+  return rows.find(function(i){return Number(i.id)===id;}) || rows[0] || null;
+}
+
+function referenceLabel(item){
+  return item?.reference || item?.sku || item?.product || ("Item " + item?.id);
+}
+
+function referenceDetailLabel(item){
+  return [
+    referenceLabel(item),
+    item?.color || null,
+    item?.size || null
+  ].filter(Boolean).join(" • ");
+}
+
+function renderAllocationItemPicker(){
+  const ctx=window.allocCtx;
+  const box=$("positionItemPicker");
+  if(!ctx || !box) return;
+  const items=allocationItemRows();
+
+  if(!items.length){
+    box.innerHTML='<div class="position-empty">Nenhuma referência disponível para este Recebimento.</div>';
+    return;
+  }
+
+  box.innerHTML=items.map(function(item){
+    const allocated=itemAllocatedQty(item.id);
+    const remaining=itemRemainingQty(item);
+    const selected=Number(ctx.selectedItemId)===Number(item.id);
+    return '<button type="button" class="allocation-item-card ' + (selected?'is-selected ':'') + (remaining===0?'is-complete':'') +
+      '" onclick="selectAllocationItem(' + Number(item.id) + ')">' +
+        '<div class="allocation-item-main">' +
+          '<span class="allocation-item-ref">' + esc(referenceLabel(item)) + '</span>' +
+          '<small>' + esc([item.product,item.color,item.size].filter(Boolean).join(" • ") || "Sem detalhe") + '</small>' +
+        '</div>' +
+        '<div class="allocation-item-numbers">' +
+          '<b>' + allocated.toLocaleString("pt-BR") + '</b><span>alocadas</span>' +
+          '<b>' + remaining.toLocaleString("pt-BR") + '</b><span>restantes</span>' +
+        '</div>' +
+      '</button>';
+  }).join("");
+}
+
+function positionCardQty(address){
+  const rows=window.allocCtx?.status?.posicoes||[];
+  const row=rows.find(function(p){return p.address===address;});
+  return Number(row?.quantidade||0);
+}
+
+function positionItemQty(address,itemId){
+  const info=itemAllocationInfo(itemId);
+  const row=(info?.posicoes||[]).find(function(p){return p.address===address;});
+  return Number(row?.quantidade||0);
+}
+
+function positionCellHtml(p,ctx){
+  const occupied=Number(p.ocupado||0);
+  const cardQty=positionCardQty(p.address);
+  const itemQty=ctx.selectedItemId ? positionItemQty(p.address,ctx.selectedItemId) : 0;
+  const selected=ctx.selectedAddress===p.address;
+  const classes=[
     "position-cell",
-    occupied > 0 ? "is-occupied" : "is-free",
-    cardQty > 0 ? "is-card" : "",
-    selected ? "is-selected" : ""
+    occupied>0?"is-occupied":"is-free",
+    cardQty>0?"is-card":"",
+    itemQty>0?"is-item":"",
+    selected?"is-selected":""
   ].filter(Boolean).join(" ");
-  const title = cardQty > 0
-    ? p.address + " • " + cardQty + " pçs neste Card • " + occupied + " pçs no setor"
-    : p.address + " • " + occupied + " pçs no setor";
-  return '<button type="button" class="' + classes + '" title="' + esc(title) + '" onclick="selectAllocationPosition(\'' + esc(p.address) + '\')">' +
-    '<span class="position-level">' + esc(p.nivel) + '</span>' +
-    '<strong>' + esc(p.address) + '</strong>' +
-    '<small>' + (occupied ? occupied.toLocaleString("pt-BR") : "Livre") +
-      (cardQty > 0 ? " · Card: " + cardQty.toLocaleString("pt-BR") : "") +
-    '</small>' +
+  const title=(ctx.selectedItemId && itemQty>0)
+    ? p.address+" • "+itemQty+" pçs desta referência • "+occupied+" pçs no setor"
+    : p.address+" • "+occupied+" pçs no setor";
+  return '<button type="button" class="'+classes+'" title="'+esc(title)+'" onclick="selectAllocationPosition(\''+esc(p.address)+'\')">' +
+    '<span class="position-level">'+esc(p.nivel)+'</span>' +
+    '<strong>'+esc(p.address)+'</strong>' +
+    '<small>'+(occupied?occupied.toLocaleString("pt-BR"):"Livre")+(itemQty>0?" · Ref: "+itemQty.toLocaleString("pt-BR"):"")+'</small>' +
   '</button>';
 }
 
 function renderPositionMap(){
-  const ctx = window.allocCtx;
-  const map = $("positionMap");
+  const ctx=window.allocCtx;
+  const map=$("positionMap");
   if(!ctx || !map) return;
+  const term=normalizeSearch(ctx.search||"");
+  const zone=ctx.zoneFilter||"ALL";
+  const state=ctx.posFilter||"ALL";
 
-  const term = normalizeSearch(ctx.search || "");
-  const zone = ctx.zoneFilter || "ALL";
-  const state = ctx.posFilter || "ALL";
-
-  const visible = (ctx.positions || []).filter(function(p){
-    const zoneOk = zone === "ALL" || String(p.zona) === String(zone);
-    const cardQty = positionCardQty(p.address);
-    const stateOk =
-      state === "ALL" ||
-      (state === "FREE" && Number(p.ocupado || 0) === 0) ||
-      (state === "OCCUPIED" && Number(p.ocupado || 0) > 0) ||
-      (state === "CARD" && cardQty > 0);
-    const searchOk = !term || normalizeSearch([
-      p.address, p.casulo, p.nivel, p.zona, p.zona_label
-    ].join(" ")).includes(term);
-    return zoneOk && stateOk && searchOk;
+  const visible=(ctx.positions||[]).filter(function(p){
+    const zoneOk=zone==="ALL"||String(p.zona)===String(zone);
+    const cardQty=positionCardQty(p.address);
+    const stateOk=
+      state==="ALL" ||
+      (state==="FREE"&&Number(p.ocupado||0)===0) ||
+      (state==="OCCUPIED"&&Number(p.ocupado||0)>0) ||
+      (state==="CARD"&&cardQty>0);
+    const searchOk=!term||normalizeSearch([p.address,p.casulo,p.nivel,p.zona,p.zona_label].join(" ")).includes(term);
+    return zoneOk&&stateOk&&searchOk;
   });
 
-  const grouped = {};
+  const grouped={};
   visible.forEach(function(p){
-    const key = String(p.zona) + "|" + String(p.casulo);
-    if(!grouped[key]) grouped[key] = [];
+    const key=String(p.zona)+"|"+String(p.casulo);
+    if(!grouped[key]) grouped[key]=[];
     grouped[key].push(p);
   });
 
-  const zones = {};
+  const zones={};
   Object.keys(grouped).forEach(function(key){
-    const parts = key.split("|");
-    const zona = parts[0];
-    const casulo = parts[1];
-    if(!zones[zona]) zones[zona] = [];
-    zones[zona].push({ casulo: casulo, rows: grouped[key] });
+    const parts=key.split("|");
+    const zona=parts[0];
+    const casulo=parts[1];
+    if(!zones[zona]) zones[zona]=[];
+    zones[zona].push({casulo:casulo,rows:grouped[key]});
   });
 
-  const zoneEntries = Object.entries(zones).sort(function(a,b){
-    return String(a[0]).localeCompare(String(b[0]));
-  });
-
+  const zoneEntries=Object.entries(zones).sort(function(a,b){return String(a[0]).localeCompare(String(b[0]));});
   if(!zoneEntries.length){
-    map.innerHTML = '<div class="position-empty large">Nenhuma posição encontrada com os filtros atuais.</div>';
+    map.innerHTML='<div class="position-empty large">Nenhuma posição encontrada com os filtros atuais.</div>';
     return;
   }
 
-  map.innerHTML = zoneEntries.map(function(entry){
-    const zona = entry[0];
-    const casulos = entry[1];
-    const zoneRows = ctx.positions.filter(function(p){ return String(p.zona) === String(zona); });
-
+  map.innerHTML=zoneEntries.map(function(entry){
+    const zona=entry[0];
+    const casulos=entry[1];
+    const zoneRows=ctx.positions.filter(function(p){return String(p.zona)===String(zona);});
     return '<section class="position-zone">' +
-      '<div class="position-zone-head">' +
-        '<div><b>' + esc(zoneRows[0]?.zona_label || ("Zona " + zona)) + '</b><span>' +
-          casulos.length + ' casulo(s) visível(is)</span></div>' +
-        '<small>' + casulos.reduce(function(n,c){ return n + c.rows.length; }, 0) + ' posições</small>' +
-      '</div>' +
-      '<div class="position-casulo-grid">' +
-        casulos.sort(function(a,b){ return String(a.casulo).localeCompare(String(b.casulo)); }).map(function(group){
-          const rows = group.rows.sort(function(a,b){
-            return String(a.nivel).localeCompare(String(b.nivel));
-          });
+      '<div class="position-zone-head"><div><b>'+esc(zoneRows[0]?.zona_label||("Zona "+zona))+'</b><span>'+
+        casulos.length+' casulo(s) visível(is)</span></div><small>'+
+        casulos.reduce(function(n,c){return n+c.rows.length;},0)+' posições</small></div>' +
+      '<div class="position-casulo-grid">'+
+        casulos.sort(function(a,b){return String(a.casulo).localeCompare(String(b.casulo));}).map(function(group){
+          const rows=group.rows.sort(function(a,b){return String(a.nivel).localeCompare(String(b.nivel));});
           return '<div class="position-casulo">' +
-            '<div class="position-casulo-head"><span>CASULO</span><b>' + esc(group.casulo) + '</b></div>' +
-            '<div class="position-levels">' +
-              rows.map(function(p){ return positionCellHtml(p, ctx); }).join("") +
-            '</div>' +
+            '<div class="position-casulo-head"><span>CASULO</span><b>'+esc(group.casulo)+'</b></div>' +
+            '<div class="position-levels">'+rows.map(function(p){return positionCellHtml(p,ctx);}).join("")+'</div>' +
           '</div>';
         }).join("") +
       '</div>' +
@@ -2533,180 +2596,241 @@ function renderPositionMap(){
   }).join("");
 }
 
-function selectAllocationPosition(address){
-  const ctx = window.allocCtx;
+function selectAllocationItem(itemId){
+  const ctx=window.allocCtx;
   if(!ctx) return;
-  ctx.selectedAddress = address;
-  if($("positionSelectedLabel")) $("positionSelectedLabel").textContent = address || "Nenhuma";
+  const item=allocationItemRows().find(function(i){return Number(i.id)===Number(itemId);});
+  if(!item) return;
+  ctx.selectedItemId=Number(itemId);
+  const info=itemAllocationInfo(itemId);
+  ctx.selectedAddress=info?.posicoes?.[0]?.address || ctx.suggestion?.address || ctx.selectedAddress || "";
+  if($("positionSelectedItemLabel")) $("positionSelectedItemLabel").textContent=referenceDetailLabel(item);
+  if($("positionSelectedLabel")) $("positionSelectedLabel").textContent=ctx.selectedAddress||"Nenhuma";
+  renderAllocationItemPicker();
+  renderPositionMap();
+  updateAllocHint();
+}
+
+function selectAllocationPosition(address){
+  const ctx=window.allocCtx;
+  if(!ctx) return;
+  ctx.selectedAddress=address;
+  if($("positionSelectedLabel")) $("positionSelectedLabel").textContent=address||"Nenhuma";
   renderPositionMap();
   $("posQty")?.focus();
 }
 
 function filterPositionMap(){
-  const ctx = window.allocCtx;
+  const ctx=window.allocCtx;
   if(!ctx) return;
-  ctx.search = $("positionSearch")?.value || "";
-  ctx.zoneFilter = $("positionZoneFilter")?.value || "ALL";
-  ctx.posFilter = $("positionStateFilter")?.value || "ALL";
+  ctx.search=$("positionSearch")?.value||"";
+  ctx.zoneFilter=$("positionZoneFilter")?.value||"ALL";
+  ctx.posFilter=$("positionStateFilter")?.value||"ALL";
   renderPositionMap();
 }
 
-async function loadPositionAllocator(cardId, setor){
-  const box = $("posAllocBox");
+async function loadPositionAllocator(cardId,setor){
+  const box=$("posAllocBox");
   if(!box) return;
-  box.innerHTML = '<div class="position-loading"><span class="spinner-dot"></span> Montando mapa de posições…</div>';
+  box.innerHTML='<div class="position-loading"><span class="spinner-dot"></span> Montando mapa de posições…</div>';
 
-  const results = await Promise.all([
-    safeApi("/api/positions/cards/" + cardId + "/status?setor=" + setor, {total_alocado:0, posicoes:[]}),
-    safeApi("/api/positions/suggest?setor=" + setor, null),
-    safeApi("/api/positions?setor=" + setor, [])
+  const results=await Promise.all([
+    safeApi("/api/positions/cards/"+cardId+"/status?setor="+setor,{total_alocado:0,posicoes:[],item_allocations:[]}),
+    safeApi("/api/positions/suggest?setor="+setor,null),
+    safeApi("/api/positions?setor="+setor,[])
   ]);
+  const status=results[0];
+  const suggestion=results[1];
+  const positions=results[2];
+  const rcv=cardData?.receiving||{};
+  const volsTotal=Number($("recVolumes")?.value||rcv.volumes||0);
+  const qtyTotal=Number($("recQty")?.value||rcv.received_qty||0);
+  const ppv=(volsTotal>0&&qtyTotal>0)?qtyTotal/volsTotal:0;
 
-  const status = results[0];
-  const suggestion = results[1];
-  const positions = results[2];
-  const rcv = cardData?.receiving || {};
-  const volsTotal = Number($("recVolumes")?.value || rcv.volumes || 0);
-  const qtyTotal = Number($("recQty")?.value || rcv.received_qty || 0);
-  const ppv = (volsTotal > 0 && qtyTotal > 0) ? qtyTotal / volsTotal : 0;
-  const zones = [...new Set(positions.map(function(p){ return p.zona; }))].sort();
+  const items=(cardData.items||[]).filter(function(i){return Number(i.expected_qty||0)>0;});
+  const opIds=(rcv.operation_items||[]).map(function(i){return Number(i.id);}).filter(Boolean);
+  const sourceItems=opIds.length?items.filter(function(i){return opIds.includes(Number(i.id));}):items;
+  const firstAvailable=sourceItems.find(function(i){return itemRemainingQty(i)>0;}) || sourceItems[0] || null;
+  const firstAllocated=status.item_allocations?.find(function(i){return Number(i.total_alocado||0)>0;}) || null;
 
-  window.allocCtx = {
-    cardId: cardId,
-    setor: setor,
-    ppv: ppv,
-    remaining: setor === "RM" ? Math.max(0, qtyTotal - Number(status.total_alocado || 0)) : 0,
-    positions: positions,
-    status: status,
-    suggestion: suggestion,
-    selectedAddress: suggestion?.address || status.posicoes?.[0]?.address || "",
-    posFilter: "ALL",
-    zoneFilter: "ALL",
-    search: ""
+  window.allocCtx={
+    cardId:cardId,setor:setor,ppv:ppv,
+    remaining:setor==="RM"?Math.max(0,qtyTotal-Number(status.total_alocado||0)):0,
+    positions:positions,status:status,suggestion:suggestion,
+    selectedItemId:Number(firstAvailable?.id||firstAllocated?.item_id||0),
+    selectedAddress:suggestion?.address||firstAllocated?.posicoes?.[0]?.address||"",
+    posFilter:"ALL",zoneFilter:"ALL",search:""
   };
 
-  box.innerHTML =
+  const zones=[...new Set(positions.map(function(p){return p.zona;}))].sort();
+  box.innerHTML=
     '<div class="position-allocator">' +
       '<div class="position-allocator-head">' +
-        '<div>' +
-          '<div class="position-kicker">ENDEREÇAMENTO FÍSICO</div>' +
-          '<h3>' + (setor === "QA" ? "Alocar na Qualidade" : "Alocar no Recebimento") + '</h3>' +
-          '<p>Escolha visualmente a posição. Clique em um endereço para selecioná-lo e depois informe a quantidade.</p>' +
+        '<div><div class="position-kicker">ENDEREÇAMENTO FÍSICO</div>' +
+          '<h3>'+(setor==="QA"?"Alocar na Qualidade":"Alocar no Recebimento")+'</h3>' +
+          '<p>Escolha primeiro a referência, depois a posição. Cada item possui seu próprio saldo de peças alocadas.</p>' +
         '</div>' +
-        '<div class="position-suggest">' +
-          (suggestion
-            ? '<span>SUGESTÃO AUTOMÁTICA</span><b>' + esc(suggestion.address) + '</b><small>' +
-                Number(suggestion.ocupado || 0).toLocaleString("pt-BR") + ' peça(s) já ocupada(s)</small>'
-            : '<span>SEM SUGESTÃO DISPONÍVEL</span>') +
+        '<div class="position-suggest">'+
+          (suggestion?'<span>SUGESTÃO AUTOMÁTICA</span><b>'+esc(suggestion.address)+'</b><small>'+
+            Number(suggestion.ocupado||0).toLocaleString("pt-BR")+' peça(s) já ocupada(s)</small>':
+            '<span>SEM SUGESTÃO DISPONÍVEL</span>')+
         '</div>' +
       '</div>' +
 
+      '<div class="position-reference-panel">' +
+        '<div class="position-section-title"><b>Referência a alocar</b><span>Escolha uma por vez</span></div>' +
+        '<div id="positionItemPicker" class="allocation-item-grid"></div>' +
+      '</div>' +
+
       '<div class="position-stat-grid">' +
-        '<div class="position-stat"><span>Alocado pelo Card</span><strong id="positionAllocatedTotal">' +
-          Number(status.total_alocado || 0).toLocaleString("pt-BR") +
-        '</strong><small>peças</small></div>' +
-        '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">' +
-          (status.posicoes?.length || 0) +
-        '</strong><small>endereços</small></div>' +
-        '<div class="position-stat"><span>Restante</span><strong id="positionRemainingQty">' +
-          (setor === "RM"
-            ? Number(Math.max(0, qtyTotal - Number(status.total_alocado || 0))).toLocaleString("pt-BR")
-            : "—") +
-        '</strong><small>' + (setor === "RM" ? "peças para endereçar" : "controle da etapa") + '</small></div>' +
-        '<div class="position-stat"><span>Relação volume</span><strong>' +
-          (ppv ? Math.round(ppv * 10) / 10 : "—") +
-        '</strong><small>' + (ppv ? "peças / volume" : "informe volumes e peças") + '</small></div>' +
+        '<div class="position-stat"><span>Total alocado</span><strong id="positionAllocatedTotal">'+Number(status.total_alocado||0).toLocaleString("pt-BR")+
+          '</strong><small>peças no setor</small></div>' +
+        '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">'+(status.posicoes?.length||0)+
+          '</strong><small>endereços</small></div>' +
+        '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemaining">—</strong><small>peças restantes</small></div>' +
+        '<div class="position-stat"><span>Relação volume</span><strong>'+(ppv?Math.round(ppv*10)/10:"—")+
+          '</strong><small>'+(ppv?"peças / volume":"informe volumes e peças")+'</small></div>' +
       '</div>' +
 
       '<div class="position-controls">' +
         '<div class="position-search"><span>⌕</span><input id="positionSearch" placeholder="Buscar endereço, casulo ou nível" oninput="filterPositionMap()"></div>' +
-        '<select id="positionZoneFilter" onchange="filterPositionMap()"><option value="ALL">Todas as zonas</option>' +
+        '<select id="positionZoneFilter" onchange="filterPositionMap()"><option value="ALL">Todas as zonas</option>'+
           zones.map(function(z){
-            const label = positions.find(function(p){ return String(p.zona) === String(z); })?.zona_label || ("Zona " + z);
-            return '<option value="' + esc(z) + '">' + esc(label) + '</option>';
-          }).join("") +
-        '</select>' +
-        '<select id="positionStateFilter" onchange="filterPositionMap()">' +
-          '<option value="ALL">Todas as posições</option>' +
-          '<option value="FREE">Livres</option>' +
-          '<option value="OCCUPIED">Ocupadas</option>' +
-          '<option value="CARD">Usadas neste Card</option>' +
-        '</select>' +
+            const label=positions.find(function(p){return String(p.zona)===String(z);})?.zona_label||("Zona "+z);
+            return '<option value="'+esc(z)+'">'+esc(label)+'</option>';
+          }).join("")+'</select>' +
+        '<select id="positionStateFilter" onchange="filterPositionMap()"><option value="ALL">Todas as posições</option><option value="FREE">Livres</option><option value="OCCUPIED">Ocupadas</option><option value="CARD">Usadas neste Card</option></select>' +
       '</div>' +
 
-      '<div class="position-legend">' +
-        '<span><i class="position-dot free"></i>Livre</span>' +
-        '<span><i class="position-dot occupied"></i>Ocupada no setor</span>' +
-        '<span><i class="position-dot selected"></i>Selecionada</span>' +
-        '<span><i class="position-dot card"></i>Já usada neste Card</span>' +
-      '</div>' +
-
+      '<div class="position-legend"><span><i class="position-dot free"></i>Livre</span><span><i class="position-dot occupied"></i>Ocupada</span><span><i class="position-dot selected"></i>Selecionada</span><span><i class="position-dot item"></i>Usada pela referência</span></div>' +
       '<div id="positionMap" class="position-map"></div>' +
 
       '<div class="position-allocation-editor">' +
-        '<div class="position-selected"><span>POSIÇÃO SELECIONADA</span><strong id="positionSelectedLabel">' +
-          esc(window.allocCtx.selectedAddress || "Nenhuma") +
-        '</strong></div>' +
+        '<div class="position-selected"><span>REFERÊNCIA SELECIONADA</span><strong id="positionSelectedItemLabel">'+
+          esc(firstAvailable?referenceDetailLabel(firstAvailable):"Nenhuma")+'</strong><small id="positionReferenceRemaining"></small><em id="positionSelectedLabel">'+
+          esc(window.allocCtx.selectedAddress||"Nenhuma")+'</em></div>' +
         '<div class="position-editor-fields">' +
-          '<div class="field"><label>Marcar por</label><select id="posUnit" onchange="updateAllocHint()">' +
-            '<option value="PECAS">Peças</option>' +
-            (ppv ? '<option value="VOLUMES">Volumes</option>' : '') +
+          '<div class="field"><label>Marcar por</label><select id="posUnit" onchange="updateAllocHint()"><option value="PECAS">Peças</option>'+
+            (ppv?'<option value="VOLUMES">Volumes</option>': '')+
           '</select></div>' +
-          '<div class="field"><label>Quantidade nessa posição</label><input id="posQty" type="number" min="1" placeholder="Ex.: 30" oninput="updateAllocHint()">' +
-            '<small id="posHint" class="muted">' +
-              (ppv ? "1 volume ≈ " + Math.round(ppv * 10) / 10 + " peças" : "Informe volumes e quantidade recebida para habilitar a conversão.") +
-            '</small>' +
-          '</div>' +
-          '<div class="position-editor-action"><button class="primary" onclick="submitAllocation(' + cardId + ',\'' + setor + '\')">+ Adicionar nesta posição</button></div>' +
+          '<div class="field"><label>Quantidade nessa posição</label><input id="posQty" type="number" min="1" placeholder="Ex.: 30" oninput="updateAllocHint()"><small id="posHint" class="muted">'+
+            (ppv?"1 volume ≈ "+Math.round(ppv*10)/10+" peças":"Informe volumes e quantidade recebida para habilitar a conversão.")+
+          '</small></div>' +
+          '<div class="position-editor-action"><button class="primary" onclick="submitAllocation('+cardId+',\''+setor+'\')">+ Alocar referência</button></div>' +
         '</div>' +
       '</div>' +
 
       '<div class="position-current-allocations">' +
-        '<div class="position-section-title"><b>Alocações deste Card</b><span>' +
-          (status.posicoes?.length || 0) + ' endereço(s)</span></div>' +
-        (status.posicoes?.length
-          ? '<div class="position-allocation-list">' +
-              status.posicoes.map(function(p){
-                return '<button type="button" class="position-allocation-row" onclick="selectAllocationPosition(\'' +
-                  esc(p.address) + '\')">' +
-                  '<span><b>' + esc(p.address) + '</b><small>clique para reutilizar</small></span>' +
-                  '<strong>' + Number(p.quantidade || 0).toLocaleString("pt-BR") + ' pçs</strong>' +
-                '</button>';
-              }).join("") +
-            '</div>'
-          : '<div class="position-empty">Nenhuma posição foi alocada para este Card ainda.</div>') +
+        '<div class="position-section-title"><b>Alocações deste Card</b><span>separadas por referência</span></div>' +
+        '<div id="positionCurrentAllocations"></div>' +
       '</div>' +
     '</div>';
 
+  renderAllocationItemPicker();
+  renderCurrentItemAllocations();
+  updateReferenceRemaining();
   renderPositionMap();
 }
 
-async function submitAllocation(cardId, setor){
-  const ctx = window.allocCtx || {};
-  const address = ctx.selectedAddress || $("positionSelectedLabel")?.textContent || "";
-  const qty = allocPieces();
-  if(!address || address === "Nenhuma" || qty <= 0){
-    toast("Clique em uma posição no mapa e informe a quantidade.");
+function updateReferenceRemaining(){
+  const ctx=window.allocCtx;
+  const item=selectedAllocationItem();
+  if(!ctx||!item) return;
+  const remaining=itemRemainingQty(item);
+  if($("positionReferenceRemaining")) $("positionReferenceRemaining").textContent=remaining.toLocaleString("pt-BR")+" peças restantes";
+  if($("positionSelectedItemLabel")) $("positionSelectedItemLabel").textContent=referenceDetailLabel(item);
+}
+
+function renderCurrentItemAllocations(){
+  const box=$("positionCurrentAllocations");
+  const ctx=window.allocCtx;
+  if(!box||!ctx) return;
+  const rows=(ctx.status?.item_allocations||[]);
+  if(!rows.length){
+    box.innerHTML='<div class="position-empty">Nenhuma referência foi alocada neste Card ainda.</div>';
     return;
   }
-  if(ctx.remaining > 0 && qty > ctx.remaining){
-    toast("A quantidade ultrapassa o restante de " + ctx.remaining.toLocaleString("pt-BR") + " peças do Card.");
+  box.innerHTML=rows.map(function(row){
+    return '<div class="reference-allocation-summary">' +
+      '<div><b>'+esc(referenceDetailLabel(row))+'</b><small>'+(row.product?esc(row.product):"")+'</small></div>' +
+      '<strong>'+Number(row.total_alocado||0).toLocaleString("pt-BR")+' pçs</strong>' +
+      '<div class="reference-allocation-addresses">'+(row.posicoes||[]).map(function(p){
+        return '<button type="button" onclick="selectAllocationItem('+Number(row.item_id)+');selectAllocationPosition(\''+esc(p.address)+'\')">'+
+          esc(p.address)+' · '+Number(p.quantidade||0).toLocaleString("pt-BR")+'</button>';
+      }).join("")+'</div>' +
+    '</div>';
+  }).join("");
+}
+
+function updateAllocHint(){
+  const el=$("posHint");
+  const ctx=window.allocCtx;
+  const item=selectedAllocationItem();
+  if(!el||!ctx||!item)return;
+  const unit=$("posUnit")?.value||"PECAS";
+  const raw=Number($("posQty")?.value||0);
+  if(unit==="VOLUMES"&&ctx.ppv){
+    const n=Math.round(raw*ctx.ppv);
+    el.textContent=raw>0?raw+" volume(s) = "+n+" peças":"1 volume ≈ "+Math.round(ctx.ppv*10)/10+" peças";
+  }else{
+    el.textContent="Saldo da referência: "+itemRemainingQty(item).toLocaleString("pt-BR")+" peças";
+  }
+  updateReferenceRemaining();
+}
+
+function allocPieces(){
+  const raw=Number($("posQty")?.value||0);
+  const ctx=window.allocCtx||{ppv:0,remaining:0};
+  if($("posUnit")?.value!=="VOLUMES"||!ctx.ppv)return raw;
+  let pieces=Math.round(raw*ctx.ppv);
+  if(ctx.remaining>0&&Math.abs(ctx.remaining-pieces)<ctx.ppv/2)pieces=ctx.remaining;
+  return pieces;
+}
+
+async function submitAllocation(cardId,setor){
+  const ctx=window.allocCtx||{};
+  const item=selectedAllocationItem();
+  const address=ctx.selectedAddress||"";
+  const qty=allocPieces();
+  if(!item){
+    toast("Selecione a referência que será alocada.");
+    return;
+  }
+  if(!address){
+    toast("Clique em uma posição no mapa.");
+    return;
+  }
+  if(qty<=0){
+    toast("Informe a quantidade para esta referência.");
+    return;
+  }
+  const remaining=itemRemainingQty(item);
+  if(qty>remaining){
+    toast("A referência "+referenceLabel(item)+" possui somente "+remaining.toLocaleString("pt-BR")+" peça(s) restantes.");
+    return;
+  }
+  if(ctx.remaining>0&&qty>ctx.remaining){
+    toast("A quantidade ultrapassa o saldo geral de "+ctx.remaining.toLocaleString("pt-BR")+" peças.");
     return;
   }
   try{
-    await api("/api/positions/cards/" + cardId + "/allocate", {
+    const result=await api("/api/positions/cards/"+cardId+"/allocate",{
       method:"POST",
       body:JSON.stringify({
         setor:setor,
         responsavel:currentUser?.name,
-        allocations:[{address:address, quantidade:qty}]
-      }),
-      headers:{"Content-Type":"application/json"}
+        allocations:[{item_id:Number(item.id),address:address,quantidade:qty}]
+      })
     });
-    toast("Posição " + address + " alocada com " + qty.toLocaleString("pt-BR") + " peças.");
-    await loadPositionAllocator(cardId, setor);
+    ctx.status=result;
+    ctx.remaining=setor==="RM"?Math.max(0,ctx.remaining-qty):ctx.remaining;
+    $("posQty").value="";
+    toast("Referência "+referenceLabel(item)+" alocada em "+address+".");
+    renderAllocationItemPicker();
+    renderCurrentItemAllocations();
+    updateReferenceRemaining();
+    renderPositionMap();
   }catch(e){
     toast(e.message);
   }
 }
-
