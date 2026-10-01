@@ -318,50 +318,31 @@ def summary() -> dict[str, Any]:
     }
 
 
-def parse_goat_card_text(raw_text: str) -> dict:
-    lote_match = re.search(r'Lote\s+([\w\.]+)', raw_text, re.IGNORECASE)
-    lote = lote_match.group(1) if lote_match else "N/A"
-
-    codigo_le_match = re.search(r'código\s+([\w]+)', raw_text, re.IGNORECASE)
-    codigo_le = codigo_le_match.group(1) if codigo_le_match else None
-
-    nf_match = re.search(r'NF\s+(\d+)', raw_text, re.IGNORECASE)
-    nota_fiscal = nf_match.group(1) if nf_match else "N/A"
-
-    compra_match = re.search(r'Compra\s+#(\d+)', raw_text, re.IGNORECASE)
-    compra = compra_match.group(1) if compra_match else "N/A"
-
-    fornecedor_match = re.search(r'Fornecedor\n+([^\n]+)', raw_text)
-    fornecedor = fornecedor_match.group(1).strip() if fornecedor_match else "N/A"
-
-    tipo_match = re.search(r'Tipo\n+([^\n]+)', raw_text)
-    tipo_compra = tipo_match.group(1).strip() if tipo_match else "Private Label"
-
-    qtd_match = re.search(r'(\d+)\n+confirmado p/ envio', raw_text, re.IGNORECASE)
-    qtd_pecas = int(qtd_match.group(1)) if qtd_match else 0
-
-    skus = re.findall(r'(\d{3}\.\d{3}\.\d{2}\.\d{2}\.[\w-]+)', raw_text)
-
-    return {
-        "lote": lote,
-        "codigo_le": codigo_le,
-        "compra": compra,
-        "nota_fiscal": nota_fiscal,
-        "fornecedor": fornecedor,
-        "tipo_compra": tipo_compra,
-        "quantidade_pecas": qtd_pecas,
-        "quantidade_volumes": 1,
-        "skus": list(set(skus)),
-        "status": "EM TRÂNSITO"
-    }
+def _manual_card_purchase_id(reference: str) -> str:
+    """Gera identificador técnico único para cards criados manualmente."""
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    return f"MANUAL-{stamp}-{abs(hash(reference)) % 10000:04d}"
 
 
 @router.post("/parse-card")
-def parse_goat_card_endpoint(payload: dict[str, str]) -> dict[str, Any]:
-    raw_text = payload.get("text", "")
-    if not raw_text:
-        raise HTTPException(400, "O campo 'text' é obrigatório.")
-    return parse_goat_card_text(raw_text)
+def parse_manual_card_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Valida dados manuais da grade; não interpreta texto copiado."""
+    reference = str(payload.get("reference") or "").strip()
+    grade = payload.get("grade") or []
+    if not reference:
+        raise HTTPException(400, "Informe a referência.")
+    if not isinstance(grade, list) or not grade:
+        raise HTTPException(400, "Informe a grade da referência.")
+    normalized=[]; total=0
+    for row in grade:
+        color=str(row.get("color") or "").strip(); size=str(row.get("size") or "").strip()
+        try: quantity=int(row.get("quantity") or 0)
+        except (TypeError,ValueError): raise HTTPException(400,"As quantidades da grade precisam ser números inteiros.")
+        if not color or not size: raise HTTPException(400,"Cada item da grade precisa ter cor e tamanho.")
+        if quantity < 0: raise HTTPException(400,"As quantidades da grade não podem ser negativas.")
+        if quantity: normalized.append({"color":color,"size":size,"quantity":quantity}); total += quantity
+    if total <= 0: raise HTTPException(400,"A grade precisa ter pelo menos uma quantidade maior que zero.")
+    return {"reference":reference,"grade":normalized,"expected_total":total}
 
 
 def _iso_now() -> str:
@@ -369,46 +350,39 @@ def _iso_now() -> str:
 
 
 @router.post("/create-card")
-def create_transit_card(payload: dict[str, str]) -> dict[str, Any]:
-    """Cria de verdade um card 'Em Trânsito' no Recebimento a partir do texto do card do GOAT."""
-    raw = (payload.get("text") or "").strip()
-    if not raw:
-        raise HTTPException(400, "Cole o texto do card do GOAT.")
-    d = parse_goat_card_text(raw)
-    purchase_id = d["compra"] if d["compra"] != "N/A" else (d["lote"] if d["lote"] != "N/A" else "")
-    if not purchase_id:
-        raise HTTPException(422, "Não encontrei o número da compra (#...) nem o lote no texto colado.")
-    now = _iso_now()
-    notes = f"Lote {d['lote']} | NF {d['nota_fiscal']} | criado via card GOAT"
-    con = db_connect()
+def create_manual_card(payload: dict[str, Any]) -> dict[str, Any]:
+    """Cria um Card manual: uma única referência com uma grade dinâmica."""
+    reference=str(payload.get("reference") or "").strip()
+    grade=payload.get("grade") or []
+    if not reference: raise HTTPException(400,"Informe a referência.")
+    if not isinstance(grade,list) or not grade: raise HTTPException(400,"Informe a grade da referência.")
+    normalized=[]; total=0
+    for row in grade:
+        color=str(row.get("color") or "").strip(); size=str(row.get("size") or "").strip()
+        try: quantity=int(row.get("quantity") or 0)
+        except (TypeError,ValueError): raise HTTPException(400,"As quantidades da grade precisam ser números inteiros.")
+        if not color or not size: raise HTTPException(400,"Cada item da grade precisa ter cor e tamanho.")
+        if quantity < 0: raise HTTPException(400,"As quantidades da grade não podem ser negativas.")
+        if quantity: normalized.append((color,size,quantity)); total += quantity
+    if total <= 0: raise HTTPException(400,"A grade precisa ter pelo menos uma quantidade maior que zero.")
+    now=_iso_now(); purchase_id=_manual_card_purchase_id(reference)
+    con=db_connect()
     try:
         con.execute("PRAGMA foreign_keys=ON")
-        if con.execute("SELECT 1 FROM cards WHERE purchase_id=?", (purchase_id,)).fetchone():
-            raise HTTPException(409, f"Já existe um card para a compra {purchase_id}.")
-        cur = con.execute(
-            """INSERT INTO cards(purchase_id,source_created_date,supplier,original_type,purchase_mode,status_compra,
-               qtd_itens,source_notes,current_sector,status,receiving_type,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (purchase_id, now[:10], d["fornecedor"], d["tipo_compra"], d["tipo_compra"], "Em Trânsito",
-             d["quantidade_pecas"], notes, "RECEBIMENTO", "EM_TRANSITO", "NOVA", now, now),
-        )
-        card_id = cur.lastrowid
-        sku = ", ".join(d["skus"])
-        con.execute(
-            """INSERT INTO items(card_id,source_key,product,sku,lot,nf,expected_qty,status_kanban,source_stage,source_status_purchase)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (card_id, f"{purchase_id}|{d['lote']}|goat", f"Lote {d['lote']}", sku, d["lote"],
-             "" if d["nota_fiscal"] == "N/A" else d["nota_fiscal"], d["quantidade_pecas"],
-             "1.3 Compras - Em Trânsito", "TRANSITO", "Em Trânsito"),
-        )
-        con.execute(
-            "INSERT INTO history(card_id,user_id,event_type,description,created_at) VALUES(?,?,?,?,?)",
-            (card_id, None, "CRIACAO_GOAT", f"Card em trânsito criado a partir do GOAT (compra {purchase_id}).", now),
-        )
+        cur=con.execute("""INSERT INTO cards(purchase_id,source_created_date,supplier,original_type,purchase_mode,status_compra,qtd_itens,source_notes,current_sector,status,receiving_type,created_at,updated_at)
+                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (purchase_id,now[:10],"Cadastro manual","Grade","GRADE","Em Trânsito",total,f"Referência criada manualmente: {reference}","RECEBIMENTO","EM_TRANSITO","NOVA",now,now))
+        card_id=cur.lastrowid
+        for color,size,quantity in normalized:
+            con.execute("""INSERT INTO items(card_id,source_key,product,reference,sku,color,size,expected_qty,status_kanban,source_stage,source_status_purchase)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (card_id,f"{purchase_id}|{reference}|{color}|{size}",reference,reference,"",color,size,quantity,"1.3 Compras - Em Trânsito","TRANSITO","Em Trânsito"))
+        con.execute("INSERT INTO history(card_id,user_id,event_type,description,created_at) VALUES(?,?,?,?,?)",
+                    (card_id,None,"CRIACAO_MANUAL",f"Card criado manualmente para a referência {reference}, com {total} peças.",now))
         con.commit()
-    finally:
-        con.close()
-    return {"card_id": card_id, "purchase_id": purchase_id, **d}
+    finally: con.close()
+    return {"card_id":card_id,"purchase_id":purchase_id,"reference":reference,
+            "grade":[{"color":c,"size":s,"quantity":q} for c,s,q in normalized],"expected_total":total}
 
 
 def register_goat_routes(app: FastAPI) -> None:
