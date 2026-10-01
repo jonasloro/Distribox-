@@ -1636,9 +1636,142 @@ def list_cards(scope: str = "receiving", search: str = ""):
                        "in_transit": transit.get(r["id"], False)} for r in rows]
 
 
+
+def repair_stored_reference_items(con: sqlite3.Connection, card_id: int) -> bool:
+    """Corrige cards antigos quando o Produto salvo ainda contém o bloco bruto do SGO."""
+    card = con.execute(
+        "SELECT id,current_sector FROM cards WHERE id=?",
+        (card_id,),
+    ).fetchone()
+    if not card or card["current_sector"] != "RECEBIMENTO":
+        return False
+
+    changed = False
+    items = con.execute(
+        "SELECT * FROM items WHERE card_id=? ORDER BY id",
+        (card_id,),
+    ).fetchall()
+
+    for item in items:
+        blocks = reference_blocks_from_copied_product(item["product"])
+        if not blocks:
+            continue
+
+        if len(blocks) == 1:
+            block = blocks[0]
+            reference = str(block.get("reference") or "").strip()
+            if reference and reference != str(item["reference"] or "").strip():
+                fields = ["reference=?"]
+                values: list[Any] = [reference]
+                if block.get("sku") and not str(item["sku"] or "").strip():
+                    fields.append("sku=?")
+                    values.append(str(block["sku"]).strip())
+                if block.get("expected_qty") is not None and str(item["reference"] or "").strip().lower().startswith("lote "):
+                    fields.append("expected_qty=?")
+                    values.append(int(block["expected_qty"]))
+                values.append(item["id"])
+                con.execute(
+                    "UPDATE items SET " + ",".join(fields) + " WHERE id=?",
+                    values,
+                )
+                changed = True
+            continue
+
+        # Só destrincha automaticamente quando a fonte traz uma quantidade
+        # explícita para cada referência. Não inventamos distribuição.
+        if any(block.get("expected_qty") is None for block in blocks):
+            continue
+
+        blocked = False
+        checks = [
+            ("SELECT 1 FROM quality_sample_items WHERE item_id=? LIMIT 1", (item["id"],)),
+            ("SELECT 1 FROM processing_item_quantities WHERE item_id=? LIMIT 1", (item["id"],)),
+            ("""SELECT 1 FROM downstream_assignments da
+                JOIN downstream_operations dop ON dop.id=da.operation_id
+                WHERE da.item_id=? LIMIT 1""", (item["id"],)),
+        ]
+        for sql, args in checks:
+            try:
+                if con.execute(sql, args).fetchone():
+                    blocked = True
+                    break
+            except sqlite3.OperationalError:
+                pass
+        if blocked:
+            continue
+
+        card_purchase = con.execute(
+            "SELECT purchase_id FROM cards WHERE id=?",
+            (card_id,),
+        ).fetchone()
+        purchase_id = str(card_purchase["purchase_id"] if card_purchase else "").strip()
+        receiving_links = [
+            row["receiving_id"]
+            for row in con.execute(
+                "SELECT receiving_id FROM receiving_operation_items WHERE item_id=?",
+                (item["id"],),
+            ).fetchall()
+        ]
+
+        columns = [column for column in item.keys() if column != "id"]
+        placeholders = ",".join("?" for _ in columns)
+        new_ids: list[int] = []
+
+        for block in blocks:
+            reference = str(block["reference"]).strip()
+            item_sku = str(block.get("sku") or item["sku"] or "").strip()
+            source_key = "|".join([
+                purchase_id,
+                reference,
+                item_sku or reference,
+                str(item["color"] or "").strip(),
+                str(item["size"] or "").strip(),
+            ])
+            existing = con.execute(
+                "SELECT id FROM items WHERE card_id=? AND source_key=? AND id<>?",
+                (card_id, source_key, item["id"]),
+            ).fetchone()
+            if existing:
+                new_id = int(existing["id"])
+            else:
+                values_by_column = {column: item[column] for column in columns}
+                values_by_column.update({
+                    "source_key": source_key,
+                    "product": reference,
+                    "reference": reference,
+                    "sku": item_sku,
+                    "expected_qty": int(block["expected_qty"]),
+                })
+                new_id = int(con.execute(
+                    f"INSERT INTO items ({','.join(columns)}) VALUES ({placeholders})",
+                    [values_by_column[column] for column in columns],
+                ).lastrowid)
+            new_ids.append(new_id)
+
+        # O recebimento continua enxergando o conjunto correto de itens.
+        if receiving_links:
+            for receiving_id in receiving_links:
+                con.execute(
+                    "DELETE FROM receiving_operation_items WHERE receiving_id=? AND item_id=?",
+                    (receiving_id, item["id"]),
+                )
+                con.executemany(
+                    "INSERT OR IGNORE INTO receiving_operation_items(receiving_id,item_id) VALUES(?,?)",
+                    [(receiving_id, new_id) for new_id in new_ids],
+                )
+
+        con.execute("DELETE FROM items WHERE id=?", (item["id"],))
+        changed = True
+
+    return changed
+
+
 @app.get("/api/cards/{card_id}")
 def get_card(card_id: int):
     con = db_connect()
+    repaired = repair_stored_reference_items(con, card_id)
+    if repaired:
+        con.commit()
     row = con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
     if not row:
         con.close()
