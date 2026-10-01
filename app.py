@@ -130,6 +130,18 @@ def normalize_header(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", normalize_text(value))
 
 
+def reference_from_copied_product(value: Any) -> str:
+    """Extrai a referência do código completo copiado do SGO."""
+    text = "" if value is None else str(value)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = text.replace("**", "")
+    match = re.search(
+        r"(?:\d+\.){3,}([0-9]+(?:-[^\s|<>]+)?)",
+        text,
+        flags=re.I,
+    )
+    return match.group(1).strip() if match else ""
+
 def kanban_matches(value: Any) -> bool:
     return normalize_text(value) == normalize_text(KANBAN_TRANSITO)
 
@@ -1128,13 +1140,19 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
 
                 product = str(cell(row, "produto", "") or "").strip()
                 sku = str(cell(row, "sku", "") or "").strip()
+                explicit_reference = str(cell(row, "referencia", "") or "").strip()
+                reference = (
+                    reference_from_copied_product(product)
+                    or reference_from_copied_product(sku)
+                    or explicit_reference
+                )
                 source_key = "|".join([
                     purchase_id,
                     clean_id(cell(row, "idlote")),
                     sku or product,
                     str(cell(row, "cor", "") or "").strip(),
                     str(cell(row, "tamanho", "") or "").strip(),
-                    str(cell(row, "referencia", "") or "").strip(),
+                    reference,
                 ])
                 source_values = {
                     "status_kanban": cell(row, "statuskanban", ""),
@@ -1147,7 +1165,7 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
                 }
                 item_values = (
                     product,
-                    str(cell(row, "referencia", "") or "").strip(),
+                    reference,
                     sku,
                     str(cell(row, "grupo", "") or "").strip(),
                     str(cell(row, "colecao", "") or "").strip(),
