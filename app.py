@@ -32,6 +32,7 @@ from supabase_module import (
     seed_warehouse_supabase,
     restore_cards_from_supabase_if_needed,
     sync_all_cards_to_supabase,
+    delete_card_from_supabase,
 )
 from warehouse_structure import gerar_todos_casulos
 
@@ -1123,6 +1124,7 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
             require_role(con, user_id, {"admin"})
         total_rows = matched_rows = cards_created = cards_updated = items_created = items_updated = cards_removed_cd02 = 0
         touched_cards: set[int] = set()
+        removed_card_ids: list[int] = []
         errors: list[str] = []
         for line_no, row in enumerate(iterator, start=2):
             total_rows += 1
@@ -1257,6 +1259,7 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
             card = con.execute("SELECT original_destination,current_sector,status FROM cards WHERE id=?", (card_id,)).fetchone()
             if card and is_cd02(card["original_destination"]) and "TRANSITO" not in stages:
                 delete_card_with_downstream(con, card_id)
+                removed_card_ids.append(card_id)
                 cards_removed_cd02 += 1
                 continue
             sector, status = imported_card_route(stages)
@@ -1305,6 +1308,11 @@ async def import_excel(request: Request, file: UploadFile = File(...)):
         )
         con.commit()
         con.close()
+        for removed_card_id in removed_card_ids:
+            try:
+                delete_card_from_supabase(removed_card_id)
+            except Exception as e:
+                print(f"[aviso] não consegui remover card {removed_card_id} do Supabase: {e}")
         return {
             "total_rows": total_rows,
             "matched_rows": matched_rows,
