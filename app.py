@@ -30,7 +30,7 @@ from supabase_module import (
     verificar_login_supabase,
     seed_usuarios_supabase,
     seed_warehouse_supabase,
-    restore_cards_from_supabase_if_needed,
+    bootstrap_card_persistence,
     sync_all_cards_to_supabase,
     delete_card_from_supabase,
 )
@@ -510,7 +510,7 @@ def init_db() -> None:
     # de estado abaixo, para que Recebimento/Qualidade/Processamento encontrem
     # a mesma base lógica após um redeploy.
     try:
-        persistence = restore_cards_from_supabase_if_needed(con)
+        persistence = bootstrap_card_persistence(con)
         if persistence.get("mode") == "restored":
             print(
                 f"[persistencia] {persistence.get('cards', 0)} card(s) e "
