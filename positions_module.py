@@ -138,12 +138,40 @@ def suggest_position(setor: str, zona: Optional[str] = None) -> dict[str, Any]:
 GLOBAL_ALLOCATION_SECTORS = ("RM", "QA", "PR")
 
 
-def _card_or_404(cur, card_id: int) -> dict[str, Any]:
-    cur.execute("SELECT * FROM outlog_cards WHERE id=%s", (card_id,))
+def _card_or_404(cur, card_id: int, lock: bool = False) -> dict[str, Any]:
+    # lock=True serializa alocações simultâneas do mesmo card (evita estourar o saldo)
+    cur.execute("SELECT * FROM outlog_cards WHERE id=%s" + (" FOR UPDATE" if lock else ""), (card_id,))
     card = cur.fetchone()
     if not card:
         raise HTTPException(404, "Card não encontrado.")
     return card
+
+
+def _card_total_volumes(cur, card_id: int) -> Optional[int]:
+    """Volumes do Card informados no Recebimento (espelho no Supabase).
+    Retorna None enquanto ainda não foram informados — sem limite a aplicar."""
+    cur.execute(
+        "SELECT volumes FROM outlog_receivings WHERE card_id=%s ORDER BY id DESC LIMIT 1",
+        (card_id,),
+    )
+    row = cur.fetchone()
+    vol = int(row["volumes"]) if row and row["volumes"] is not None else 0
+    return vol if vol > 0 else None
+
+
+def _global_allocated(cur, card_id: int) -> int:
+    """Total alocado do Card somando RM + QA + PR (saldo único, em volumes)."""
+    cur.execute(
+        "SELECT COALESCE(SUM(quantidade),0) t FROM card_allocations WHERE card_id=%s AND setor = ANY(%s)",
+        (card_id, list(GLOBAL_ALLOCATION_SECTORS)),
+    )
+    return int(cur.fetchone()["t"] or 0)
+
+
+def _sector_scope(setor: Optional[str]) -> list[str]:
+    """RM, QA e PR dividem um saldo global; qualquer outro setor conta isolado."""
+    s = (setor or "RM").upper()
+    return list(GLOBAL_ALLOCATION_SECTORS) if s in GLOBAL_ALLOCATION_SECTORS else [s]
 
 
 @router.post("/cards/{card_id}/allocate")
@@ -159,9 +187,12 @@ def allocate(card_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
-                _card_or_404(cur, card_id)
+                _card_or_404(cur, card_id, lock=True)
                 valid = {p["address"] for p in list_positions(setor)}
                 now = iso_now()
+                is_global = setor in GLOBAL_ALLOCATION_SECTORS
+                total_volumes = _card_total_volumes(cur, card_id) if is_global else None
+                alocado_global = _global_allocated(cur, card_id) if is_global else 0
 
                 for a in allocations:
                     address = str(a.get("address") or "")
@@ -183,16 +214,24 @@ def allocate(card_id: int, payload: dict[str, Any]) -> dict[str, Any]:
                     if not item:
                         raise HTTPException(400, "A referência selecionada não pertence a este Card.")
 
-                    cur.execute(
-                        """SELECT COALESCE(SUM(quantidade),0) qty
-                           FROM card_allocations
-                           WHERE card_id=%s
-                             AND setor IN (%s,%s,%s)
-                             AND item_id=%s""",
-                        (card_id, *GLOBAL_ALLOCATION_SECTORS, item_id),
-                    )
-                    already = int(cur.fetchone()["qty"] or 0)
-                    if setor != "RM":
+                    if is_global:
+                        # Saldo único do Card (volumes): RM, QA e PR saem do mesmo total.
+                        if total_volumes is not None and alocado_global + qty > total_volumes:
+                            restante = max(0, total_volumes - alocado_global)
+                            raise HTTPException(
+                                400,
+                                f"Saldo insuficiente: o Card tem {total_volumes} volume(s), "
+                                f"{alocado_global} já alocado(s) (RM + QA + PR) e restam {restante}.",
+                            )
+                        alocado_global += qty
+                    else:
+                        cur.execute(
+                            """SELECT COALESCE(SUM(quantidade),0) qty
+                               FROM card_allocations
+                               WHERE card_id=%s AND setor=%s AND item_id=%s""",
+                            (card_id, setor, item_id),
+                        )
+                        already = int(cur.fetchone()["qty"] or 0)
                         expected = int(item["expected_qty"] or 0)
                         if already + qty > expected:
                             label = item["reference"] or item["sku"] or item["product"] or str(item_id)
@@ -272,9 +311,20 @@ def allocation_status(card_id: int, setor: str) -> dict[str, Any]:
                     (card_id, *GLOBAL_ALLOCATION_SECTORS),
                 )
                 global_item_rows = cur.fetchall()
+
+                cur.execute(
+                    """SELECT setor,COALESCE(SUM(quantidade),0) qty
+                       FROM card_allocations
+                       WHERE card_id=%s AND setor = ANY(%s)
+                       GROUP BY setor""",
+                    (card_id, list(GLOBAL_ALLOCATION_SECTORS)),
+                )
+                por_setor_rows = cur.fetchall()
+                volumes_total = _card_total_volumes(cur, card_id)
     except RuntimeError:
         rows, item_rows, item_positions = [], [], []
         global_total, global_item_rows = 0, []
+        por_setor_rows, volumes_total = [], None
 
     total = sum(int(r["qty"] or 0) for r in rows)
     grouped: dict[int, dict[str, Any]] = {}
@@ -324,6 +374,12 @@ def allocation_status(card_id: int, setor: str) -> dict[str, Any]:
         "setor": setor,
         "total_alocado": total,
         "global_total_alocado": global_total,
+        "volumes_total": volumes_total,
+        "volumes_restante": max(0, volumes_total - global_total) if volumes_total is not None else None,
+        "global_por_setor": {
+            s: next((int(r["qty"] or 0) for r in por_setor_rows if r["setor"] == s), 0)
+            for s in GLOBAL_ALLOCATION_SECTORS
+        },
         "posicoes": [{"address": r["address"], "quantidade": int(r["qty"] or 0)} for r in rows],
         "item_allocations": list(grouped.values()),
         "global_item_allocations": list(global_item_grouped.values()),
@@ -341,7 +397,7 @@ def card_trail(card_id: int) -> list[dict[str, Any]]:
                     """SELECT a.setor,a.address,a.quantidade,a.responsavel,a.created_at,a.item_id,
                               i.product,i.reference,i.sku,i.color,i.size
                        FROM card_allocations a
-                       LEFT JOIN items i ON i.id=a.item_id
+                       LEFT JOIN outlog_items i ON i.id=a.item_id
                        WHERE a.card_id=%s
                        ORDER BY a.created_at""",
                     (card_id,),
@@ -354,10 +410,11 @@ def card_trail(card_id: int) -> list[dict[str, Any]]:
 
 
 def item_allocation_totals(card_id: int, setor: str = "RM") -> dict[int, int]:
-    """Retorna a quantidade física alocada por item no setor.
-    
-    Para RM, a unidade é volume (caixa/bag). O módulo não transforma
-    quantidade de peças em volume.
+    """Retorna a quantidade física alocada por item, em volumes (caixa/bag).
+
+    RM, QA e PR dividem um saldo global: pedir qualquer um deles soma os três,
+    porque o Card pode ser endereçado direto em outro setor a partir do RM.
+    O módulo não transforma quantidade de peças em volume.
     """
     try:
         with pg_connect() as con:
@@ -365,9 +422,9 @@ def item_allocation_totals(card_id: int, setor: str = "RM") -> dict[int, int]:
                 cur.execute(
                     """SELECT item_id,COALESCE(SUM(quantidade),0) qty
                        FROM card_allocations
-                       WHERE card_id=%s AND setor=%s AND item_id IS NOT NULL
+                       WHERE card_id=%s AND setor = ANY(%s) AND item_id IS NOT NULL
                        GROUP BY item_id""",
-                    (card_id, setor.upper()),
+                    (card_id, _sector_scope(setor)),
                 )
                 return {
                     int(row["item_id"]): int(row["qty"] or 0)
@@ -378,13 +435,14 @@ def item_allocation_totals(card_id: int, setor: str = "RM") -> dict[int, int]:
 
 
 def total_allocated(setor: str, card_id: int) -> int:
-    """Helper síncrono usado pelos gates de avanço de setor em app.py."""
+    """Helper síncrono usado pelos gates de avanço de setor em app.py.
+    RM, QA e PR contam como saldo global (ver _sector_scope)."""
     try:
         with pg_connect() as con:
             with con.cursor() as cur:
                 cur.execute(
-                    "SELECT COALESCE(SUM(quantidade),0) t FROM card_allocations WHERE card_id=%s AND setor=%s",
-                    (card_id, setor.upper()),
+                    "SELECT COALESCE(SUM(quantidade),0) t FROM card_allocations WHERE card_id=%s AND setor = ANY(%s)",
+                    (card_id, _sector_scope(setor)),
                 )
                 return int(cur.fetchone()["t"] or 0)
     except RuntimeError:

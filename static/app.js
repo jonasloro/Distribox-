@@ -2687,6 +2687,12 @@ async function loadPositionAllocator(cardId,setor){
         '<div><div class="position-kicker">ENDEREÇAMENTO FÍSICO</div>' +
           '<h3>'+({RM:"Alocar no Recebimento",QA:"Alocar na Qualidade",PR:"Alocar no Processamento"}[setor]||("Alocar no "+setor))+'</h3>' +
           '<p>Escolha primeiro a referência, depois a posição. O controle desta etapa é feito em volumes da referência.</p>' +
+          '<div class="position-dest"><label for="positionDestSetor">Destino</label>' +
+            '<select id="positionDestSetor" onchange="changeAllocDestination(this.value)">'+
+              [["RM","Recebimento (RM)"],["QA","Qualidade (QA)"],["PR","Processamento (PR)"]].map(function(o){
+                return '<option value="'+o[0]+'"'+(o[0]===setor?' selected':'')+'>'+o[1]+'</option>';
+              }).join("")+
+            '</select><small>O saldo do Card é único: o que for alocado em qualquer destino sai do mesmo total.</small></div>' +
         '</div>' +
         '<div class="position-suggest">'+
           (suggestion?'<span>SUGESTÃO AUTOMÁTICA</span><b>'+esc(suggestion.address)+'</b><small>'+
@@ -2702,7 +2708,9 @@ async function loadPositionAllocator(cardId,setor){
 
       '<div class="position-stat-grid">' +
         '<div class="position-stat"><span>Total alocado</span><strong id="positionAllocatedTotal">'+Number(status.global_total_alocado||0).toLocaleString("pt-BR")+
-          '</strong><small>volumes globais · RM + QA + PR</small></div>' +
+          '</strong><small>volumes globais · RM '+Number(status.global_por_setor?.RM||0).toLocaleString("pt-BR")+
+          ' · QA '+Number(status.global_por_setor?.QA||0).toLocaleString("pt-BR")+
+          ' · PR '+Number(status.global_por_setor?.PR||0).toLocaleString("pt-BR")+'</small></div>' +
         '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">'+(status.posicoes?.length||0)+
           '</strong><small>endereços</small></div>' +
         '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemainingStat">—</strong><small>volumes restantes</small></div>' +
@@ -2741,6 +2749,12 @@ async function loadPositionAllocator(cardId,setor){
   renderCurrentItemAllocations();
   updateReferenceRemaining();
   renderPositionMap();
+}
+
+function changeAllocDestination(setor){
+  const ctx=window.allocCtx;
+  if(!ctx||!setor||setor===ctx.setor) return;
+  loadPositionAllocator(ctx.cardId,setor);
 }
 
 function updateReferenceRemaining(){

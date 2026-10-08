@@ -1942,7 +1942,7 @@ async def complete_physical(receiving_id: int, request: Request):
         con.close()
         raise HTTPException(
             400,
-            f"Aloque o endereço físico (casulo) antes de concluir — {alocado}/{rec['volumes']} volumes alocados no Recebimento.",
+            f"Aloque o endereço físico (casulo) antes de concluir — {alocado}/{rec['volumes']} volumes alocados (RM + Qualidade + Processamento).",
         )
     con.execute(
         """UPDATE receivings SET physical_status='CONCLUIDO',physical_completed_by=?,physical_completed_at=?

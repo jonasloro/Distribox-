@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 
+from positions_module import item_allocation_totals
+
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("OUTLOG_DATA_DIR", str(BASE_DIR / "data"))).resolve() / "controle_logistica.db"
 router = APIRouter(prefix="/api", tags=["Processamento"])

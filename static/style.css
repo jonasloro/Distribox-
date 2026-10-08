@@ -905,3 +905,10 @@ input:disabled,select:disabled,textarea:disabled{
   .allocation-item-grid{grid-template-columns:1fr}
   .reference-allocation-summary{grid-template-columns:1fr}
 }
+
+/* Endereçamento global — seletor de destino (RM / QA / PR) */
+.position-dest{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:10px}
+.position-dest label{font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.7}
+.position-dest select{min-width:190px}
+.position-dest small{flex-basis:100%;opacity:.7}
+
