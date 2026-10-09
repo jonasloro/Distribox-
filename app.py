@@ -820,6 +820,16 @@ def init_db() -> None:
            AND NOT EXISTS (SELECT 1 FROM receivings r WHERE r.card_id=c.id AND r.closed_at IS NULL)"""
     ).fetchall():
         ensure_pending_receiving(con, orphan["id"])
+
+    # Índices leves de consulta: melhoram filas, indicadores e verificações de etapa
+    # sem modificar os registros operacionais existentes.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_items_card_id ON items(card_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_items_card_stage ON items(card_id,source_stage)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_items_card_reference ON items(card_id,reference)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_cards_sector_updated ON cards(current_sector,updated_at DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_cards_source_snapshot ON cards(source_snapshot_at,updated_at DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_receivings_card_latest ON receivings(card_id,id DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_history_card_event ON history(card_id,event_type)")
     con.commit()
     con.close()
 
