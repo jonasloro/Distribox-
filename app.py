@@ -1661,7 +1661,7 @@ def manual_card_reference(source_notes: Any) -> str:
 
 
 @app.get("/api/cards")
-def list_cards(scope: str = "receiving", search: str = "", limit: int = 0, offset: int = 0, purchase_mode: str = "", activity: str = "", brand: str = ""):
+def list_cards(scope: str = "receiving", search: str = "", limit: int = 100, offset: int = 0, purchase_mode: str = "", activity: str = "", brand: str = ""):
     con = db_connect()
     sql = """SELECT c.id,c.purchase_id,c.supplier,c.original_type,c.purchase_mode,c.brand,c.forecast_date,c.current_sector,c.status,
              c.receiving_type,c.quality_destination,c.casulo_current,c.source_location_summary,c.source_snapshot_at,c.source_notes,c.updated_at,
@@ -1720,9 +1720,8 @@ def list_cards(scope: str = "receiving", search: str = "", limit: int = 0, offse
         elif activity != "AGUARDANDO":
             sql += " AND 1=0"
     sql += " GROUP BY c.id ORDER BY c.updated_at DESC"
-    if limit:
-        sql += " LIMIT ? OFFSET ?"
-        params.extend([max(1, min(int(limit), 200)), max(0, int(offset))])
+    sql += " LIMIT ? OFFSET ?"
+    params.extend([max(1, min(int(limit or 100), 200)), max(0, int(offset))])
     rows = con.execute(sql, params).fetchall()
     transit = {r["id"]: awaiting_arrival(con, r["id"]) for r in rows if r["status"] in TRANSIT_STATUSES}
     con.close()
