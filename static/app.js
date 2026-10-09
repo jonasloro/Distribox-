@@ -1947,6 +1947,7 @@ function heatmapColor(percentage){
 async function renderWarehouseHeatmap(){
   setPage("Mapa de Calor","Ocupação por Rua e coluna");
   const data=await api("/api/unified/warehouse/heatmap");
+  if (currentView !== "warehouse-heatmap") return;
   const sideBlock=(columns,title)=>`<div class="heatmap-side"><div class="heatmap-side-title">${title}</div><div class="heatmap-grid">${columns.map(column=>`<div class="heatmap-box" style="background:${heatmapColor(column.ocupacao_pct)}" title="Coluna ${column.coluna} — ${column.ocupado}/${column.capacidade} peças (${column.ocupacao_pct}%)">${column.coluna}</div>`).join("")||'<span class="empty-visual">Sem posições</span>'}</div></div>`;
   const streets=(data.ruas||[]).map(street=>{
     const odd=street.colunas.filter(column=>column.secao==="impar").sort((a,b)=>a.coluna-b.coluna);
