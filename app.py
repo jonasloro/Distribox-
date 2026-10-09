@@ -76,15 +76,33 @@ async def persist_card_state(request: Request, call_next):
             print(f"[aviso] não consegui sincronizar os itens do Card {allocation_card_id} antes da alocação: {e}")
 
     response = await call_next(request)
+    # A maior parte das gravações (/login, tarefas, chat, devoluções, relatórios,
+    # configuração de endereços etc.) não altera Cards nem Recebimentos. Evita
+    # sincronizar todas essas tabelas nessas rotas sem relação com o fluxo operacional.
+    path = request.url.path
+    sync_relevant_state = (
+        path == "/api/import-excel"
+        or path == "/api/cards"
+        or path.startswith("/api/cards/")
+        or path.startswith("/api/receivings/")
+        or path.startswith("/api/processing/")
+        or path.startswith("/api/downstream/")
+        or path.startswith("/api/test/cards/")
+        or path.startswith("/api/goat/create-card")
+        or path.startswith("/api/goat/confirm-receiving")
+        or path == "/api/unified/warehouse/store"
+    )
     if (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
-        and request.url.path.startswith("/api/")
+        and path.startswith("/api/")
+        and sync_relevant_state
+        and not allocation_path
     ):
         try:
             con = db_connect()
             sync_all_cards_to_supabase(
                 con,
-                include_items=request.url.path == "/api/import-excel",
+                include_items=path == "/api/import-excel",
             )
             sync_all_receiving_state_to_supabase(con)
             con.close()
