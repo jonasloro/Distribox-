@@ -528,14 +528,38 @@ def register_unified_routes(app) -> None:
         con.commit();con.close();return {"ok":True,"groups":len(groups),"total_qty":total}
 
     @app.get("/api/unified/sgo")
-    def list_sgo(status: str = "", search: str = ""):
-        con = db_connect(); sql = "SELECT * FROM sgo_entries WHERE 1=1"; args: list[Any] = []
-        if status: sql += " AND status=?"; args.append(status)
+    def list_sgo(status: str = "", search: str = "", limit: int = 100, offset: int = 0):
+        con = db_connect()
+        sql = "SELECT * FROM sgo_entries WHERE 1=1"
+        args: list[Any] = []
+        if status:
+            sql += " AND status=?"
+            args.append(status)
         if search:
-            q = f"%{search}%"; sql += " AND (purchase_id LIKE ? OR group_name LIKE ? OR description LIKE ? OR brand LIKE ?)"; args += [q, q, q, q]
-        sql += " ORDER BY COALESCE(forecast_date,'9999-12-31'),id DESC"
-        rows = [dict(r) for r in con.execute(sql, args).fetchall()]
-        con.close(); return rows
+            q = f"%{search}%"
+            sql += " AND (purchase_id LIKE ? OR group_name LIKE ? OR description LIKE ? OR brand LIKE ?)"
+            args += [q, q, q, q]
+        sql += " ORDER BY COALESCE(forecast_date,'9999-12-31'),id DESC LIMIT ? OFFSET ?"
+        args.extend([max(1, min(int(limit or 100), 200)), max(0, int(offset))])
+        rows = [dict(row) for row in con.execute(sql, args).fetchall()]
+        con.close()
+        return rows
+
+    @app.get("/api/unified/sgo/summary")
+    def sgo_summary():
+        con = db_connect()
+        totals = con.execute(
+            """SELECT COUNT(*) AS total_count,COALESCE(SUM(quantity),0) AS total_quantity,
+               SUM(CASE WHEN forecast_date IS NOT NULL AND date(forecast_date)<date('now')
+                    AND status<>'CONCLUIDO' THEN 1 ELSE 0 END) AS overdue_count
+               FROM sgo_entries"""
+        ).fetchone()
+        by_status = con.execute(
+            """SELECT status,COUNT(*) AS count,COALESCE(SUM(quantity),0) AS quantity
+               FROM sgo_entries GROUP BY status ORDER BY status"""
+        ).fetchall()
+        con.close()
+        return {"totals": dict(totals), "by_status": [dict(row) for row in by_status]}
 
     @app.post("/api/unified/sgo/import")
     async def import_sgo(user_id: int, file: UploadFile = File(...)):
