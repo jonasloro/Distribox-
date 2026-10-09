@@ -1812,18 +1812,25 @@ function statusBadge(value) {
   return `<span class="badge ${cls}">${esc(String(value||"—").replaceAll("_"," "))}</span>`;
 }
 
-const WAREHOUSE_PAGE_SIZE = 200;
-let warehouseVisibleCount = WAREHOUSE_PAGE_SIZE;
+const WAREHOUSE_PAGE_SIZE = 100;
+let warehouseOffset = 0;
+let warehouseRequestToken = 0;
+let warehouseSearchTimer = null;
+let storeLocationRequestToken = 0;
+let simLocationRequestToken = 0;
+let simLocationSearchTimer = null;
 
 async function renderWarehouse() {
   setPage("Mapa e Capacidade", "Endereçamento físico, ocupação e guarda das mercadorias");
-  const data=await api("/api/unified/warehouse"); unifiedCache.warehouse=data;
-  warehouseVisibleCount = WAREHOUSE_PAGE_SIZE;
-  $("mainContent").innerHTML=`
+  const data = await api(`/api/unified/warehouse?limit=${WAREHOUSE_PAGE_SIZE}&offset=0`);
+  if (currentView !== "warehouse") return;
+  unifiedCache.warehouse = data;
+  warehouseOffset = 0;
+  $("mainContent").innerHTML = `
     ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse")}
-    <div class="zone-grid">${data.zones.map(z=>`<div class="zone-card"><div><small>Zona ${esc(z.code)}</small><b>${esc(z.name)}</b></div><strong>${z.occupancy}%</strong><div class="capacity-track"><i style="width:${Math.min(100,z.occupancy)}%"></i></div><span>${Number(z.occupied).toLocaleString("pt-BR")} / ${Number(z.capacity).toLocaleString("pt-BR")} peças</span></div>`).join("")}</div>
+    <div class="zone-grid">${(data.zones||[]).map(z=>`<div class="zone-card"><div><small>Zona ${esc(z.code)}</small><b>${esc(z.name)}</b></div><strong>${z.occupancy}%</strong><div class="capacity-track"><i style="width:${Math.min(100,z.occupancy)}%"></i></div><span>${Number(z.occupied).toLocaleString("pt-BR")} / ${Number(z.capacity).toLocaleString("pt-BR")} peças</span></div>`).join("")}</div>
     <div class="panel"><div class="panel-header">Endereços do centro de distribuição <button class="primary small-btn" onclick="showStoreForm()">+ Guardar mercadoria</button></div>
-      <div class="panel-body compact-filter"><div class="queue-search"><span>⌕</span><input id="warehouseSearch" placeholder="Endereço, categoria ou estrutura" oninput="filterWarehouseRows()"></div><select id="warehouseZone" onchange="filterWarehouseRows()"><option value="">Todas as zonas</option>${data.zones.map(z=>`<option>${esc(z.code)}</option>`).join("")}</select></div>
+      <div class="panel-body compact-filter"><div class="queue-search"><span>⌕</span><input id="warehouseSearch" placeholder="Endereço, categoria ou estrutura" oninput="filterWarehouseRows()"></div><select id="warehouseZone" onchange="filterWarehouseRows()"><option value="">Todas as zonas</option>${(data.zones||[]).map(z=>`<option value="${esc(z.code)}">${esc(z.code)}</option>`).join("")}</select></div>
       <div id="storeForm" class="panel-body hidden"></div>
       <div class="table-wrap warehouse-table"><table class="compact-table"><thead><tr><th>Endereço</th><th>Zona</th><th>Estrutura</th><th>Categoria</th><th>Ocupação</th><th>Disponível</th><th>Status</th></tr></thead><tbody id="warehouseTableBody"></tbody></table></div>
       <div id="warehousePager" class="panel-body warehouse-pager"></div>
@@ -1831,18 +1838,103 @@ async function renderWarehouse() {
   renderWarehouseRows();
 }
 
-function warehouseRowHtml(location){return `<tr class="warehouse-row"><td><b>${esc(location.address)}</b></td><td>${esc(location.zone_code)}</td><td>${esc(location.structure_type||"—")}</td><td>${esc(location.category||"Livre")}</td><td><div class="inline-capacity"><i style="width:${Math.min(100,location.occupancy)}%"></i></div><small>${location.occupied_qty}/${location.capacity} • ${location.occupancy}%</small></td><td><b>${Math.max(0,location.capacity-location.occupied_qty)}</b></td><td>${statusBadge(location.status)}</td></tr>`;}
-
-function renderWarehouseRows(){
-  const data=unifiedCache.warehouse;if(!data)return;
-  const term=normalizeSearch($("warehouseSearch")?.value||""),zone=$("warehouseZone")?.value||"";
-  const filtered=data.locations.filter(location=>(!zone||location.zone_code===zone)&&(!term||normalizeSearch([location.address,location.category,location.structure_type].join(" ")).includes(term)));
-  const visible=filtered.slice(0,warehouseVisibleCount),remaining=filtered.length-visible.length;
-  $("warehouseTableBody").innerHTML=visible.length?visible.map(warehouseRowHtml).join(""):'<tr><td colspan="7" class="empty-cell">Nenhum casulo encontrado.</td></tr>';
-  $("warehousePager").innerHTML=`<span>Mostrando ${visible.length.toLocaleString("pt-BR")} de ${filtered.length.toLocaleString("pt-BR")} casulos</span>${remaining>0?`<button class="secondary small-btn" onclick="loadMoreWarehouseRows()">Carregar mais ${Math.min(remaining,WAREHOUSE_PAGE_SIZE).toLocaleString("pt-BR")}</button>`:""}`;
+function warehouseRowHtml(location) {
+  return `<tr class="warehouse-row"><td><b>${esc(location.address)}</b></td><td>${esc(location.zone_code)}</td><td>${esc(location.structure_type||"—")}</td><td>${esc(location.category||"Livre")}</td><td><div class="inline-capacity"><i style="width:${Math.min(100,location.occupancy)}%"></i></div><small>${location.occupied_qty}/${location.capacity} • ${location.occupancy}%</small></td><td><b>${Math.max(0,location.capacity-location.occupied_qty)}</b></td><td>${statusBadge(location.status)}</td></tr>`;
 }
-function loadMoreWarehouseRows(){warehouseVisibleCount+=WAREHOUSE_PAGE_SIZE;renderWarehouseRows();}
-function filterWarehouseRows(){warehouseVisibleCount=WAREHOUSE_PAGE_SIZE;renderWarehouseRows();}
+
+function renderWarehouseRows() {
+  const data = unifiedCache.warehouse;
+  if (!data || !$("warehouseTableBody")) return;
+  const locations = data.locations || [];
+  const total = Number(data.total_locations || 0);
+  const pageCount = Math.max(1, Math.ceil(total / WAREHOUSE_PAGE_SIZE));
+  const currentPage = Math.floor(warehouseOffset / WAREHOUSE_PAGE_SIZE) + 1;
+  $("warehouseTableBody").innerHTML = locations.length
+    ? locations.map(warehouseRowHtml).join("")
+    : '<tr><td colspan="7" class="empty-cell">Nenhum casulo encontrado.</td></tr>';
+  $("warehousePager").innerHTML = `
+    <span>Mostrando ${total ? warehouseOffset + 1 : 0}–${Math.min(warehouseOffset + locations.length, total)} de ${total.toLocaleString("pt-BR")} casulos · Página ${currentPage} de ${pageCount}</span>
+    <div class="actions">
+      <button class="secondary small-btn" onclick="changeWarehousePage(-1)" ${warehouseOffset <= 0 ? "disabled" : ""}>Anterior</button>
+      <button class="secondary small-btn" onclick="changeWarehousePage(1)" ${warehouseOffset + WAREHOUSE_PAGE_SIZE >= total ? "disabled" : ""}>Próxima</button>
+    </div>`;
+}
+
+async function loadWarehousePage(offset = 0) {
+  if (currentView !== "warehouse") return;
+  const token = ++warehouseRequestToken;
+  const search = $("warehouseSearch")?.value?.trim() || "";
+  const zone = $("warehouseZone")?.value || "";
+  if ($("warehouseTableBody")) $("warehouseTableBody").innerHTML = '<tr><td colspan="7" class="empty-cell">Carregando endereços...</td></tr>';
+  const query = `limit=${WAREHOUSE_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent(search)}&zone=${encodeURIComponent(zone)}`;
+  try {
+    const data = await api(`/api/unified/warehouse?${query}`);
+    if (token !== warehouseRequestToken || currentView !== "warehouse") return;
+    unifiedCache.warehouse = data;
+    warehouseOffset = Math.max(0, offset);
+    renderWarehouseRows();
+  } catch (error) {
+    if (token !== warehouseRequestToken || currentView !== "warehouse") return;
+    if ($("warehouseTableBody")) $("warehouseTableBody").innerHTML = `<tr><td colspan="7" class="empty-cell">${esc(error.message)}</td></tr>`;
+  }
+}
+
+function changeWarehousePage(delta) {
+  loadWarehousePage(Math.max(0, warehouseOffset + delta * WAREHOUSE_PAGE_SIZE));
+}
+
+function filterWarehouseRows() {
+  clearTimeout(warehouseSearchTimer);
+  warehouseSearchTimer = setTimeout(() => loadWarehousePage(0), 250);
+}
+
+function showStoreForm() {
+  const form = $("storeForm");
+  if (!form) return;
+  form.classList.remove("hidden");
+  form.innerHTML = `<div class="inline-form">
+    <div class="field"><label>Buscar endereço disponível</label><input id="storeLocationSearch" placeholder="Digite rua, endereço ou estrutura" oninput="scheduleStoreLocationSearch()"></div>
+    <div class="field"><label>Endereço</label><select id="storeLocation"><option value="">Carregando endereços...</option></select></div>
+    <div class="field"><label>ID do Card</label><input id="storeCard" type="number" placeholder="Opcional"></div>
+    <div class="field"><label>Quantidade</label><input id="storeQty" type="number" min="1"></div>
+    <div class="field"><label>Marca / categoria</label><input id="storeBrand" placeholder="Marca ou grupo"></div>
+    <button class="success" onclick="storeMaterial()">Confirmar guarda</button>
+  </div>`;
+  searchStoreLocations();
+}
+
+function scheduleStoreLocationSearch() {
+  clearTimeout(window.storeLocationSearchTimer);
+  window.storeLocationSearchTimer = setTimeout(() => searchStoreLocations(), 250);
+}
+
+async function searchStoreLocations() {
+  const select = $("storeLocation");
+  if (!select) return;
+  const token = ++storeLocationRequestToken;
+  const search = $("storeLocationSearch")?.value?.trim() || "";
+  select.innerHTML = '<option value="">Buscando endereços...</option>';
+  try {
+    const data = await api(`/api/unified/warehouse?available_only=true&limit=100&offset=0&search=${encodeURIComponent(search)}`);
+    if (token !== storeLocationRequestToken || !$("storeLocation")) return;
+    const locations = data.locations || [];
+    select.innerHTML = locations.length
+      ? '<option value="">Selecione um endereço</option>' + locations.map(l => `<option value="${l.id}">${esc(l.address)} • livre ${Math.max(0,Number(l.capacity)-Number(l.occupied_qty))}</option>`).join("")
+      : '<option value="">Nenhum endereço disponível encontrado</option>';
+  } catch (error) {
+    if (token === storeLocationRequestToken && $("storeLocation")) select.innerHTML = `<option value="">${esc(error.message)}</option>`;
+  }
+}
+
+async function storeMaterial() {
+  try {
+    const locationId = Number($("storeLocation")?.value || 0);
+    if (!locationId) { toast("Selecione um endereço disponível."); return; }
+    await api("/api/unified/warehouse/store",{method:"POST",body:JSON.stringify({user_id:currentUser.id,location_id:locationId,card_id:Number($("storeCard").value||0),quantity:Number($("storeQty").value),brand:$("storeBrand").value,category:$("storeBrand").value})});
+    toast("Mercadoria guardada e capacidade atualizada.");
+    renderWarehouse();
+  } catch(e) { toast(e.message); }
+}
 
 function heatmapColor(percentage){
   if(percentage>=90)return "#d92d20";
