@@ -1866,7 +1866,7 @@ async function loadWarehousePage(offset = 0) {
   const search = $("warehouseSearch")?.value?.trim() || "";
   const zone = $("warehouseZone")?.value || "";
   if ($("warehouseTableBody")) $("warehouseTableBody").innerHTML = '<tr><td colspan="7" class="empty-cell">Carregando endereços...</td></tr>';
-  const query = `limit=${WAREHOUSE_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent(search)}&zone=${encodeURIComponent(zone)}`;
+  const query = `limit=${WAREHOUSE_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent(search)}&zone=${encodeURIComponent(zone)}&include_zones=false`;
   try {
     const data = await api(`/api/unified/warehouse?${query}`);
     if (token !== warehouseRequestToken || currentView !== "warehouse") return;
@@ -1915,7 +1915,7 @@ async function searchStoreLocations() {
   const search = $("storeLocationSearch")?.value?.trim() || "";
   select.innerHTML = '<option value="">Buscando endereços...</option>';
   try {
-    const data = await api(`/api/unified/warehouse?available_only=true&limit=100&offset=0&search=${encodeURIComponent(search)}`);
+    const data = await api(`/api/unified/warehouse?available_only=true&include_zones=false&limit=100&offset=0&search=${encodeURIComponent(search)}`);
     if (token !== storeLocationRequestToken || !$("storeLocation")) return;
     const locations = data.locations || [];
     select.innerHTML = locations.length
@@ -2354,7 +2354,7 @@ async function searchSimulationLocations() {
   const search = $("simLocationSearch")?.value?.trim() || "";
   select.innerHTML = '<option value="">Buscando endereços...</option>';
   try {
-    const data = await api(`/api/unified/warehouse?limit=100&offset=0&search=${encodeURIComponent(search)}`);
+    const data = await api(`/api/unified/warehouse?include_zones=false&limit=100&offset=0&search=${encodeURIComponent(search)}`);
     if (token !== simLocationRequestToken || currentView !== "capacity-simulator" || !$("simLocation")) return;
     const locations = data.locations || [];
     select.innerHTML = locations.length
