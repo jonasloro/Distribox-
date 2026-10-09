@@ -786,14 +786,12 @@ def register_unified_routes(app) -> None:
         con.commit();con.close();return {"ok":True,"shipment_id":cur.lastrowid,"document_no":doc,"items":len(items),"total_qty":total}
 
     @app.get("/api/unified/returns")
-    def list_returns(status:str="",search:str="",limit:int=0,offset:int=0):
+    def list_returns(status:str="",search:str="",limit:int=100,offset:int=0):
         con=db_connect();sql="SELECT * FROM returns WHERE 1=1";args=[]
         if status:sql+=" AND status=?";args.append(status)
         if search:q=f"%{search}%";sql+=" AND (document_no LIKE ? OR store LIKE ? OR customer LIKE ?)";args += [q,q,q]
-        sql+=" ORDER BY id DESC"
-        if limit:
-            sql+=" LIMIT ? OFFSET ?"
-            args.extend([max(1,min(int(limit),1000)),max(0,int(offset))])
+        sql+=" ORDER BY id DESC LIMIT ? OFFSET ?"
+        args.extend([max(1,min(int(limit or 100),200)),max(0,int(offset))])
         rows=[dict(r) for r in con.execute(sql,args).fetchall()];con.close();return rows
 
     @app.get("/api/unified/returns/analytics")
