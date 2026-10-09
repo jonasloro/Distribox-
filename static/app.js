@@ -2326,7 +2326,44 @@ async function renderStockStatistics() {
 function analyticsBars(title,rows){return dashboardPanel("▥",title,"",analyticsBarsBody(rows));}
 function analyticsBarsBody(rows){const max=Math.max(1,...rows.map(r=>Number(r.value)||0));return `<div class="analytics-bars">${rows.slice(0,15).map(r=>`<div><span>${esc(r.label)}</span><i><b style="width:${Number(r.value)*100/max}%"></b></i><strong>${Number(r.value).toLocaleString('pt-BR')}</strong><small>${esc(r.hint||'')}</small></div>`).join('')||'<div class="empty-visual">Sem dados para exibir.</div>'}</div>`;}
 
-async function renderCapacitySimulator(){setPage("Simulador de Capacidade","");const w=await safeApi('/api/unified/warehouse',{locations:[],zones:[]});$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"capacity-simulator")}<section class="dash-panel simulator-panel"><header><b>⌁</b><strong>Teste uma entrada sem alterar o estoque</strong></header><div class="dash-panel-body simulator-form"><div class="field"><label>Endereço</label><select id="simLocation" onchange="calculateCapacitySimulation()"><option value="">Selecione</option>${w.locations.map(l=>`<option value="${l.id}" data-cap="${l.capacity}" data-occ="${l.occupied_qty}">${esc(l.address)} • livre ${Math.max(0,l.capacity-l.occupied_qty)}</option>`).join('')}</select></div><div class="field"><label>Quantidade a armazenar</label><input id="simQty" type="number" min="0" value="10" oninput="calculateCapacitySimulation()"></div><div id="simResult" class="simulation-result"><span>Selecione um endereço para simular.</span></div></div></section>`;unifiedCache.warehouse=w;}
+async function renderCapacitySimulator() {
+  setPage("Simulador de Capacidade","");
+  $("mainContent").innerHTML = `
+    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"capacity-simulator")}
+    <section class="dash-panel simulator-panel"><header><b>⌁</b><strong>Teste uma entrada sem alterar o estoque</strong></header>
+      <div class="dash-panel-body simulator-form">
+        <div class="field"><label>Pesquisar endereço</label><input id="simLocationSearch" placeholder="Digite o endereço, rua ou estrutura" oninput="scheduleSimulationLocationSearch()"></div>
+        <div class="field"><label>Endereço</label><select id="simLocation" onchange="calculateCapacitySimulation()"><option value="">Carregando endereços...</option></select></div>
+        <div class="field"><label>Quantidade a armazenar</label><input id="simQty" type="number" min="0" value="10" oninput="calculateCapacitySimulation()"></div>
+        <div id="simResult" class="simulation-result"><span>Selecione um endereço para simular.</span></div>
+      </div>
+    </section>`;
+  await searchSimulationLocations();
+}
+
+function scheduleSimulationLocationSearch() {
+  clearTimeout(simLocationSearchTimer);
+  simLocationSearchTimer = setTimeout(() => searchSimulationLocations(), 250);
+}
+
+async function searchSimulationLocations() {
+  const select = $("simLocation");
+  if (!select || currentView !== "capacity-simulator") return;
+  const token = ++simLocationRequestToken;
+  const search = $("simLocationSearch")?.value?.trim() || "";
+  select.innerHTML = '<option value="">Buscando endereços...</option>';
+  try {
+    const data = await api(`/api/unified/warehouse?limit=100&offset=0&search=${encodeURIComponent(search)}`);
+    if (token !== simLocationRequestToken || currentView !== "capacity-simulator" || !$("simLocation")) return;
+    const locations = data.locations || [];
+    select.innerHTML = locations.length
+      ? '<option value="">Selecione um endereço</option>' + locations.map(l=>`<option value="${l.id}" data-cap="${l.capacity}" data-occ="${l.occupied_qty}">${esc(l.address)} • livre ${Math.max(0,Number(l.capacity)-Number(l.occupied_qty))}</option>`).join("")
+      : '<option value="">Nenhum endereço encontrado</option>';
+    $("simResult").innerHTML = '<span>Selecione um endereço para simular.</span>';
+  } catch (error) {
+    if (token === simLocationRequestToken && $("simLocation")) select.innerHTML = `<option value="">${esc(error.message)}</option>`;
+  }
+}
 function calculateCapacitySimulation(){const option=$("simLocation")?.selectedOptions?.[0],qty=Number($("simQty")?.value||0);if(!option?.value)return;const cap=Number(option.dataset.cap),occ=Number(option.dataset.occ),after=occ+qty,pct=cap?Math.round(after*100/cap):0,excess=Math.max(0,after-cap);$("simResult").innerHTML=`<div class="capacity-gauge"><i style="width:${Math.min(100,pct)}%" class="${excess?'danger-fill':pct>80?'warn-fill':''}"></i></div><strong>${pct}% após a entrada</strong><span>${occ} atuais + ${qty} novas = ${after} de ${cap}</span>${excess?`<b class="text-danger">Excede a capacidade em ${excess} peças.</b>`:'<b class="text-success">Entrada compatível com a capacidade.</b>'}`;}
 
 async function renderSgoIndicators(){setPage("SGO e Indicadores","");const [rows,tasks]=await Promise.all([safeApi('/api/unified/sgo',[]),safeApi('/api/unified/tasks',[])]);const total=rows.reduce((a,r)=>a+Number(r.quantity||0),0),late=rows.filter(r=>r.forecast_date&&new Date(r.forecast_date)<new Date()&&r.status!=='CONCLUIDO');const byStatus=Object.entries(rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+Number(r.quantity||0),a),{})).map(([label,value])=>({label,value}));$("mainContent").innerHTML=`${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}<div class="hero-kpis">${heroKpi("Entradas previstas",rows.length,"Compras / lotes","⇩","blue","sgo")}${heroKpi("Peças previstas",total.toLocaleString('pt-BR'),"Quantidade SGO","▣","teal","sgo")}${heroKpi("Previsões atrasadas",late.length,"Requer atenção","!","blue","sgo")}${heroKpi("Tarefas abertas",tasks.filter(t=>t.status!=='CONCLUIDA').length,"Operação","☑","teal","tasks")}</div><div class="dash-row indicators-layout">${analyticsBars("Distribuição por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${rows.length}</span>`,awaitingTable(rows.slice(0,10),[]))}</div>`;}
@@ -2339,7 +2376,22 @@ async function renderReturnIndicators(){setPage("Indicadores de Devoluções",""
 
 async function renderReturnHistory(){setPage("Histórico de Devoluções","");const [rows,moves]=await Promise.all([safeApi('/api/unified/returns',[]),safeApi('/api/unified/movements?limit=500',[])]);$("mainContent").innerHTML=`${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-history")}<section class="dash-panel"><header><b>◷</b><strong>Documentos e movimentações</strong><span class="panel-count">${rows.length}</span></header><div class="dash-panel-body"><table class="dash-table"><thead><tr><th>Documento</th><th>Loja</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th>Data</th></tr></thead><tbody>${rows.map(r=>`<tr onclick="openReturn(${r.id})"><td>${esc(r.document_no)}</td><td>${esc(r.store||r.customer||'—')}</td><td>${r.total_store}</td><td>${r.total_cd}</td><td>${r.total_anapolis}</td><td>${r.difference}</td><td>${statusBadge(r.status)}</td><td>${fmtDateTime(r.created_at)}</td></tr>`).join('')||emptyRows(8)}</tbody></table></div></section><section class="dash-panel" style="margin-top:14px"><header><b>↯</b><strong>Auditoria das tratativas</strong></header><div class="dash-panel-body movement-list">${moves.filter(m=>m.domain==='DEVOLUCOES').map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)} • ${esc(m.user_name||'Sistema')}</small></div>`).join('')||'<div class="empty-visual">Nenhuma tratativa registrada.</div>'}</div></section>`;}
 
-async function renderRegistrations(){setPage("Cadastros","");const [users,w,a]=await Promise.all([safeApi('/api/users',[]),safeApi('/api/unified/warehouse',{zones:[]}),safeApi('/api/unified/warehouse/analytics',{groups:[]})]);$("mainContent").innerHTML=`<div class="actions" style="margin-bottom:12px"><button class="primary" onclick="openGoatCardModal()">+ Criar Card</button></div><div class="dash-row registrations-grid">${dashboardPanel("♙","Usuários e perfis",`<span class="panel-count">${users.length}</span>`,`<table class="dash-table"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${statusBadge(u.role)}</td></tr>`).join('')}</tbody></table>`)}${dashboardPanel("▦","Zonas do CD",`<span class="panel-count">${w.zones.length}</span>`,`<table class="dash-table"><thead><tr><th>Zona</th><th>Descrição</th><th>Capacidade</th></tr></thead><tbody>${w.zones.map(z=>`<tr><td>${esc(z.code)}</td><td>${esc(z.name)}</td><td>${Number(z.capacity).toLocaleString('pt-BR')}</td></tr>`).join('')}</tbody></table>`)}${dashboardPanel("▣","Grupos do último relatório","",analyticsBarsBody((a.groups||[]).map(g=>({label:g.group_name,value:g.quantity,hint:g.gender}))))}</div>`;}
+async function renderRegistrations() {
+  setPage("Cadastros","");
+  const [users,w,a] = await Promise.all([
+    safeApi('/api/users',[]),
+    safeApi('/api/unified/warehouse/summary',{zones:[]}),
+    safeApi('/api/unified/warehouse/analytics',{groups:[]})
+  ]);
+  if (currentView !== "registrations") return;
+  const zones = w.zones || [];
+  $("mainContent").innerHTML = `<div class="actions" style="margin-bottom:12px"><button class="primary" onclick="openGoatCardModal()">+ Criar Card</button></div>
+    <div class="dash-row registrations-grid">
+      ${dashboardPanel("♙","Usuários e perfis",`<span class="panel-count">${users.length}</span>`,`<table class="dash-table"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${statusBadge(u.role)}</td></tr>`).join('')}</tbody></table>`)}
+      ${dashboardPanel("▦","Zonas do CD",`<span class="panel-count">${zones.length}</span>`,`<table class="dash-table"><thead><tr><th>Zona</th><th>Descrição</th><th>Capacidade</th></tr></thead><tbody>${zones.map(z=>`<tr><td>${esc(z.code)}</td><td>${esc(z.name)}</td><td>${Number(z.capacity).toLocaleString('pt-BR')}</td></tr>`).join('')}</tbody></table>`)}
+      ${dashboardPanel("▣","Grupos do último relatório","",analyticsBarsBody((a.groups||[]).map(g=>({label:g.group_name,value:g.quantity,hint:g.gender}))))}
+    </div>`;
+}
 
 async function renderSettings(){setPage("Configurações","");$("mainContent").innerHTML=`<div class="settings-grid"><button onclick="goTo('import')"><b>⇧</b><strong>Importar compras</strong><span>Atualizar Cards a partir do relatório Excel.</span></button><button onclick="goTo('tasks')"><b>☑</b><strong>Quadro de tarefas</strong><span>Responsáveis, prioridades e andamento.</span></button><button onclick="goTo('test')"><b>⚙</b><strong>Administração e testes</strong><span>Ferramentas controladas para validação.</span></button><button onclick="goTo('history')"><b>◷</b><strong>Histórico global</strong><span>Rastreabilidade das movimentações.</span></button></div><div class="state-panel"><b>DistriLog V3</b><span>Uma interface, um backend e uma base SQLite. As regras congeladas de Recebimento, Qualidade e Processamento permanecem no motor operacional.</span></div>`;}
 
