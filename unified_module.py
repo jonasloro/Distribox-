@@ -627,13 +627,45 @@ def register_unified_routes(app) -> None:
         con.commit();con.close();return {"ok":True}
 
     @app.get("/api/unified/shipments")
-    def list_shipments():
-        con=db_connect();rows=[dict(r) for r in con.execute(
+    def list_shipments(status: str = "", search: str = "", limit: int = 100, offset: int = 0):
+        con = db_connect()
+        where = " WHERE 1=1"
+        args: list[Any] = []
+        if status:
+            where += " AND s.status=?"
+            args.append(status)
+        if search:
+            where += " AND (s.document_no LIKE ? OR s.destination LIKE ? OR s.carrier LIKE ? OR s.vehicle_plate LIKE ? OR s.driver_name LIKE ?)"
+            query = f"%{search}%"
+            args.extend([query, query, query, query, query])
+        safe_limit = max(1, min(int(limit or 100), 200))
+        safe_offset = max(0, int(offset))
+        rows = [dict(row) for row in con.execute(
             """SELECT s.*,
                       COALESCE((SELECT SUM(si.checked_qty) FROM shipment_items si WHERE si.shipment_id=s.id),0) checked_qty,
                       COALESCE((SELECT COUNT(*) FROM shipment_items si WHERE si.shipment_id=s.id),0) item_count
-               FROM shipments s ORDER BY s.id DESC"""
-        ).fetchall()];con.close();return rows
+               FROM shipments s""" + where + " ORDER BY s.id DESC LIMIT ? OFFSET ?",
+            [*args, safe_limit, safe_offset],
+        ).fetchall()]
+        con.close()
+        return rows
+
+    @app.get("/api/unified/shipments/summary")
+    def shipments_summary():
+        con = db_connect()
+        row = con.execute(
+            """SELECT COUNT(*) AS total,
+               SUM(CASE WHEN s.status NOT IN ('EXPEDIDO','PRONTO') THEN 1 ELSE 0 END) AS preparing,
+               SUM(CASE WHEN s.status='PRONTO' THEN 1 ELSE 0 END) AS ready,
+               SUM(CASE WHEN s.status='EXPEDIDO' THEN 1 ELSE 0 END) AS shipped,
+               COALESCE(SUM(s.total_qty),0) AS total_qty,
+               COALESCE(SUM(COALESCE(v.checked_qty,0)),0) AS checked_qty
+               FROM shipments s
+               LEFT JOIN (SELECT shipment_id,SUM(checked_qty) AS checked_qty
+                          FROM shipment_items GROUP BY shipment_id) v ON v.shipment_id=s.id"""
+        ).fetchone()
+        con.close()
+        return dict(row)
 
     @app.get("/api/unified/shipments/{shipment_id}")
     def shipment_detail(shipment_id:int):
