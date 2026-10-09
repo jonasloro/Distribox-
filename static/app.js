@@ -9,6 +9,14 @@ let qualityUsers = [];
 let processingUsers = [];
 let downstreamUsers = {ETIQUETAGEM:[],ESTOCAGEM:[]};
 let selectedProductionCardId = null;
+const PRODUCTION_QUEUE_PAGE_SIZE = 100;
+let productionQueueOffset = 0;
+let productionQueueScope = "receiving";
+let productionQueueSearchTimer = null;
+let productionQueueRequestId = 0;
+let productionQueueLoading = false;
+let productionQueueHasMore = false;
+let productionQueueBrands = [];
 let unifiedCache = {warehouse:null,sgo:[],tasks:[],shipments:[],returns:[]};
 
 const $ = (id) => document.getElementById(id);
@@ -248,20 +256,35 @@ async function renderCards(scope) {
   const quality = scope === "quality";
   const processing = scope === "processing";
   const labeling = scope === "labeling", storage = scope === "storage";
+  const queueScope = ["receiving","quality","processing","labeling","storage"].includes(scope);
   const title = quality ? "Qualidade" : processing ? "Processamento" : labeling ? "Etiquetagem" : storage ? "Estocagem" : "Recebimento";
   const subtitle = quality ? "Inspeção ágil e preenchimento guiado" : processing ? "Seleção compacta de materiais" : labeling ? "Grade por tamanho; Saldo por quantidade" : storage ? "Entrada em estoque por tamanho ou saldo geral" : "Controle geral da produção e posição real de cada item";
   setPage(title, subtitle);
   const needsMetrics = ["receiving","quality","processing"].includes(scope);
-  const [cards, dashboard] = await Promise.all([
-    api(`/api/cards?scope=${scope}`),
-    needsMetrics ? api("/api/dashboard") : Promise.resolve({totals:{}})
+  const cardsUrl = queueScope
+    ? `/api/cards?scope=${scope}&limit=${PRODUCTION_QUEUE_PAGE_SIZE}&offset=0`
+    : `/api/cards?scope=${scope}`;
+  const [cards, dashboard, brands] = await Promise.all([
+    api(cardsUrl),
+    needsMetrics ? api("/api/dashboard") : Promise.resolve({totals:{}}),
+    queueScope ? safeApi(`/api/cards/brands?scope=${scope}`,[]) : Promise.resolve([])
   ]);
   if (currentView !== scope) return;
   const metrics = needsMetrics ? metricCardsHtml(scope, dashboard.totals) : "";
+  if (queueScope) {
+    clearTimeout(productionQueueSearchTimer);
+    productionQueueScope = scope;
+    productionQueueOffset = cards.length;
+    productionQueueHasMore = cards.length === PRODUCTION_QUEUE_PAGE_SIZE;
+    productionQueueBrands = brands.length ? brands : [...new Set(cards.map(card=>card.brand).filter(Boolean))].sort();
+    productionQueueLoading = false;
+    productionQueueRequestId++;
+  }
   if (["receiving","quality","processing","labeling","storage"].includes(scope)) {
     const tabs = storage ? moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage") : "";
     $("mainContent").innerHTML = tabs + metrics + processingQueueHtml(cards, scope);
     filterProductionQueue();
+    updateProductionQueuePager();
     return;
   }
   $("mainContent").innerHTML = `
@@ -277,22 +300,98 @@ async function renderCards(scope) {
 
 function processingQueueHtml(cards, scope=currentView) {
   const tab = ["receiving","quality","processing","labeling","storage"].includes(scope) ? scope : "processing";
-  const brands = [...new Set(cards.map((c)=>c.brand).filter(Boolean))].sort();
+  const brands = productionQueueBrands.length ? productionQueueBrands : [...new Set(cards.map(card=>card.brand).filter(Boolean))].sort();
   return `<div class="work-queue">
     <div class="queue-toolbar">
-      <div class="queue-search"><span>⌕</span><input id="productionMaterialSearch" placeholder="Compra, fornecedor, marca, produto ou Casulo" oninput="filterProductionQueue()"></div>
-      <select id="productionTypeFilter" onchange="filterProductionQueue()"><option value="">Todos os tipos</option><option value="GRADE">Grade</option><option value="SALDO">Saldo</option></select>
-      <select id="productionStatusFilter" onchange="filterProductionQueue()"><option value="">Todos os status</option><option value="AGUARDANDO">Aguardando</option><option value="ATIVO">Em produção</option><option value="PAUSADO">Pausados</option></select>
-      <select id="productionBrandFilter" onchange="filterProductionQueue()"><option value="">Todas as marcas</option>${brands.map((b)=>`<option value="${esc(b)}">${esc(b)}</option>`).join("")}</select>
-      <button class="ghost" onclick="clearProductionFilters()">Limpar</button>
+      <div class="queue-search"><span>⌕</span><input id="productionMaterialSearch" placeholder="Compra, fornecedor, marca, produto ou Casulo" oninput="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"></div>
+      <select id="productionTypeFilter" onchange="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"><option value="">Todos os tipos</option><option value="GRADE">Grade</option><option value="SALDO">Saldo</option></select>
+      <select id="productionStatusFilter" onchange="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"><option value="">Todos os status</option><option value="AGUARDANDO">Aguardando</option><option value="ATIVO">Em produção</option><option value="PAUSADO">Pausados</option></select>
+      <select id="productionBrandFilter" onchange="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"><option value="">Todas as marcas</option>${brands.map((b)=>`<option value="${esc(b)}">${esc(b)}</option>`).join("")}</select>
+      <button class="ghost" onclick="clearProductionFilters('${tab}')">Limpar</button>
     </div>
-    <div class="queue-counter"><b id="productionVisibleCount">${cards.length}</b> materiais encontrados <span>• selecione uma linha para continuar</span></div>
+    <div class="queue-counter"><b id="productionVisibleCount">${cards.length}</b> materiais nesta página <span>• selecione uma linha para continuar</span></div>
     <div class="panel queue-panel"><div class="table-wrap queue-table-wrap"><table class="compact-table production-queue-table">
       <thead><tr><th class="select-col"></th><th>Material / compra</th><th>Fornecedor</th><th>Marca</th><th>Tipo</th><th>Itens</th><th>Qtd.</th><th>Casulo</th><th>Status</th><th></th></tr></thead>
       <tbody id="productionQueueBody">${cards.map((card)=>productionQueueRow(card,tab)).join("") || '<tr><td colspan="10">Nenhum material disponível.</td></tr>'}</tbody>
     </table></div></div>
+    <div id="productionQueuePager" class="warehouse-pager hidden"></div>
     <div id="productionSelectionBar" class="selection-bar hidden"><div><span>Material selecionado</span><b id="productionSelectionLabel"></b></div><div class="actions"><button class="ghost" onclick="clearProductionSelection()">Cancelar</button><button class="primary" onclick="openSelectedProduction('${tab}')">Abrir controle →</button></div></div>
   </div>`;
+}
+
+function productionQueueUrl(scope, offset) {
+  const search = $("productionMaterialSearch")?.value?.trim() || "";
+  const purchaseMode = $("productionTypeFilter")?.value || "";
+  const activity = $("productionStatusFilter")?.value || "";
+  const brand = $("productionBrandFilter")?.value || "";
+  return `/api/cards?scope=${encodeURIComponent(scope)}&search=${encodeURIComponent(search)}&purchase_mode=${encodeURIComponent(purchaseMode)}&activity=${encodeURIComponent(activity)}&brand=${encodeURIComponent(brand)}&limit=${PRODUCTION_QUEUE_PAGE_SIZE}&offset=${Math.max(0,offset)}`;
+}
+
+function updateProductionQueuePager() {
+  const pager = $("productionQueuePager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${productionQueueOffset.toLocaleString("pt-BR")} cards carregados</span><button class="secondary small-btn" onclick="loadMoreProductionQueue()" ${!productionQueueHasMore || productionQueueLoading ? "disabled" : ""}>${productionQueueLoading ? "Carregando..." : "Carregar mais"}</button>`;
+  pager.classList.toggle("hidden", !productionQueueHasMore && !productionQueueLoading);
+}
+
+function scheduleProductionQueueSearch(scope=productionQueueScope) {
+  clearTimeout(productionQueueSearchTimer);
+  productionQueueSearchTimer = setTimeout(() => searchProductionQueue(scope), 300);
+}
+
+async function searchProductionQueue(scope=productionQueueScope) {
+  if (currentView !== scope) return;
+  const token = ++productionQueueRequestId;
+  productionQueueScope = scope;
+  productionQueueOffset = 0;
+  productionQueueHasMore = false;
+  productionQueueLoading = true;
+  updateProductionQueuePager();
+  try {
+    const cards = await api(productionQueueUrl(scope,0));
+    if (token !== productionQueueRequestId || currentView !== scope) return;
+    const tbody = $("productionQueueBody");
+    if (!tbody) return;
+    tbody.innerHTML = cards.map(card=>productionQueueRow(card,scope)).join("") || '<tr><td colspan="10">Nenhum material disponível.</td></tr>';
+    productionQueueOffset = cards.length;
+    productionQueueHasMore = cards.length === PRODUCTION_QUEUE_PAGE_SIZE;
+    filterProductionQueue();
+  } catch(error) {
+    if (token === productionQueueRequestId && currentView === scope) toast(error.message);
+  } finally {
+    if (token === productionQueueRequestId) {
+      productionQueueLoading = false;
+      updateProductionQueuePager();
+    }
+  }
+}
+
+async function loadMoreProductionQueue() {
+  if (productionQueueLoading || !productionQueueHasMore || currentView !== productionQueueScope) return;
+  const scope = productionQueueScope;
+  const token = productionQueueRequestId;
+  const offset = productionQueueOffset;
+  productionQueueLoading = true;
+  updateProductionQueuePager();
+  try {
+    const cards = await api(productionQueueUrl(scope,offset));
+    if (token !== productionQueueRequestId || currentView !== scope) return;
+    const tbody = $("productionQueueBody");
+    if (!tbody) return;
+    const emptyRow = tbody.querySelector("tr td[colspan]");
+    if (emptyRow && productionQueueOffset === 0) tbody.innerHTML = "";
+    tbody.insertAdjacentHTML("beforeend",cards.map(card=>productionQueueRow(card,scope)).join(""));
+    productionQueueOffset += cards.length;
+    productionQueueHasMore = cards.length === PRODUCTION_QUEUE_PAGE_SIZE;
+    filterProductionQueue();
+  } catch(error) {
+    if (token === productionQueueRequestId && currentView === scope) toast(error.message);
+  } finally {
+    if (token === productionQueueRequestId) {
+      productionQueueLoading = false;
+      updateProductionQueuePager();
+    }
+  }
 }
 
 function productionActivity(card, tab="processing") {
@@ -327,7 +426,7 @@ function filterProductionQueue() {
   if ($("productionVisibleCount")) $("productionVisibleCount").textContent=visible;
 }
 function normalizeSearch(value){return String(value||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();}
-function clearProductionFilters(){["productionMaterialSearch","productionTypeFilter","productionStatusFilter","productionBrandFilter"].forEach((id)=>{if($(id))$(id).value=""});filterProductionQueue();}
+function clearProductionFilters(scope=productionQueueScope){["productionMaterialSearch","productionTypeFilter","productionStatusFilter","productionBrandFilter"].forEach((id)=>{if($(id))$(id).value=""});filterProductionQueue();scheduleProductionQueueSearch(scope);}
 function selectProductionMaterial(id){selectedProductionCardId=id;document.querySelectorAll(".production-material-row").forEach((row)=>row.classList.toggle("selected",Number(row.dataset.id)===id));const row=document.querySelector(`.production-material-row[data-id="${id}"]`);$("productionSelectionLabel").textContent=row?.dataset.label||"";$("productionSelectionBar").classList.remove("hidden");}
 function clearProductionSelection(){selectedProductionCardId=null;document.querySelectorAll(".production-material-row").forEach((row)=>row.classList.remove("selected"));$("productionSelectionBar")?.classList.add("hidden");}
 function openSelectedProduction(tab="processing"){if(selectedProductionCardId)openCard(selectedProductionCardId,tab);}
