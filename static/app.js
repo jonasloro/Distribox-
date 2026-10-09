@@ -25,6 +25,12 @@ let returnsListLoading = false;
 let returnHistoryOffset = 0;
 let returnHistoryHasMore = false;
 let returnHistoryLoading = false;
+const SHIPMENTS_PAGE_SIZE = 100;
+let shipmentsListOffset = 0;
+let shipmentsListHasMore = false;
+let shipmentsListLoading = false;
+let shipmentsRequestToken = 0;
+let shipmentsSearchTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -2079,15 +2085,21 @@ function showTaskForm(){$("taskForm").classList.remove("hidden");$("taskForm").i
 async function createTask(){try{await api("/api/unified/tasks",{method:"POST",body:JSON.stringify({user_id:currentUser.id,title:$("taskTitle").value,sector:$("taskSector").value,priority:$("taskPriority").value,description:$("taskDescription").value})});toast("Tarefa criada.");renderTasks();}catch(e){toast(e.message)}}
 async function advanceTask(id,status){try{await api(`/api/unified/tasks/${id}`,{method:"PATCH",body:JSON.stringify({user_id:currentUser.id,status})});renderTasks();}catch(e){toast(e.message)}}
 
-async function renderShipping(){
+async function renderShipping() {
   setPage("Expedição","Preenchimento, conferência e liberação da saída");
-  const rows=await api("/api/unified/shipments");if(currentView!=="shipping")return;unifiedCache.shipments=rows;
-  const allowed=["expedicao","estocagem","supervisor","admin"].includes(currentUser.role);
-  const preparing=rows.filter(s=>s.status!=="EXPEDIDO"&&s.status!=="PRONTO").length;
-  const ready=rows.filter(s=>s.status==="PRONTO").length;
-  const shipped=rows.filter(s=>s.status==="EXPEDIDO").length;
-  const checked=rows.reduce((a,s)=>a+Number(s.checked_qty||0),0),total=rows.reduce((a,s)=>a+Number(s.total_qty||0),0);
-  $("mainContent").innerHTML=`
+  const [rows,summary] = await Promise.all([
+    api(`/api/unified/shipments?limit=${SHIPMENTS_PAGE_SIZE}&offset=0`),
+    api("/api/unified/shipments/summary")
+  ]);
+  if (currentView !== "shipping") return;
+  unifiedCache.shipments = rows;
+  shipmentsListOffset = rows.length;
+  shipmentsListHasMore = rows.length === SHIPMENTS_PAGE_SIZE;
+  shipmentsListLoading = false;
+  const allowed = ["expedicao","estocagem","supervisor","admin"].includes(currentUser.role);
+  const preparing = Number(summary.preparing||0), ready = Number(summary.ready||0), shipped = Number(summary.shipped||0);
+  const checked = Number(summary.checked_qty||0), total = Number(summary.total_qty||0);
+  $("mainContent").innerHTML = `
     <div class="kpi-grid compact-kpis shipping-kpis">
       <div class="kpi"><div class="kpi-label">Em preenchimento</div><div class="kpi-value">${preparing}</div><div class="kpi-hint">Romaneios</div></div>
       <div class="kpi"><div class="kpi-label">Prontos para saída</div><div class="kpi-value">${ready}</div><div class="kpi-hint">Conferidos</div></div>
@@ -2098,12 +2110,87 @@ async function renderShipping(){
       <div class="panel-header"><span>Controle de romaneios</span><div>${allowed?`<button class="ghost small-btn" onclick="document.getElementById('shipmentPdf').click()">Importar PDF</button> <button class="primary small-btn" onclick="showShipmentForm()">+ Novo romaneio</button><input id="shipmentPdf" class="hidden" type="file" accept=".pdf" onchange="importShipmentPdf(this)">`:''}</div></div>
       <div class="panel-body shipping-toolbar"><div class="queue-search"><span>⌕</span><input id="shipmentSearch" placeholder="Romaneio, destino, transportadora, placa ou motorista" oninput="filterShipmentRows()"></div><select id="shipmentStatus" onchange="filterShipmentRows()"><option value="">Todos os status</option><option>RASCUNHO</option><option>PREPARANDO</option><option>EM_CONFERENCIA</option><option>PRONTO</option><option>EXPEDIDO</option></select></div>
       <div id="shipmentForm" class="panel-body hidden"></div>
-      <div class="table-wrap"><table class="compact-table"><thead><tr><th>Documento</th><th>Destino / transporte</th><th>Conferência</th><th>Volumes</th><th>Saída prevista</th><th>Status</th><th></th></tr></thead><tbody>
-        ${rows.map(s=>{const pct=s.total_qty?Math.min(100,Math.round(Number(s.checked_qty||0)*100/s.total_qty)):0;return `<tr class="shipment-row" data-status="${esc(s.status)}" data-search="${esc(normalizeSearch([s.document_no,s.destination,s.carrier,s.vehicle_plate,s.driver_name].join(' ')))}"><td><button class="link-button" onclick="openShipment(${s.id})"><b>${esc(s.document_no)}</b></button><small>${s.item_count||0} item(ns)</small></td><td><b>${esc(s.destination||'Pendente')}</b><small>${esc(s.carrier||'Transportadora não informada')} ${s.vehicle_plate?`• ${esc(s.vehicle_plate)}`:''}</small></td><td><div class="shipping-progress"><i style="width:${pct}%"></i></div><small>${Number(s.checked_qty||0).toLocaleString('pt-BR')} / ${Number(s.total_qty||0).toLocaleString('pt-BR')} peças • ${pct}%</small></td><td>${Number(s.volume_count||0)||'—'}</td><td>${s.scheduled_at?fmtDateTime(s.scheduled_at):'—'}</td><td>${statusBadge(s.status)}</td><td><button class="secondary small-btn" onclick="openShipment(${s.id})">Preencher</button></td></tr>`}).join("")||'<tr><td colspan="7">Nenhum romaneio cadastrado.</td></tr>'}
-      </tbody></table></div>
+      <div class="table-wrap"><table class="compact-table"><thead><tr><th>Documento</th><th>Destino / transporte</th><th>Conferência</th><th>Volumes</th><th>Saída prevista</th><th>Status</th><th></th></tr></thead><tbody id="shipmentsBody">${rows.map(shipmentRowHtml).join("")||'<tr><td colspan="7">Nenhum romaneio cadastrado.</td></tr>'}</tbody></table></div>
+      <div id="shipmentsPager" class="panel-body warehouse-pager"></div>
     </div>`;
+  updateShipmentsPager();
 }
-function filterShipmentRows(){const term=normalizeSearch($("shipmentSearch")?.value||""),status=$("shipmentStatus")?.value||"";document.querySelectorAll(".shipment-row").forEach(row=>row.classList.toggle("hidden",(term&&!row.dataset.search.includes(term))||(status&&row.dataset.status!==status)));}
+
+function shipmentRowHtml(s) {
+  const pct = s.total_qty ? Math.min(100,Math.round(Number(s.checked_qty||0)*100/Number(s.total_qty))) : 0;
+  return `<tr class="shipment-row" data-status="${esc(s.status)}" data-search="${esc(normalizeSearch([s.document_no,s.destination,s.carrier,s.vehicle_plate,s.driver_name].join(' ')))}"><td><button class="link-button" onclick="openShipment(${s.id})"><b>${esc(s.document_no)}</b></button><small>${s.item_count||0} item(ns)</small></td><td><b>${esc(s.destination||'Pendente')}</b><small>${esc(s.carrier||'Transportadora não informada')} ${s.vehicle_plate?`• ${esc(s.vehicle_plate)}`:''}</small></td><td><div class="shipping-progress"><i style="width:${pct}%"></i></div><small>${Number(s.checked_qty||0).toLocaleString('pt-BR')} / ${Number(s.total_qty||0).toLocaleString('pt-BR')} peças • ${pct}%</small></td><td>${Number(s.volume_count||0)||'—'}</td><td>${s.scheduled_at?fmtDateTime(s.scheduled_at):'—'}</td><td>${statusBadge(s.status)}</td><td><button class="secondary small-btn" onclick="openShipment(${s.id})">Preencher</button></td></tr>`;
+}
+
+function updateShipmentsPager() {
+  const pager = $("shipmentsPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${shipmentsListOffset.toLocaleString("pt-BR")} romaneios carregados</span><button class="secondary small-btn" onclick="loadMoreShipments()" ${!shipmentsListHasMore||shipmentsListLoading?"disabled":""}>${shipmentsListLoading?"Carregando...":"Carregar mais romaneios"}</button>`;
+  pager.classList.toggle("hidden",!shipmentsListHasMore&&!shipmentsListLoading);
+}
+
+function shipmentListUrl(offset) {
+  const search = $("shipmentSearch")?.value?.trim() || "";
+  const status = $("shipmentStatus")?.value || "";
+  return `/api/unified/shipments?limit=${SHIPMENTS_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent(search)}&status=${encodeURIComponent(status)}`;
+}
+
+function filterShipmentRows() {
+  clearTimeout(shipmentsSearchTimer);
+  shipmentsSearchTimer = setTimeout(() => searchShipments(),250);
+}
+
+async function searchShipments() {
+  const token = ++shipmentsRequestToken;
+  shipmentsListOffset = 0;
+  shipmentsListHasMore = false;
+  shipmentsListLoading = true;
+  updateShipmentsPager();
+  try {
+    const rows = await api(shipmentListUrl(0));
+    if (token !== shipmentsRequestToken || currentView !== "shipping") return;
+    const body = $("shipmentsBody");
+    if (!body) return;
+    body.innerHTML = rows.map(shipmentRowHtml).join("") || '<tr><td colspan="7">Nenhum romaneio cadastrado.</td></tr>';
+    shipmentsListOffset = rows.length;
+    shipmentsListHasMore = rows.length === SHIPMENTS_PAGE_SIZE;
+    unifiedCache.shipments = rows;
+  } catch(error) {
+    if (token === shipmentsRequestToken && currentView === "shipping") toast(error.message);
+  } finally {
+    if (token === shipmentsRequestToken) {
+      shipmentsListLoading = false;
+      updateShipmentsPager();
+    }
+  }
+}
+
+async function loadMoreShipments() {
+  if (shipmentsListLoading || !shipmentsListHasMore || currentView !== "shipping") return;
+  const token = shipmentsRequestToken;
+  const offset = shipmentsListOffset;
+  shipmentsListLoading = true;
+  updateShipmentsPager();
+  try {
+    const rows = await api(shipmentListUrl(offset));
+    if (token !== shipmentsRequestToken || currentView !== "shipping") return;
+    const body = $("shipmentsBody");
+    if (!body) return;
+    const empty = body.querySelector("td[colspan]");
+    if (empty && offset === 0) body.innerHTML = "";
+    body.insertAdjacentHTML("beforeend",rows.map(shipmentRowHtml).join(""));
+    shipmentsListOffset += rows.length;
+    shipmentsListHasMore = rows.length === SHIPMENTS_PAGE_SIZE;
+    unifiedCache.shipments = [...unifiedCache.shipments,...rows];
+  } catch(error) {
+    if (token === shipmentsRequestToken && currentView === "shipping") toast(error.message);
+  } finally {
+    if (token === shipmentsRequestToken) {
+      shipmentsListLoading = false;
+      updateShipmentsPager();
+    }
+  }
+}
+
 function showShipmentForm(){
   $("shipmentForm").classList.remove("hidden");
   $("shipmentForm").innerHTML=`<div class="shipping-form-title"><div><b>Novo romaneio</b><span>Preencha os dados conhecidos agora; o restante pode ser concluído depois.</span></div><button class="ghost small-btn" onclick="$('shipmentForm').classList.add('hidden')">Fechar</button></div>
