@@ -1,5 +1,6 @@
 let currentUser = JSON.parse(localStorage.getItem("cl_recebimento_user") || "null");
 let currentView = "dashboard";
+let navigationVersion = 0;
 let currentCardId = null;
 let cardData = null;
 let receivingPhotos = [];
@@ -104,7 +105,9 @@ function activeNav(view) {
 
 async function goTo(view) {
   currentView = view;
+  const requestVersion = ++navigationVersion;
   activeNav(view);
+  $("mainContent").innerHTML = '<div class="state-panel"><span class="spinner-dot"></span><b>Carregando tela...</b><span>Preparando os dados necessários.</span></div>';
   try {
     if (view === "dashboard") await renderDashboard();
     if (view === "receiving") await renderCards("receiving");
@@ -136,6 +139,7 @@ async function goTo(view) {
     if (view === "chat") await renderChat();
     if (view === "calendar") await renderCalendar();
   } catch (error) {
+    if (requestVersion !== navigationVersion || currentView !== view) return;
     console.error(error);
     $("mainContent").innerHTML = `<div class="state-panel error-state"><b>Não foi possível carregar esta visão.</b><span>${esc(error.message)}</span><button class="primary" onclick="refreshCurrentView()">Tentar novamente</button></div>`;
   }
@@ -247,9 +251,13 @@ async function renderCards(scope) {
   const title = quality ? "Qualidade" : processing ? "Processamento" : labeling ? "Etiquetagem" : storage ? "Estocagem" : "Recebimento";
   const subtitle = quality ? "Inspeção ágil e preenchimento guiado" : processing ? "Seleção compacta de materiais" : labeling ? "Grade por tamanho; Saldo por quantidade" : storage ? "Entrada em estoque por tamanho ou saldo geral" : "Controle geral da produção e posição real de cada item";
   setPage(title, subtitle);
-  const cards = await api(`/api/cards?scope=${scope}`);
-  const metrics = ["receiving","quality","processing"].includes(scope)
-    ? metricCardsHtml(scope, (await api("/api/dashboard")).totals) : "";
+  const needsMetrics = ["receiving","quality","processing"].includes(scope);
+  const [cards, dashboard] = await Promise.all([
+    api(`/api/cards?scope=${scope}`),
+    needsMetrics ? api("/api/dashboard") : Promise.resolve({totals:{}})
+  ]);
+  if (currentView !== scope) return;
+  const metrics = needsMetrics ? metricCardsHtml(scope, dashboard.totals) : "";
   if (["receiving","quality","processing","labeling","storage"].includes(scope)) {
     const tabs = storage ? moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage") : "";
     $("mainContent").innerHTML = tabs + metrics + processingQueueHtml(cards, scope);
@@ -1929,10 +1937,15 @@ async function renderDashboard() {
   const [data,unified,warehouseSummary,quality,processing,returns] = await Promise.all([
     safeApi("/api/dashboard",{totals:{receiving:0,quality:0,processing:0,storage:0},recent:[],status_counts:[]}),
     safeApi("/api/unified/overview",{warehouse:{percentage:0},tasks:{},returns:{},sgo:{},recent_movements:[]}),
-    safeApi("/api/unified/warehouse/summary",{genders:[]}),
-    safeApi("/api/cards?scope=quality",[]),safeApi("/api/cards?scope=processing",[]),safeApi("/api/unified/returns",[])
+    safeApi("/api/unified/warehouse/summary",{genders:[],zones:[],totals:{}}),
+    safeApi("/api/cards?scope=quality&limit=5",[]),
+    safeApi("/api/cards?scope=processing&limit=5",[]),
+    safeApi("/api/unified/returns?limit=5",[])
   ]);
+  if (currentView !== "dashboard") return;
   const active=[...processing,...data.recent.filter(c=>["QUALIDADE","PROCESSAMENTO","ETIQUETAGEM"].includes(c.current_sector))].filter((c,i,a)=>a.findIndex(x=>x.id===c.id)===i).slice(0,5);
+  const returnCounts=unified.returns||{};
+  const openReturns=Object.entries(returnCounts).reduce((sum,[status,count])=>sum+(status==="CONCLUIDA"?0:Number(count||0)),0);
   $("mainContent").innerHTML=`<div class="reference-dashboard">
     <div class="hero-kpis">
       ${heroKpi("Aguardando recebimento",data.totals.receiving,"Pedidos","▣","blue","receiving")}
@@ -1946,9 +1959,9 @@ async function renderDashboard() {
       ${dashboardPanel("⌁","Estoque conectado",`<span class="online-pill">Online</span>`,gendersTable(warehouseSummary.genders))}
     </div>
     <div class="dash-row dash-row-secondary">
-      ${dashboardPanel("◇","Qualidade",`<span class="panel-count">${quality.length}</span>`,qualityTable(quality.slice(0,5)))}
-      ${dashboardPanel("⚙","Processamento",`<span class="panel-count">${processing.length}</span>`,processingTable(processing.slice(0,5)))}
-      ${dashboardPanel("↩","Devoluções",`<span class="panel-count red-count">${returns.filter(r=>r.status!=="CONCLUIDA").length}</span>`,returnsTable(returns.slice(0,5)))}
+      ${dashboardPanel("◇","Qualidade",`<span class="panel-count">${data.totals.quality||0}</span>`,qualityTable(quality.slice(0,5)))}
+      ${dashboardPanel("⚙","Processamento",`<span class="panel-count">${data.totals.processing||0}</span>`,processingTable(processing.slice(0,5)))}
+      ${dashboardPanel("↩","Devoluções",`<span class="panel-count red-count">${openReturns}</span>`,returnsTable(returns.slice(0,5)))}
     </div>
     <div class="flow-strip">${[["🛒","Compras","import"],["⇩","Recebimento","receiving"],["◇","Qualidade","quality"],["⚙","Processamento","processing"],["♢","Etiquetagem","labeling"],["⌂","Estocagem","storage-hub"],["▣","Expedição / Devolução","returns-hub"]].map(([icon,label,view],i)=>`${i?'<i>→</i>':''}<button onclick="goTo('${view}')"><b>${icon}</b><span>${label}</span>${i===1?'<small>+ 10%</small>':''}</button>`).join("")}</div>
   </div>`;
