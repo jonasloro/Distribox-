@@ -1632,7 +1632,7 @@ def manual_card_reference(source_notes: Any) -> str:
 
 
 @app.get("/api/cards")
-def list_cards(scope: str = "receiving", search: str = "", limit: int = 0, offset: int = 0):
+def list_cards(scope: str = "receiving", search: str = "", limit: int = 0, offset: int = 0, purchase_mode: str = "", activity: str = "", brand: str = ""):
     con = db_connect()
     sql = """SELECT c.id,c.purchase_id,c.supplier,c.original_type,c.purchase_mode,c.brand,c.forecast_date,c.current_sector,c.status,
              c.receiving_type,c.quality_destination,c.casulo_current,c.source_location_summary,c.source_snapshot_at,c.source_notes,c.updated_at,
@@ -1658,6 +1658,38 @@ def list_cards(scope: str = "receiving", search: str = "", limit: int = 0, offse
         sql += " AND (c.purchase_id LIKE ? OR c.supplier LIKE ? OR c.brand LIKE ? OR c.casulo_current LIKE ? OR i.product LIKE ? OR i.reference LIKE ? OR i.sku LIKE ?)"
         q = f"%{search}%"
         params.extend([q, q, q, q, q, q, q])
+    if purchase_mode:
+        sql += " AND UPPER(COALESCE(c.purchase_mode,''))=?"
+        params.append(purchase_mode.strip().upper())
+    if brand:
+        sql += " AND c.brand=?"
+        params.append(brand)
+    activity = activity.strip().upper()
+    if activity in {"AGUARDANDO", "ATIVO", "PAUSADO"}:
+        if scope == "receiving":
+            receiving_activity_sql = "(SELECT r.ten_percent_status FROM receivings r WHERE r.card_id=c.id ORDER BY r.id DESC LIMIT 1)"
+            if activity == "PAUSADO":
+                sql += f" AND {receiving_activity_sql}='PAUSADA'"
+            elif activity == "ATIVO":
+                sql += f" AND {receiving_activity_sql}='EM_ANDAMENTO'"
+            else:
+                sql += f" AND COALESCE({receiving_activity_sql},'PENDENTE') NOT IN ('PAUSADA','EM_ANDAMENTO')"
+        elif scope == "quality":
+            if activity == "PAUSADO":
+                sql += " AND c.status='INSPECAO_PAUSADA'"
+            elif activity == "ATIVO":
+                sql += " AND c.status IN ('EM_INSPECAO','AGUARDANDO_CONCLUSAO_QUALIDADE')"
+            else:
+                sql += " AND c.status NOT IN ('INSPECAO_PAUSADA','EM_INSPECAO','AGUARDANDO_CONCLUSAO_QUALIDADE')"
+        elif scope == "processing":
+            if activity == "ATIVO":
+                sql += " AND c.status='EM_PROCESSAMENTO'"
+            elif activity == "PAUSADO":
+                sql += " AND c.status='PROCESSAMENTO_PAUSADO'"
+            else:
+                sql += " AND c.status NOT IN ('EM_PROCESSAMENTO','PROCESSAMENTO_PAUSADO')"
+        elif activity != "AGUARDANDO":
+            sql += " AND 1=0"
     sql += " GROUP BY c.id ORDER BY c.updated_at DESC"
     if limit:
         sql += " LIMIT ? OFFSET ?"
@@ -1679,6 +1711,26 @@ def list_cards(scope: str = "receiving", search: str = "", limit: int = 0, offse
         item["in_transit"] = transit.get(item["id"], False)
         result.append(item)
     return result
+
+
+@app.get("/api/cards/brands")
+def list_card_brands(scope: str = "receiving"):
+    con = db_connect()
+    sql = "SELECT DISTINCT c.brand FROM cards c WHERE c.brand IS NOT NULL AND TRIM(c.brand)!=''"
+    params: list[Any] = []
+    if scope == "receiving":
+        sql += " AND (c.current_sector='RECEBIMENTO' OR c.source_snapshot_at IS NOT NULL)"
+    elif scope == "quality":
+        sql += " AND (c.current_sector='QUALIDADE' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO')))"
+    elif scope == "processing":
+        sql += " AND (c.current_sector='PROCESSAMENTO' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO')))"
+    elif scope == "labeling":
+        sql += " AND (c.current_sector='ETIQUETAGEM' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage='ETIQUETAGEM'))"
+    elif scope == "storage":
+        sql += " AND (c.current_sector='ESTOCAGEM' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage='ESTOCAGEM'))"
+    rows = con.execute(sql + " ORDER BY c.brand COLLATE NOCASE", params).fetchall()
+    con.close()
+    return [row["brand"] for row in rows]
 
 
 
