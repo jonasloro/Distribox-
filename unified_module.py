@@ -310,8 +310,12 @@ def register_unified_routes(app) -> None:
                     cur.execute(
                         """SELECT COALESCE(z.gender,'Sem gênero') AS gender,
                            COALESCE(SUM(z.capacity),0) AS capacity,
-                           COALESCE(SUM(l.occupied_qty),0) AS occupied
-                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                           COALESCE(SUM(loc.occupied),0) AS occupied
+                           FROM warehouse_zones z
+                           LEFT JOIN (
+                             SELECT zone_id,SUM(occupied_qty) AS occupied
+                             FROM warehouse_locations GROUP BY zone_id
+                           ) loc ON loc.zone_id=z.id
                            WHERE z.active GROUP BY z.gender ORDER BY z.gender"""
                     )
                     gender_rows = cur.fetchall()
