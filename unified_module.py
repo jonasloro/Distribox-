@@ -329,7 +329,7 @@ def register_unified_routes(app) -> None:
                         """SELECT COALESCE(SUM(l.capacity),0) AS capacity,
                            COALESCE(SUM(l.occupied_qty),0) AS occupied,COUNT(l.id) AS locations,
                            COUNT(l.id) FILTER (WHERE l.occupied_qty>0) AS occupied_locations,
-                           COUNT(l.id) FILTER (WHERE l.occupied_qty<l.capacity AND l.status<>'BLOQUEADO') AS available_locations
+                           COUNT(l.id) FILTER (WHERE l.status='DISPONIVEL') AS available_locations
                            FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
                            WHERE z.active"""
                     )
@@ -377,7 +377,7 @@ def register_unified_routes(app) -> None:
         }
 
     @app.get("/api/unified/warehouse")
-    def warehouse(search: str = "", zone: str = "", status: str = "", limit: int = 0, offset: int = 0, available_only: bool = False):
+    def warehouse(search: str = "", zone: str = "", status: str = "", limit: int = 100, offset: int = 0, available_only: bool = False):
         """Consulta endereços com paginação opcional; os resumos não devem baixar o CD inteiro."""
         where = """ FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
         args: list[Any] = []
@@ -394,7 +394,7 @@ def register_unified_routes(app) -> None:
         if available_only:
             where += " AND l.occupied_qty<l.capacity AND l.status<>'BLOQUEADO'"
 
-        safe_limit = max(1, min(int(limit), 200)) if limit else 0
+        safe_limit = max(1, min(int(limit or 100), 200))
         safe_offset = max(0, int(offset))
         with pg_connect() as con:
             with con.cursor() as cur:
@@ -403,9 +403,8 @@ def register_unified_routes(app) -> None:
                 sql = """SELECT l.*,z.code AS zone_code,z.name AS zone_name,
                          CASE WHEN l.capacity>0 THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy""" + where + " ORDER BY z.code,l.column_no,l.level_no,l.id"
                 page_args = list(args)
-                if safe_limit:
-                    sql += " LIMIT %s OFFSET %s"
-                    page_args.extend([safe_limit, safe_offset])
+                sql += " LIMIT %s OFFSET %s"
+                page_args.extend([safe_limit, safe_offset])
                 cur.execute(sql, page_args)
                 locations = cur.fetchall()
                 cur.execute(
