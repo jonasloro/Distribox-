@@ -377,7 +377,7 @@ def register_unified_routes(app) -> None:
         }
 
     @app.get("/api/unified/warehouse")
-    def warehouse(search: str = "", zone: str = "", status: str = "", limit: int = 100, offset: int = 0, available_only: bool = False):
+    def warehouse(search: str = "", zone: str = "", status: str = "", limit: int = 100, offset: int = 0, available_only: bool = False, include_zones: bool = True):
         """Consulta endereços com paginação opcional; os resumos não devem baixar o CD inteiro."""
         where = """ FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
         args: list[Any] = []
@@ -407,13 +407,15 @@ def register_unified_routes(app) -> None:
                 page_args.extend([safe_limit, safe_offset])
                 cur.execute(sql, page_args)
                 locations = cur.fetchall()
-                cur.execute(
-                    """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) AS occupied,
-                       CASE WHEN z.capacity>0 THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1) ELSE 0 END AS occupancy
-                       FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
-                       WHERE z.active GROUP BY z.id ORDER BY z.code"""
-                )
-                zones = cur.fetchall()
+                zones = []
+                if include_zones:
+                    cur.execute(
+                        """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) AS occupied,
+                           CASE WHEN z.capacity>0 THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1) ELSE 0 END AS occupancy
+                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                           WHERE z.active GROUP BY z.id ORDER BY z.code"""
+                    )
+                    zones = cur.fetchall()
         return {
             "zones": zones,
             "locations": locations,
