@@ -262,6 +262,11 @@ def init_unified_db() -> None:
     # supabase_module.seed_warehouse_supabase, chamada no startup do
     # app.py). As tabelas continuam existindo no SQLite só por
     # compatibilidade com o schema antigo, mas ficam vazias e sem uso.
+    # Índices para listas operacionais e detalhes de romaneio.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sgo_forecast_order ON sgo_entries(COALESCE(forecast_date,'9999-12-31'),id DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sgo_status_forecast ON sgo_entries(status,forecast_date,id DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_shipment_items_shipment ON shipment_items(shipment_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status_sector ON operational_tasks(status,sector)")
     con.commit()
     con.close()
 
