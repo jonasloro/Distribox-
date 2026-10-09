@@ -740,6 +740,22 @@ def register_unified_routes(app) -> None:
             args.extend([max(1,min(int(limit),1000)),max(0,int(offset))])
         rows=[dict(r) for r in con.execute(sql,args).fetchall()];con.close();return rows
 
+    @app.get("/api/unified/returns/analytics")
+    def returns_analytics():
+        con = db_connect()
+        totals = con.execute("""SELECT COUNT(*) AS total,
+            COALESCE(SUM(total_store),0) AS total_store,
+            COALESCE(SUM(total_cd),0) AS total_cd,
+            COALESCE(SUM(total_anapolis),0) AS total_anapolis,
+            COALESCE(SUM(difference),0) AS difference FROM returns""").fetchone()
+        statuses = con.execute("SELECT status,COUNT(*) AS quantity FROM returns GROUP BY status").fetchall()
+        stores = con.execute("""SELECT COALESCE(NULLIF(TRIM(store),''),NULLIF(TRIM(customer),''),'Não informada') AS label,
+            COALESCE(SUM(total_store),0) AS value FROM returns
+            GROUP BY COALESCE(NULLIF(TRIM(store),''),NULLIF(TRIM(customer),''),'Não informada')
+            ORDER BY value DESC LIMIT 50""").fetchall()
+        con.close()
+        return {"totals": dict(totals), "by_status": [dict(row) for row in statuses], "by_store": [dict(row) for row in stores]}
+
     @app.get("/api/unified/returns/{return_id}")
     def return_detail(return_id:int):
         con=db_connect();head=con.execute("SELECT * FROM returns WHERE id=?",(return_id,)).fetchone()
