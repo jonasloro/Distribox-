@@ -2270,12 +2270,59 @@ async function prodRenderQuadro(body){
   </div>`;
 }
 
-async function renderStorageHub(){setPage("Estocagem","");const [cards,warehouse,analytics]=await Promise.all([safeApi('/api/cards?scope=storage',[]),safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const occupied=warehouse.locations.filter(l=>l.occupied_qty>0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}<div class="hero-kpis storage-kpis">${heroKpi("Aguardando estocagem",cards.length,"Cards","⌂","blue","storage")}${heroKpi("Endereços ocupados",occupied.length,"Casulos","▦","teal","warehouse")}${heroKpi("Endereços livres",warehouse.locations.filter(l=>l.status==='DISPONIVEL').length,"Casulos","◇","blue","warehouse")}<div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${warehouse.zones.length?Math.round(warehouse.zones.reduce((a,z)=>a+z.occupancy,0)/warehouse.zones.length):0}%</strong><small>Capacidade cadastrada</small></div></div></div><div class="dash-row storage-layout">${dashboardPanel("▦","Visualizador de casulos","",zonesTable(warehouse.zones))}${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Digite endereço, marca ou categoria" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.slice(0,12).map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}</div><section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;}
+async function renderStorageHub() {
+  setPage("Estocagem","");
+  const [dashboard,warehouse,analytics] = await Promise.all([
+    safeApi("/api/dashboard",{totals:{storage:0}}),
+    safeApi("/api/unified/warehouse/summary",{zones:[],totals:{},occupied_preview:[]}),
+    safeApi("/api/unified/warehouse/analytics",{structures:[],categories:[],brands:[],groups:[]})
+  ]);
+  if (currentView !== "storage-hub") return;
+  const totals = warehouse.totals || {};
+  const occupied = warehouse.occupied_preview || [];
+  const zones = warehouse.zones || [];
+  const avgOccupancy = zones.length ? Math.round(zones.reduce((sum,z)=>sum+Number(z.occupancy||0),0)/zones.length) : 0;
+  $("mainContent").innerHTML = `
+    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}
+    <div class="hero-kpis storage-kpis">
+      ${heroKpi("Aguardando estocagem",dashboard.totals.storage||0,"Cards","⌂","blue","storage")}
+      ${heroKpi("Endereços ocupados",totals.occupied_locations||0,"Casulos","▦","teal","warehouse")}
+      ${heroKpi("Endereços livres",totals.available_locations||0,"Casulos","◇","blue","warehouse")}
+      <div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${avgOccupancy}%</strong><small>Capacidade cadastrada</small></div></div>
+    </div>
+    <div class="dash-row storage-layout">
+      ${dashboardPanel("▦","Visualizador de casulos","",zonesTable(zones))}
+      ${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Filtrar endereços ocupados" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}
+    </div>
+    <section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;
+}
 function moduleTabs(items,current){if(items.some(([,view])=>view==="warehouse")&&!items.some(([,view])=>view==="warehouse-heatmap")){const position=items.findIndex(([,view])=>view==="warehouse")+1;items=[...items.slice(0,position),["Mapa de Calor","warehouse-heatmap"],...items.slice(position)];}return `<div class="module-tabs">${items.map(([label,view])=>`<button class="${view===current?'active':''}" onclick="goTo('${view}')">${label}</button>`).join('')}</div>`;}
 function filterStockQuick(){const t=normalizeSearch($("stockQuickSearch")?.value||'');document.querySelectorAll('.stock-quick-row').forEach(r=>r.classList.toggle('hidden',t&&!r.dataset.search.includes(t)));}
 async function importStockGroupReport(input){if(!input.files?.[0])return;const form=new FormData();form.append('file',input.files[0]);try{const d=await api(`/api/unified/warehouse/import-group-report?user_id=${currentUser.id}`,{method:'POST',body:form});toast(`${d.groups} grupos e ${d.total_qty} peças importados.`);renderStorageHub();}catch(e){toast(e.message)}}
 
-async function renderStockStatistics(){setPage("Estatísticas de Casulos","");const [warehouse,a]=await Promise.all([safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const cap=warehouse.locations.reduce((s,l)=>s+Number(l.capacity),0),occ=warehouse.locations.reduce((s,l)=>s+Number(l.occupied_qty),0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"stock-stats")}<div class="hero-kpis">${heroKpi("Total de casulos",warehouse.locations.length,"Estrutura física","▦","blue","warehouse")}${heroKpi("Capacidade estimada",cap.toLocaleString('pt-BR'),"Peças","⌂","teal","storage-hub")}${heroKpi("Ocupação real",occ.toLocaleString('pt-BR'),"Peças","◇","blue","storage-hub")}${heroKpi("Disponibilidade",Math.max(0,cap-occ).toLocaleString('pt-BR'),"Peças","＋","teal","capacity-simulator")}</div><div class="dash-row analytics-grid">${analyticsBars("Estruturas",a.structures.map(x=>({label:x.label,value:x.locations,hint:`${x.occupied}/${x.capacity}`})))}${analyticsBars("Estoque por categoria",a.categories.map(x=>({label:x.label,value:x.quantity})))}${analyticsBars("Estoque por marca",a.brands.map(x=>({label:x.label,value:x.quantity})))}</div>${a.groups?.length?dashboardPanel("▣","Último relatório por grupo",`<span>${esc(a.latest_report?.filename||'')}</span>`,analyticsBarsBody(a.groups.map(x=>({label:x.group_name,value:x.quantity,hint:x.gender})))):''}`;}
+async function renderStockStatistics() {
+  setPage("Estatísticas de Casulos","");
+  const [warehouse,a] = await Promise.all([
+    safeApi('/api/unified/warehouse/summary',{totals:{},zones:[]}),
+    safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})
+  ]);
+  if (currentView !== "stock-stats") return;
+  const totals = warehouse.totals || {};
+  const capacity = Number(totals.capacity||0), occupied = Number(totals.occupied||0);
+  $("mainContent").innerHTML = `${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"stock-stats")}
+    <div class="hero-kpis">
+      ${heroKpi("Total de casulos",Number(totals.locations||0).toLocaleString('pt-BR'),"Estrutura física","▦","blue","warehouse")}
+      ${heroKpi("Capacidade estimada",capacity.toLocaleString('pt-BR'),"Peças","⌂","teal","storage-hub")}
+      ${heroKpi("Ocupação real",occupied.toLocaleString('pt-BR'),"Peças","◇","blue","storage-hub")}
+      ${heroKpi("Disponibilidade",Math.max(0,capacity-occupied).toLocaleString('pt-BR'),"Peças","＋","teal","capacity-simulator")}
+    </div>
+    <div class="dash-row analytics-grid">
+      ${analyticsBars("Estruturas",a.structures.map(x=>({label:x.label,value:x.locations,hint:`${x.occupied}/${x.capacity}`})))}
+      ${analyticsBars("Estoque por categoria",a.categories.map(x=>({label:x.label,value:x.quantity})))}
+      ${analyticsBars("Estoque por marca",a.brands.map(x=>({label:x.label,value:x.quantity})))}
+    </div>
+    ${a.groups?.length?dashboardPanel("▣","Último relatório por grupo",`<span>${esc(a.latest_report?.filename||'')}</span>`,analyticsBarsBody(a.groups.map(x=>({label:x.group_name,value:x.quantity,hint:x.gender})))):''}`;
+}
 function analyticsBars(title,rows){return dashboardPanel("▥",title,"",analyticsBarsBody(rows));}
 function analyticsBarsBody(rows){const max=Math.max(1,...rows.map(r=>Number(r.value)||0));return `<div class="analytics-bars">${rows.slice(0,15).map(r=>`<div><span>${esc(r.label)}</span><i><b style="width:${Number(r.value)*100/max}%"></b></i><strong>${Number(r.value).toLocaleString('pt-BR')}</strong><small>${esc(r.hint||'')}</small></div>`).join('')||'<div class="empty-visual">Sem dados para exibir.</div>'}</div>`;}
 
