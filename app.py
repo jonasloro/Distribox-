@@ -85,6 +85,7 @@ async def persist_card_state(request: Request, call_next):
         or path == "/api/cards"
         or path.startswith("/api/cards/")
         or path.startswith("/api/receivings/")
+        or path.startswith("/api/quality/")
         or path.startswith("/api/processing/")
         or path.startswith("/api/downstream/")
         or path.startswith("/api/test/cards/")
