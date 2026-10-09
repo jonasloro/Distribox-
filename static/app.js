@@ -31,6 +31,12 @@ let shipmentsListHasMore = false;
 let shipmentsListLoading = false;
 let shipmentsRequestToken = 0;
 let shipmentsSearchTimer = null;
+const SGO_PAGE_SIZE = 100;
+let sgoListOffset = 0;
+let sgoListHasMore = false;
+let sgoListLoading = false;
+let sgoRequestToken = 0;
+let sgoSearchTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -2073,8 +2079,94 @@ async function renderWarehouseHeatmap(){
   $("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse-heatmap")}<div class="heatmap-legend"><span><i style="background:#2a3646"></i>Vazio</span><span><i style="background:#16803c"></i>Baixa</span><span><i style="background:#f5c400"></i>Média</span><span><i style="background:#e98b08"></i>Alta</span><span><i style="background:#d92d20"></i>Quase cheio</span></div>${streets||'<div class="empty-visual">Nenhum casulo cadastrado.</div>'}`;
 }
 
-async function renderSgo(){setPage("SGO e Entradas","Previsão de compras e distribuição de serviço por setor");const rows=await api("/api/unified/sgo");if(currentView!=="sgo")return;unifiedCache.sgo=rows;const counts=Object.fromEntries(["EM_TRANSITO","QUALIDADE","PROCESSAMENTO","ESTOCAGEM","CONCLUIDO"].map(s=>[s,rows.filter(r=>r.status===s).length]));$("mainContent").innerHTML=`<div class="kpi-grid compact-kpis">${Object.entries(counts).map(([s,n])=>`<div class="kpi"><div class="kpi-label">${s.replaceAll('_',' ')}</div><div class="kpi-value">${n}</div></div>`).join("")}</div><div class="panel" style="margin-top:14px"><div class="panel-header">Relatório SGO <button class="primary small-btn" onclick="document.getElementById('sgoFile').click()">Importar Excel</button><input id="sgoFile" class="hidden" type="file" accept=".xlsx,.xlsm" onchange="importSgo(this)"></div><div class="panel-body"><div class="queue-search"><span>⌕</span><input id="sgoSearch" placeholder="Compra, grupo, descrição ou marca" oninput="filterSgoRows()"></div></div><div class="table-wrap"><table class="compact-table"><thead><tr><th>Compra</th><th>Grupo / descrição</th><th>Marca</th><th>Quantidade</th><th>Previsão</th><th>Etapa</th><th>Ação</th></tr></thead><tbody>${rows.map(r=>`<tr class="sgo-row" data-search="${esc(normalizeSearch([r.purchase_id,r.group_name,r.description,r.brand].join(' ')))}"><td><b>${esc(r.purchase_id||'—')}</b><small>${esc(r.origin||'')}</small></td><td><b>${esc(r.group_name||'—')}</b><small>${esc(r.description||'')}</small></td><td>${esc(r.brand||'—')}</td><td><b>${r.quantity}</b></td><td>${esc(r.forecast_date||'—')}</td><td>${statusBadge(r.status)}</td><td><button class="secondary small-btn" onclick="createSgoTask(${r.id},'${r.status}')">Criar tarefa</button></td></tr>`).join("")||'<tr><td colspan="7">Importe um relatório SGO para iniciar.</td></tr>'}</tbody></table></div></div>`;}
-function filterSgoRows(){const t=normalizeSearch($("sgoSearch")?.value||"");document.querySelectorAll(".sgo-row").forEach(r=>r.classList.toggle("hidden",t&&!r.dataset.search.includes(t)));}
+async function renderSgo() {
+  setPage("SGO e Entradas","Previsão de compras e distribuição de serviço por setor");
+  const [rows,summary] = await Promise.all([
+    api(`/api/unified/sgo?limit=${SGO_PAGE_SIZE}&offset=0`),
+    api("/api/unified/sgo/summary")
+  ]);
+  if (currentView !== "sgo") return;
+  unifiedCache.sgo = rows;
+  sgoListOffset = rows.length;
+  sgoListHasMore = rows.length === SGO_PAGE_SIZE;
+  sgoListLoading = false;
+  const counts = Object.fromEntries((summary.by_status||[]).map(row=>[row.status,Number(row.count||0)]));
+  $("mainContent").innerHTML = `
+    <div class="kpi-grid compact-kpis">${["EM_TRANSITO","QUALIDADE","PROCESSAMENTO","ESTOCAGEM","CONCLUIDO"].map(status=>`<div class="kpi"><div class="kpi-label">${status.replaceAll('_',' ')}</div><div class="kpi-value">${counts[status]||0}</div></div>`).join("")}</div>
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-header">Relatório SGO <button class="primary small-btn" onclick="document.getElementById('sgoFile').click()">Importar Excel</button><input id="sgoFile" class="hidden" type="file" accept=".xlsx,.xlsm" onchange="importSgo(this)"></div>
+      <div class="panel-body"><div class="queue-search"><span>⌕</span><input id="sgoSearch" placeholder="Compra, grupo, descrição ou marca" oninput="filterSgoRows()"></div></div>
+      <div class="table-wrap"><table class="compact-table"><thead><tr><th>Compra</th><th>Grupo / descrição</th><th>Marca</th><th>Quantidade</th><th>Previsão</th><th>Etapa</th><th>Ação</th></tr></thead><tbody id="sgoBody">${rows.map(sgoRowHtml).join("")||'<tr><td colspan="7">Importe um relatório SGO para iniciar.</td></tr>'}</tbody></table></div>
+      <div id="sgoPager" class="panel-body warehouse-pager"></div>
+    </div>`;
+  updateSgoPager();
+}
+
+function sgoRowHtml(row) {
+  return `<tr class="sgo-row"><td><b>${esc(row.purchase_id||'—')}</b><small>${esc(row.origin||'')}</small></td><td><b>${esc(row.group_name||'—')}</b><small>${esc(row.description||'')}</small></td><td>${esc(row.brand||'—')}</td><td><b>${row.quantity}</b></td><td>${esc(row.forecast_date||'—')}</td><td>${statusBadge(row.status)}</td><td><button class="secondary small-btn" onclick="createSgoTask(${row.id},'${row.status}')">Criar tarefa</button></td></tr>`;
+}
+
+function sgoListUrl(offset) {
+  return `/api/unified/sgo?limit=${SGO_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent($("sgoSearch")?.value?.trim()||"")}`;
+}
+
+function updateSgoPager() {
+  const pager = $("sgoPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${sgoListOffset.toLocaleString("pt-BR")} entradas carregadas</span><button class="secondary small-btn" onclick="loadMoreSgo()" ${!sgoListHasMore||sgoListLoading?"disabled":""}>${sgoListLoading?"Carregando...":"Carregar mais entradas"}</button>`;
+  pager.classList.toggle("hidden",!sgoListHasMore&&!sgoListLoading);
+}
+
+function filterSgoRows() {
+  clearTimeout(sgoSearchTimer);
+  sgoSearchTimer = setTimeout(() => searchSgo(),250);
+}
+
+async function searchSgo() {
+  const token = ++sgoRequestToken;
+  sgoListOffset = 0;
+  sgoListHasMore = false;
+  sgoListLoading = true;
+  updateSgoPager();
+  try {
+    const rows = await api(sgoListUrl(0));
+    if (token !== sgoRequestToken || currentView !== "sgo") return;
+    const body = $("sgoBody");
+    if (!body) return;
+    body.innerHTML = rows.map(sgoRowHtml).join("") || '<tr><td colspan="7">Nenhuma entrada encontrada.</td></tr>';
+    sgoListOffset = rows.length;
+    sgoListHasMore = rows.length === SGO_PAGE_SIZE;
+    unifiedCache.sgo = rows;
+  } catch(error) {
+    if (token === sgoRequestToken && currentView === "sgo") toast(error.message);
+  } finally {
+    if (token === sgoRequestToken) {
+      sgoListLoading = false;
+      updateSgoPager();
+    }
+  }
+}
+
+async function loadMoreSgo() {
+  if (sgoListLoading||!sgoListHasMore||currentView!=="sgo")return;
+  const token=sgoRequestToken,offset=sgoListOffset;
+  sgoListLoading=true;updateSgoPager();
+  try {
+    const rows=await api(sgoListUrl(offset));
+    if(token!==sgoRequestToken||currentView!=="sgo")return;
+    const body=$("sgoBody");if(!body)return;
+    const empty=body.querySelector("td[colspan]");
+    if(empty&&offset===0)body.innerHTML="";
+    body.insertAdjacentHTML("beforeend",rows.map(sgoRowHtml).join(""));
+    sgoListOffset+=rows.length;sgoListHasMore=rows.length===SGO_PAGE_SIZE;
+    unifiedCache.sgo=[...unifiedCache.sgo,...rows];
+  } catch(error) {
+    if(token===sgoRequestToken&&currentView==="sgo")toast(error.message);
+  } finally {
+    if(token===sgoRequestToken){sgoListLoading=false;updateSgoPager();}
+  }
+}
+
 async function importSgo(input){if(!input.files?.[0])return;const form=new FormData();form.append("file",input.files[0]);try{const d=await api(`/api/unified/sgo/import?user_id=${currentUser.id}`,{method:"POST",body:form});toast(`${d.rows} entradas SGO importadas.`);renderSgo();}catch(e){toast(e.message)}}
 async function createSgoTask(id,status){const sector=prompt("Setor da tarefa:",status||"RECEBIMENTO");if(!sector)return;try{await api(`/api/unified/sgo/${id}/task`,{method:"POST",body:JSON.stringify({user_id:currentUser.id,sector})});toast("Tarefa criada.");}catch(e){toast(e.message)}}
 
@@ -2622,7 +2714,27 @@ async function searchSimulationLocations() {
 }
 function calculateCapacitySimulation(){const option=$("simLocation")?.selectedOptions?.[0],qty=Number($("simQty")?.value||0);if(!option?.value)return;const cap=Number(option.dataset.cap),occ=Number(option.dataset.occ),after=occ+qty,pct=cap?Math.round(after*100/cap):0,excess=Math.max(0,after-cap);$("simResult").innerHTML=`<div class="capacity-gauge"><i style="width:${Math.min(100,pct)}%" class="${excess?'danger-fill':pct>80?'warn-fill':''}"></i></div><strong>${pct}% após a entrada</strong><span>${occ} atuais + ${qty} novas = ${after} de ${cap}</span>${excess?`<b class="text-danger">Excede a capacidade em ${excess} peças.</b>`:'<b class="text-success">Entrada compatível com a capacidade.</b>'}`;}
 
-async function renderSgoIndicators(){setPage("SGO e Indicadores","");const [rows,tasks]=await Promise.all([safeApi('/api/unified/sgo',[]),safeApi('/api/unified/tasks',[])]);if(currentView!=="sgo-indicators")return;const total=rows.reduce((a,r)=>a+Number(r.quantity||0),0),late=rows.filter(r=>r.forecast_date&&new Date(r.forecast_date)<new Date()&&r.status!=='CONCLUIDO');const byStatus=Object.entries(rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+Number(r.quantity||0),a),{})).map(([label,value])=>({label,value}));$("mainContent").innerHTML=`${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}<div class="hero-kpis">${heroKpi("Entradas previstas",rows.length,"Compras / lotes","⇩","blue","sgo")}${heroKpi("Peças previstas",total.toLocaleString('pt-BR'),"Quantidade SGO","▣","teal","sgo")}${heroKpi("Previsões atrasadas",late.length,"Requer atenção","!","blue","sgo")}${heroKpi("Tarefas abertas",tasks.filter(t=>t.status!=='CONCLUIDA').length,"Operação","☑","teal","tasks")}</div><div class="dash-row indicators-layout">${analyticsBars("Distribuição por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${rows.length}</span>`,awaitingTable(rows.slice(0,10),[]))}</div>`;}
+async function renderSgoIndicators() {
+  setPage("SGO e Indicadores","");
+  const [summary,tasks,upcoming] = await Promise.all([
+    safeApi("/api/unified/sgo/summary",{totals:{},by_status:[]}),
+    safeApi("/api/unified/tasks",[]),
+    safeApi("/api/unified/sgo?limit=10&offset=0",[])
+  ]);
+  if (currentView !== "sgo-indicators") return;
+  const totals = summary.totals || {};
+  const byStatus = (summary.by_status||[]).map(row=>({label:row.status,value:Number(row.quantity||0)}));
+  const late = Number(totals.overdue_count||0);
+  const taskOpen = tasks.filter(task=>task.status!=="CONCLUIDA").length;
+  $("mainContent").innerHTML = `${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}
+    <div class="hero-kpis">
+      ${heroKpi("Entradas previstas",Number(totals.total_count||0).toLocaleString("pt-BR"),"Compras / lotes","⇩","blue","sgo")}
+      ${heroKpi("Peças previstas",Number(totals.total_quantity||0).toLocaleString("pt-BR"),"Quantidade SGO","▣","teal","sgo")}
+      ${heroKpi("Previsões atrasadas",late.toLocaleString("pt-BR"),"Requer atenção","!","blue","sgo")}
+      ${heroKpi("Tarefas abertas",taskOpen.toLocaleString("pt-BR"),"Operação","☑","teal","tasks")}
+    </div>
+    <div class="dash-row indicators-layout">${analyticsBars("Peças por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${Number(totals.total_count||0)}</span>`,awaitingTable(upcoming,[]))}</div>`;
+}
 
 async function renderReturnsHub() {
   setPage("Devoluções","");
