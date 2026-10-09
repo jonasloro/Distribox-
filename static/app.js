@@ -18,6 +18,13 @@ let productionQueueLoading = false;
 let productionQueueHasMore = false;
 let productionQueueBrands = [];
 let unifiedCache = {warehouse:null,sgo:[],tasks:[],shipments:[],returns:[]};
+const RETURNS_PAGE_SIZE = 100;
+let returnsListOffset = 0;
+let returnsListHasMore = false;
+let returnsListLoading = false;
+let returnHistoryOffset = 0;
+let returnHistoryHasMore = false;
+let returnHistoryLoading = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -2111,7 +2118,68 @@ async function openShipment(id){try{const d=await api(`/api/unified/shipments/${
 async function saveShipmentFilling(id){try{const items=[...document.querySelectorAll('.shipment-edit-item')].map(row=>({id:Number(row.dataset.id),checked_qty:Number(row.querySelector('[data-field=checked]').value||0),notes:row.querySelector('[data-field=notes]').value}));const d=await api(`/api/unified/shipments/${id}/filling`,{method:'PATCH',body:JSON.stringify({user_id:currentUser.id,document_no:$("shipEditDoc").value,destination:$("shipEditDest").value,carrier:$("shipEditCarrier").value,vehicle_plate:$("shipEditPlate").value,driver_name:$("shipEditDriver").value,scheduled_at:$("shipEditScheduled").value,volume_count:Number($("shipEditVolumes").value||0),notes:$("shipEditNotes").value,items})});toast(d.status==='PRONTO'?'Conferência completa. Romaneio liberado para saída.':'Preenchimento salvo. Ainda existem pendências.');await renderShipping();openShipment(id);}catch(e){toast(e.message)}}
 async function finishShipment(id){try{await api(`/api/unified/shipments/${id}`,{method:"PATCH",body:JSON.stringify({user_id:currentUser.id,status:"EXPEDIDO"})});closeModal();toast("Saída confirmada e romaneio concluído.");renderShipping();}catch(e){toast(e.message)}}
 
-async function renderReturns(){setPage("Devoluções","Conferência Loja × CD × Anápolis, pendências e tratativas");const rows=await api("/api/unified/returns");if(currentView!=="returns")return;unifiedCache.returns=rows;const open=rows.filter(r=>r.status!=="CONCLUIDA");$("mainContent").innerHTML=`<div class="kpi-grid compact-kpis"><div class="kpi"><div class="kpi-label">Registradas</div><div class="kpi-value">${rows.length}</div></div><div class="kpi"><div class="kpi-label">Abertas</div><div class="kpi-value">${open.length}</div></div><div class="kpi"><div class="kpi-label">Divergentes</div><div class="kpi-value">${rows.filter(r=>r.status==='DIVERGENTE').length}</div></div><div class="kpi"><div class="kpi-label">Peças em Anápolis</div><div class="kpi-value">${rows.reduce((a,r)=>a+Number(r.total_anapolis||0),0)}</div></div></div><div class="panel" style="margin-top:14px"><div class="panel-header"><span>Devoluções</span><div><button class="ghost small-btn" onclick="showReturnPdfForm()">Comparar PDFs</button> <button class="primary small-btn" onclick="showReturnForm()">+ Registrar devolução</button></div></div><div id="returnForm" class="panel-body hidden"></div><div class="table-wrap"><table><thead><tr><th>Documento</th><th>Loja / cliente</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td><button class="link-button" onclick="openReturn(${r.id})"><b>${esc(r.document_no)}</b></button></td><td>${esc(r.store||r.customer||'—')}</td><td>${r.total_store}</td><td>${r.total_cd}</td><td>${r.total_anapolis}</td><td><b class="${r.difference?'text-danger':''}">${r.difference}</b></td><td>${statusBadge(r.status)}</td><td>${r.status!=="CONCLUIDA"?`<button class="success small-btn" onclick="finishReturn(${r.id})">Concluir</button>`:''}</td></tr>`).join("")||'<tr><td colspan="8">Nenhuma devolução.</td></tr>'}</tbody></table></div></div>`;}
+async function renderReturns() {
+  setPage("Devoluções","Conferência Loja × CD × Anápolis, pendências e tratativas");
+  const [rows,analytics] = await Promise.all([
+    api(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=0`),
+    safeApi("/api/unified/returns/analytics",{totals:{},by_status:[],by_store:[]})
+  ]);
+  if (currentView !== "returns") return;
+  unifiedCache.returns = rows;
+  returnsListOffset = rows.length;
+  returnsListHasMore = rows.length === RETURNS_PAGE_SIZE;
+  returnsListLoading = false;
+  const totals = analytics.totals || {};
+  const statusCounts = Object.fromEntries((analytics.by_status||[]).map(row=>[row.status,Number(row.quantity||0)]));
+  const open = Object.entries(statusCounts).reduce((sum,[status,count])=>sum+(status==="CONCLUIDA"?0:count),0);
+  $("mainContent").innerHTML = `
+    <div class="kpi-grid compact-kpis">
+      <div class="kpi"><div class="kpi-label">Registradas</div><div class="kpi-value">${Number(totals.total||0).toLocaleString("pt-BR")}</div></div>
+      <div class="kpi"><div class="kpi-label">Abertas</div><div class="kpi-value">${open.toLocaleString("pt-BR")}</div></div>
+      <div class="kpi"><div class="kpi-label">Divergentes</div><div class="kpi-value">${Number(statusCounts.DIVERGENTE||0).toLocaleString("pt-BR")}</div></div>
+      <div class="kpi"><div class="kpi-label">Peças em Anápolis</div><div class="kpi-value">${Number(totals.total_anapolis||0).toLocaleString("pt-BR")}</div></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-header"><span>Devoluções</span><div><button class="ghost small-btn" onclick="showReturnPdfForm()">Comparar PDFs</button> <button class="primary small-btn" onclick="showReturnForm()">+ Registrar devolução</button></div></div>
+      <div id="returnForm" class="panel-body hidden"></div>
+      <div class="table-wrap"><table><thead><tr><th>Documento</th><th>Loja / cliente</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th></th></tr></thead><tbody id="returnsBody">${rows.map(returnQueueRow).join("")||'<tr><td colspan="8">Nenhuma devolução.</td></tr>'}</tbody></table></div>
+      <div id="returnsPager" class="panel-body warehouse-pager"></div>
+    </div>`;
+  updateReturnsPager();
+}
+
+function returnQueueRow(row) {
+  return `<tr><td><button class="link-button" onclick="openReturn(${row.id})"><b>${esc(row.document_no)}</b></button></td><td>${esc(row.store||row.customer||'—')}</td><td>${row.total_store}</td><td>${row.total_cd}</td><td>${row.total_anapolis}</td><td><b class="${row.difference?'text-danger':''}">${row.difference}</b></td><td>${statusBadge(row.status)}</td><td>${row.status!=="CONCLUIDA"?`<button class="success small-btn" onclick="finishReturn(${row.id})">Concluir</button>`:''}</td></tr>`;
+}
+
+function updateReturnsPager() {
+  const pager = $("returnsPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${returnsListOffset.toLocaleString("pt-BR")} documentos carregados</span><button class="secondary small-btn" onclick="loadMoreReturns()" ${!returnsListHasMore||returnsListLoading?"disabled":""}>${returnsListLoading?"Carregando...":"Carregar mais devoluções"}</button>`;
+  pager.classList.toggle("hidden",!returnsListHasMore&&!returnsListLoading);
+}
+
+async function loadMoreReturns() {
+  if (returnsListLoading||!returnsListHasMore||currentView!=="returns") return;
+  returnsListLoading = true;
+  updateReturnsPager();
+  try {
+    const rows = await api(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=${returnsListOffset}`);
+    if (currentView!=="returns") return;
+    const tbody = $("returnsBody");
+    if (!tbody) return;
+    tbody.insertAdjacentHTML("beforeend",rows.map(returnQueueRow).join(""));
+    returnsListOffset += rows.length;
+    returnsListHasMore = rows.length===RETURNS_PAGE_SIZE;
+    unifiedCache.returns = [...unifiedCache.returns,...rows];
+  } catch(error) {
+    if (currentView==="returns") toast(error.message);
+  } finally {
+    returnsListLoading = false;
+    updateReturnsPager();
+  }
+}
+
 function showReturnForm(){$("returnForm").classList.remove("hidden");$("returnForm").innerHTML=`<div class="return-form-grid"><div class="field"><label>Documento</label><input id="returnDoc"></div><div class="field"><label>Loja</label><input id="returnStore"></div><div class="field"><label>Código de barras</label><input id="returnBarcode"></div><div class="field"><label>Descrição</label><input id="returnDescription"></div><div class="field"><label>Quantidade Loja</label><input id="returnStoreQty" type="number" min="0"></div><div class="field"><label>Quantidade CD</label><input id="returnCdQty" type="number" min="0"></div><div class="field"><label>Quantidade Anápolis</label><input id="returnAnaQty" type="number" min="0"></div><button class="primary" onclick="createReturn()">Conferir e registrar</button></div>`;}
 function showReturnPdfForm(){$("returnForm").classList.remove("hidden");$("returnForm").innerHTML=`<div class="notice">Selecione os relatórios da mesma devolução. O sistema compara por código de barras usando a regra <b>Loja = CD + Anápolis</b>.</div><div class="return-form-grid"><div class="field"><label>Relatório da Loja</label><input id="returnPdfStore" type="file" accept=".pdf"></div><div class="field"><label>Conferência do CD</label><input id="returnPdfCd" type="file" accept=".pdf"></div><div class="field"><label>Itens em Anápolis (opcional)</label><input id="returnPdfAna" type="file" accept=".pdf"></div><button class="primary" onclick="compareReturnPdfs()">Comparar e registrar</button></div>`;}
 async function createReturn(){try{await api("/api/unified/returns",{method:"POST",body:JSON.stringify({user_id:currentUser.id,document_no:$("returnDoc").value,store:$("returnStore").value,items:[{barcode:$("returnBarcode").value,description:$("returnDescription").value,qty_store:Number($("returnStoreQty").value||0),qty_cd:Number($("returnCdQty").value||0),qty_anapolis:Number($("returnAnaQty").value||0)}]})});toast("Devolução registrada.");renderReturns();}catch(e){toast(e.message)}}
@@ -2469,13 +2537,96 @@ function calculateCapacitySimulation(){const option=$("simLocation")?.selectedOp
 
 async function renderSgoIndicators(){setPage("SGO e Indicadores","");const [rows,tasks]=await Promise.all([safeApi('/api/unified/sgo',[]),safeApi('/api/unified/tasks',[])]);if(currentView!=="sgo-indicators")return;const total=rows.reduce((a,r)=>a+Number(r.quantity||0),0),late=rows.filter(r=>r.forecast_date&&new Date(r.forecast_date)<new Date()&&r.status!=='CONCLUIDO');const byStatus=Object.entries(rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+Number(r.quantity||0),a),{})).map(([label,value])=>({label,value}));$("mainContent").innerHTML=`${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}<div class="hero-kpis">${heroKpi("Entradas previstas",rows.length,"Compras / lotes","⇩","blue","sgo")}${heroKpi("Peças previstas",total.toLocaleString('pt-BR'),"Quantidade SGO","▣","teal","sgo")}${heroKpi("Previsões atrasadas",late.length,"Requer atenção","!","blue","sgo")}${heroKpi("Tarefas abertas",tasks.filter(t=>t.status!=='CONCLUIDA').length,"Operação","☑","teal","tasks")}</div><div class="dash-row indicators-layout">${analyticsBars("Distribuição por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${rows.length}</span>`,awaitingTable(rows.slice(0,10),[]))}</div>`;}
 
-async function renderReturnsHub(){setPage("Devoluções","");const rows=await safeApi('/api/unified/returns',[]),movements=await safeApi('/api/unified/movements?limit=80',[]);if(currentView!=="returns-hub")return;const open=rows.filter(r=>r.status!=='CONCLUIDA'),div=open.filter(r=>r.status==='DIVERGENTE');$("mainContent").innerHTML=`${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"returns-hub")}<div class="hero-kpis">${heroKpi("Devoluções registradas",rows.length,"Documentos","↩","blue","returns")}${heroKpi("Aguardando tratamento",open.length,"Pendências","!","teal","returns")}${heroKpi("Divergentes",div.length,"Conferir","◇","blue","returns")}${heroKpi("Concluídas",rows.filter(r=>r.status==='CONCLUIDA').length,"Finalizadas","✓","teal","returns")}</div><div class="dash-row returns-layout">${dashboardPanel("!","Pendências",`<span class="panel-count red-count">${open.length}</span>`,returnsTable(open.slice(0,10)))}${dashboardPanel("◷","Movimentos recentes","",`<div class="movement-list">${movements.filter(m=>m.domain==='DEVOLUCOES').slice(0,12).map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)}</small></div>`).join('')||'<div class="empty-visual">Nenhum movimento de devolução.</div>'}</div>`)}</div>`;}
+async function renderReturnsHub() {
+  setPage("Devoluções","");
+  const [analytics,recent,movements] = await Promise.all([
+    safeApi("/api/unified/returns/analytics",{totals:{},by_status:[],by_store:[]}),
+    safeApi("/api/unified/returns?limit=10",[]),
+    safeApi("/api/unified/movements?limit=80",[])
+  ]);
+  if (currentView !== "returns-hub") return;
+  const totals = analytics.totals || {};
+  const statusCounts = Object.fromEntries((analytics.by_status||[]).map(row=>[row.status,Number(row.quantity||0)]));
+  const open = Object.entries(statusCounts).reduce((sum,[status,count])=>sum+(status==="CONCLUIDA"?0:count),0);
+  $("mainContent").innerHTML = `${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"returns-hub")}
+    <div class="hero-kpis">
+      ${heroKpi("Devoluções registradas",Number(totals.total||0).toLocaleString("pt-BR"),"Documentos","↩","blue","returns")}
+      ${heroKpi("Aguardando tratamento",open.toLocaleString("pt-BR"),"Pendências","!","teal","returns")}
+      ${heroKpi("Divergentes",Number(statusCounts.DIVERGENTE||0).toLocaleString("pt-BR"),"Conferir","◇","blue","returns")}
+      ${heroKpi("Peças em Anápolis",Number(totals.total_anapolis||0).toLocaleString("pt-BR"),"Registradas","✓","teal","returns")}
+    </div>
+    <div class="dash-row returns-layout">
+      ${dashboardPanel("!","Pendências",`<span class="panel-count red-count">${open}</span>`,returnsTable(recent.filter(r=>r.status!=="CONCLUIDA").slice(0,10)))}
+      ${dashboardPanel("◷","Movimentos recentes","",`<div class="movement-list">${movements.filter(m=>m.domain==='DEVOLUCOES').slice(0,12).map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)}</small></div>`).join('')||'<div class="empty-visual">Nenhum movimento de devolução.</div>'}</div>`)}
+    </div>`;
+}
 
 async function renderReturnsV3(){await renderReturns();if(currentView!=="returns")return;$("mainContent").insertAdjacentHTML("afterbegin",moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"returns"));}
 
-async function renderReturnIndicators(){setPage("Indicadores de Devoluções","");const rows=await safeApi('/api/unified/returns',[]);if(currentView!=="return-indicators")return;const loja=rows.reduce((a,r)=>a+Number(r.total_store||0),0),found=rows.reduce((a,r)=>a+Number(r.total_cd||0)+Number(r.total_anapolis||0),0);const byStore=Object.entries(rows.reduce((a,r)=>{const k=r.store||r.customer||'Não informada';a[k]=(a[k]||0)+Number(r.total_store||0);return a},{})).map(([label,value])=>({label,value}));const byStatus=Object.entries(rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+1,a),{})).map(([label,value])=>({label,value}));$("mainContent").innerHTML=`${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-indicators")}<div class="hero-kpis">${heroKpi("Devoluções",rows.length,"Registros","↩","blue","returns-hub")}${heroKpi("Peças da loja",loja.toLocaleString('pt-BR'),"Declaradas","▣","teal","returns")}${heroKpi("CD + Anápolis",found.toLocaleString('pt-BR'),"Encontradas","◇","blue","returns")}${heroKpi("Diferença",(found-loja).toLocaleString('pt-BR'),"Acumulada","!","teal","returns")}</div><div class="dash-row indicators-layout">${analyticsBars("Peças por loja",byStore)}${analyticsBars("Distribuição por status",byStatus)}</div>`;}
+async function renderReturnIndicators() {
+  setPage("Indicadores de Devoluções","");
+  const data = await safeApi("/api/unified/returns/analytics",{totals:{},by_status:[],by_store:[]});
+  if (currentView !== "return-indicators") return;
+  const totals = data.totals || {};
+  const byStore = (data.by_store||[]).map(row=>({label:row.label,value:Number(row.value||0)}));
+  const byStatus = (data.by_status||[]).map(row=>({label:row.status,value:Number(row.quantity||0)}));
+  const loja = Number(totals.total_store||0);
+  const found = Number(totals.total_cd||0)+Number(totals.total_anapolis||0);
+  $("mainContent").innerHTML = `${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-indicators")}
+    <div class="hero-kpis">
+      ${heroKpi("Devoluções",Number(totals.total||0).toLocaleString('pt-BR'),"Registros","↩","blue","returns-hub")}
+      ${heroKpi("Peças da loja",loja.toLocaleString('pt-BR'),"Declaradas","▣","teal","returns")}
+      ${heroKpi("CD + Anápolis",found.toLocaleString('pt-BR'),"Encontradas","◇","blue","returns")}
+      ${heroKpi("Diferença",(found-loja).toLocaleString('pt-BR'),"Acumulada","!","teal","returns")}
+    </div>
+    <div class="dash-row indicators-layout">${analyticsBars("Peças por loja",byStore)}${analyticsBars("Distribuição por status",byStatus)}</div>`;
+}
 
-async function renderReturnHistory(){setPage("Histórico de Devoluções","");const [rows,moves]=await Promise.all([safeApi('/api/unified/returns',[]),safeApi('/api/unified/movements?limit=500',[])]);if(currentView!=="return-history")return;$("mainContent").innerHTML=`${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-history")}<section class="dash-panel"><header><b>◷</b><strong>Documentos e movimentações</strong><span class="panel-count">${rows.length}</span></header><div class="dash-panel-body"><table class="dash-table"><thead><tr><th>Documento</th><th>Loja</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th>Data</th></tr></thead><tbody>${rows.map(r=>`<tr onclick="openReturn(${r.id})"><td>${esc(r.document_no)}</td><td>${esc(r.store||r.customer||'—')}</td><td>${r.total_store}</td><td>${r.total_cd}</td><td>${r.total_anapolis}</td><td>${r.difference}</td><td>${statusBadge(r.status)}</td><td>${fmtDateTime(r.created_at)}</td></tr>`).join('')||emptyRows(8)}</tbody></table></div></section><section class="dash-panel" style="margin-top:14px"><header><b>↯</b><strong>Auditoria das tratativas</strong></header><div class="dash-panel-body movement-list">${moves.filter(m=>m.domain==='DEVOLUCOES').map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)} • ${esc(m.user_name||'Sistema')}</small></div>`).join('')||'<div class="empty-visual">Nenhuma tratativa registrada.</div>'}</div></section>`;}
+async function renderReturnHistory() {
+  setPage("Histórico de Devoluções","");
+  const [rows,moves] = await Promise.all([
+    safeApi(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=0`,[]),
+    safeApi('/api/unified/movements?limit=100',[])
+  ]);
+  if (currentView !== "return-history") return;
+  returnHistoryOffset = rows.length;
+  returnHistoryHasMore = rows.length === RETURNS_PAGE_SIZE;
+  returnHistoryLoading = false;
+  $("mainContent").innerHTML = `${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-history")}
+    <section class="dash-panel"><header><b>◷</b><strong>Documentos e movimentações</strong><span class="panel-count">${Number(rows.length).toLocaleString("pt-BR")} nesta página</span></header>
+      <div class="dash-panel-body"><table class="dash-table"><thead><tr><th>Documento</th><th>Loja</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th>Data</th></tr></thead><tbody id="returnHistoryBody">${rows.map(returnHistoryRow).join('')||emptyRows(8)}</tbody></table>
+      <div id="returnHistoryPager" class="warehouse-pager"></div></div>
+    </section>
+    <section class="dash-panel" style="margin-top:14px"><header><b>↯</b><strong>Auditoria das tratativas</strong></header><div class="dash-panel-body movement-list">${moves.filter(m=>m.domain==='DEVOLUCOES').map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)} • ${esc(m.user_name||'Sistema')}</small></div>`).join('')||'<div class="empty-visual">Nenhuma tratativa registrada.</div>'}</div></section>`;
+  updateReturnHistoryPager();
+}
+
+function returnHistoryRow(row) {
+  return `<tr onclick="openReturn(${row.id})"><td>${esc(row.document_no)}</td><td>${esc(row.store||row.customer||'—')}</td><td>${row.total_store}</td><td>${row.total_cd}</td><td>${row.total_anapolis}</td><td>${row.difference}</td><td>${statusBadge(row.status)}</td><td>${fmtDateTime(row.created_at)}</td></tr>`;
+}
+
+function updateReturnHistoryPager() {
+  const pager = $("returnHistoryPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${returnHistoryOffset.toLocaleString("pt-BR")} documentos carregados</span><button class="secondary small-btn" onclick="loadMoreReturnHistory()" ${!returnHistoryHasMore||returnHistoryLoading?"disabled":""}>${returnHistoryLoading?"Carregando...":"Carregar mais"}</button>`;
+  pager.classList.toggle("hidden",!returnHistoryHasMore&&!returnHistoryLoading);
+}
+
+async function loadMoreReturnHistory() {
+  if(returnHistoryLoading||!returnHistoryHasMore||currentView!=="return-history")return;
+  returnHistoryLoading=true;updateReturnHistoryPager();
+  try {
+    const rows=await api(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=${returnHistoryOffset}`);
+    if(currentView!=="return-history")return;
+    $("returnHistoryBody")?.insertAdjacentHTML("beforeend",rows.map(returnHistoryRow).join(""));
+    returnHistoryOffset+=rows.length;
+    returnHistoryHasMore=rows.length===RETURNS_PAGE_SIZE;
+  } catch(e) {
+    if(currentView==="return-history")toast(e.message);
+  } finally {
+    returnHistoryLoading=false;updateReturnHistoryPager();
+  }
+}
 
 async function renderRegistrations() {
   setPage("Cadastros","");
