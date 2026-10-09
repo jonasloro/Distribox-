@@ -485,8 +485,9 @@ async function renderTestTools() {
     return;
   }
   const [receiving, quality, processing, outside] = await Promise.all([
-    api("/api/cards?scope=receiving"), api("/api/cards?scope=quality"), api("/api/cards?scope=processing"), api("/api/cards?scope=outside")
+    api("/api/cards?scope=receiving&limit=200"), api("/api/cards?scope=quality&limit=200"), api("/api/cards?scope=processing&limit=200"), api("/api/cards?scope=outside&limit=200")
   ]);
+  if (currentView !== "test") return;
   const costuraCards = receiving.filter((card) => card.status === "EM_COSTURA_CD01");
   const allCards = [...receiving, ...quality, ...processing, ...outside];
   const processingCandidates = allCards.filter((card) => card.status !== "DESPACHO_CD02" && card.current_sector !== "PROCESSAMENTO");
