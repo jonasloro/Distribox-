@@ -303,9 +303,7 @@ def register_unified_routes(app) -> None:
 
     @app.get("/api/unified/warehouse/summary")
     def warehouse_summary():
-        """Versão leve do endereçamento, só com os totais por gênero — usada no
-        Central de Operações pra não precisar baixar o CD inteiro (milhares de
-        casulos) só pra mostrar um resumo."""
+        """Retorna somente agregados e uma amostra pequena para evitar baixar milhares de casulos."""
         try:
             with pg_connect() as con:
                 with con.cursor() as cur:
@@ -316,38 +314,99 @@ def register_unified_routes(app) -> None:
                            FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
                            WHERE z.active GROUP BY z.gender ORDER BY z.gender"""
                     )
-                    rows = cur.fetchall()
+                    gender_rows = cur.fetchall()
+                    cur.execute(
+                        """SELECT z.id,z.code,z.name,z.gender,z.capacity,
+                           COALESCE(SUM(l.occupied_qty),0) AS occupied,COUNT(l.id) AS locations,
+                           CASE WHEN z.capacity>0
+                             THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1)
+                             ELSE 0 END AS occupancy
+                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                           WHERE z.active GROUP BY z.id ORDER BY z.code"""
+                    )
+                    zone_rows = cur.fetchall()
+                    cur.execute(
+                        """SELECT COALESCE(SUM(l.capacity),0) AS capacity,
+                           COALESCE(SUM(l.occupied_qty),0) AS occupied,COUNT(l.id) AS locations,
+                           COUNT(l.id) FILTER (WHERE l.occupied_qty>0) AS occupied_locations,
+                           COUNT(l.id) FILTER (WHERE l.occupied_qty<l.capacity AND l.status<>'BLOQUEADO') AS available_locations
+                           FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
+                           WHERE z.active"""
+                    )
+                    totals_row = cur.fetchone()
+                    cur.execute(
+                        """SELECT l.id,l.address,z.code AS zone_code,l.structure_type,l.category,
+                           l.capacity,l.occupied_qty,l.status,
+                           CASE WHEN l.capacity>0
+                             THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy
+                           FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
+                           WHERE z.active AND l.occupied_qty>0
+                           ORDER BY l.updated_at DESC,l.id DESC LIMIT 12"""
+                    )
+                    occupied_preview = cur.fetchall()
         except RuntimeError:
-            return {"genders": []}
+            return {"genders": [], "zones": [], "totals": {
+                "capacity": 0, "occupied": 0, "locations": 0,
+                "occupied_locations": 0, "available_locations": 0, "percentage": 0
+            }, "occupied_preview": []}
+
         genders = []
-        for r in rows:
-            cap = int(r["capacity"] or 0)
-            occ = int(r["occupied"] or 0)
+        for row in gender_rows:
+            capacity = int(row["capacity"] or 0)
+            occupied = int(row["occupied"] or 0)
             genders.append({
-                "gender": r["gender"],
-                "capacity": cap,
-                "occupied": occ,
-                "occupancy": round(occ * 100 / cap, 1) if cap else 0,
+                "gender": row["gender"],
+                "capacity": capacity,
+                "occupied": occupied,
+                "occupancy": round(occupied * 100 / capacity, 1) if capacity else 0,
             })
-        return {"genders": genders}
+
+        totals = {
+            "capacity": int(totals_row["capacity"] or 0),
+            "occupied": int(totals_row["occupied"] or 0),
+            "locations": int(totals_row["locations"] or 0),
+            "occupied_locations": int(totals_row["occupied_locations"] or 0),
+            "available_locations": int(totals_row["available_locations"] or 0),
+        }
+        totals["percentage"] = round(totals["occupied"] * 100 / totals["capacity"], 1) if totals["capacity"] else 0
+        return {
+            "genders": genders,
+            "zones": [dict(row) for row in zone_rows],
+            "totals": totals,
+            "occupied_preview": [dict(row) for row in occupied_preview],
+        }
 
     @app.get("/api/unified/warehouse")
-    def warehouse(search: str = "", zone: str = "", status: str = ""):
+    def warehouse(search: str = "", zone: str = "", status: str = "", limit: int = 0, offset: int = 0, available_only: bool = False):
+        """Consulta endereços com paginação opcional; os resumos não devem baixar o CD inteiro."""
+        where = """ FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
+        args: list[Any] = []
+        if search:
+            where += " AND (l.address ILIKE %s OR l.category ILIKE %s OR l.structure_type ILIKE %s)"
+            q = f"%{search}%"
+            args += [q, q, q]
+        if zone:
+            where += " AND z.code=%s"
+            args.append(zone)
+        if status:
+            where += " AND l.status=%s"
+            args.append(status)
+        if available_only:
+            where += " AND l.occupied_qty<l.capacity AND l.status<>'BLOQUEADO'"
+
+        safe_limit = max(1, min(int(limit), 200)) if limit else 0
+        safe_offset = max(0, int(offset))
         with pg_connect() as con:
             with con.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS total_locations" + where, args)
+                total_locations = int(cur.fetchone()["total_locations"] or 0)
                 sql = """SELECT l.*,z.code AS zone_code,z.name AS zone_name,
-                         CASE WHEN l.capacity>0 THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy
-                         FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
-                args: list[Any] = []
-                if search:
-                    sql += " AND (l.address ILIKE %s OR l.category ILIKE %s OR l.structure_type ILIKE %s)"
-                    q = f"%{search}%"; args += [q, q, q]
-                if zone:
-                    sql += " AND z.code=%s"; args.append(zone)
-                if status:
-                    sql += " AND l.status=%s"; args.append(status)
-                sql += " ORDER BY z.code,l.column_no,l.level_no"
-                cur.execute(sql, args)
+                         CASE WHEN l.capacity>0 THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy""" + where + " ORDER BY z.code,l.column_no,l.level_no,l.id"
+                page_args = list(args)
+                if safe_limit:
+                    sql += " LIMIT %s OFFSET %s"
+                    page_args.extend([safe_limit, safe_offset])
+                cur.execute(sql, page_args)
                 locations = cur.fetchall()
                 cur.execute(
                     """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) AS occupied,
@@ -356,7 +415,13 @@ def register_unified_routes(app) -> None:
                        WHERE z.active GROUP BY z.id ORDER BY z.code"""
                 )
                 zones = cur.fetchall()
-        return {"zones": zones, "locations": locations}
+        return {
+            "zones": zones,
+            "locations": locations,
+            "total_locations": total_locations,
+            "limit": safe_limit or total_locations,
+            "offset": safe_offset,
+        }
 
     @app.post("/api/unified/warehouse/locations/{location_id}")
     async def update_location(location_id: int, request: Request):
