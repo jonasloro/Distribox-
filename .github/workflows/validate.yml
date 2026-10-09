@@ -1,0 +1,23 @@
+name: Validate application syntax
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Compile Python modules
+        run: python -m compileall -q app.py unified_module.py supabase_module.py positions_module.py quality_module.py processing_module.py downstream_module.py production_module.py collab_module.py goat_module.py warehouse_structure.py
+      - name: Check JavaScript syntax
+        run: node --check static/app.js && node --check static/collab.js

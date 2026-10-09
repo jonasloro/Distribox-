@@ -1,5 +1,6 @@
 let currentUser = JSON.parse(localStorage.getItem("cl_recebimento_user") || "null");
 let currentView = "dashboard";
+let navigationVersion = 0;
 let currentCardId = null;
 let cardData = null;
 let receivingPhotos = [];
@@ -8,7 +9,34 @@ let qualityUsers = [];
 let processingUsers = [];
 let downstreamUsers = {ETIQUETAGEM:[],ESTOCAGEM:[]};
 let selectedProductionCardId = null;
+const PRODUCTION_QUEUE_PAGE_SIZE = 100;
+let productionQueueOffset = 0;
+let productionQueueScope = "receiving";
+let productionQueueSearchTimer = null;
+let productionQueueRequestId = 0;
+let productionQueueLoading = false;
+let productionQueueHasMore = false;
+let productionQueueBrands = [];
 let unifiedCache = {warehouse:null,sgo:[],tasks:[],shipments:[],returns:[]};
+const RETURNS_PAGE_SIZE = 100;
+let returnsListOffset = 0;
+let returnsListHasMore = false;
+let returnsListLoading = false;
+let returnHistoryOffset = 0;
+let returnHistoryHasMore = false;
+let returnHistoryLoading = false;
+const SHIPMENTS_PAGE_SIZE = 100;
+let shipmentsListOffset = 0;
+let shipmentsListHasMore = false;
+let shipmentsListLoading = false;
+let shipmentsRequestToken = 0;
+let shipmentsSearchTimer = null;
+const SGO_PAGE_SIZE = 100;
+let sgoListOffset = 0;
+let sgoListHasMore = false;
+let sgoListLoading = false;
+let sgoRequestToken = 0;
+let sgoSearchTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -104,7 +132,9 @@ function activeNav(view) {
 
 async function goTo(view) {
   currentView = view;
+  const requestVersion = ++navigationVersion;
   activeNav(view);
+  $("mainContent").innerHTML = '<div class="state-panel"><span class="spinner-dot"></span><b>Carregando tela...</b><span>Preparando os dados necessários.</span></div>';
   try {
     if (view === "dashboard") await renderDashboard();
     if (view === "receiving") await renderCards("receiving");
@@ -136,6 +166,7 @@ async function goTo(view) {
     if (view === "chat") await renderChat();
     if (view === "calendar") await renderCalendar();
   } catch (error) {
+    if (requestVersion !== navigationVersion || currentView !== view) return;
     console.error(error);
     $("mainContent").innerHTML = `<div class="state-panel error-state"><b>Não foi possível carregar esta visão.</b><span>${esc(error.message)}</span><button class="primary" onclick="refreshCurrentView()">Tentar novamente</button></div>`;
   }
@@ -244,16 +275,35 @@ async function renderCards(scope) {
   const quality = scope === "quality";
   const processing = scope === "processing";
   const labeling = scope === "labeling", storage = scope === "storage";
+  const queueScope = ["receiving","quality","processing","labeling","storage"].includes(scope);
   const title = quality ? "Qualidade" : processing ? "Processamento" : labeling ? "Etiquetagem" : storage ? "Estocagem" : "Recebimento";
   const subtitle = quality ? "Inspeção ágil e preenchimento guiado" : processing ? "Seleção compacta de materiais" : labeling ? "Grade por tamanho; Saldo por quantidade" : storage ? "Entrada em estoque por tamanho ou saldo geral" : "Controle geral da produção e posição real de cada item";
   setPage(title, subtitle);
-  const cards = await api(`/api/cards?scope=${scope}`);
-  const metrics = ["receiving","quality","processing"].includes(scope)
-    ? metricCardsHtml(scope, (await api("/api/dashboard")).totals) : "";
+  const needsMetrics = ["receiving","quality","processing"].includes(scope);
+  const cardsUrl = queueScope
+    ? `/api/cards?scope=${scope}&limit=${PRODUCTION_QUEUE_PAGE_SIZE}&offset=0`
+    : `/api/cards?scope=${scope}`;
+  const [cards, dashboard, brands] = await Promise.all([
+    api(cardsUrl),
+    needsMetrics ? api("/api/dashboard") : Promise.resolve({totals:{}}),
+    queueScope ? safeApi(`/api/cards/brands?scope=${scope}`,[]) : Promise.resolve([])
+  ]);
+  if (currentView !== scope) return;
+  const metrics = needsMetrics ? metricCardsHtml(scope, dashboard.totals) : "";
+  if (queueScope) {
+    clearTimeout(productionQueueSearchTimer);
+    productionQueueScope = scope;
+    productionQueueOffset = cards.length;
+    productionQueueHasMore = cards.length === PRODUCTION_QUEUE_PAGE_SIZE;
+    productionQueueBrands = brands.length ? brands : [...new Set(cards.map(card=>card.brand).filter(Boolean))].sort();
+    productionQueueLoading = false;
+    productionQueueRequestId++;
+  }
   if (["receiving","quality","processing","labeling","storage"].includes(scope)) {
     const tabs = storage ? moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage") : "";
     $("mainContent").innerHTML = tabs + metrics + processingQueueHtml(cards, scope);
     filterProductionQueue();
+    updateProductionQueuePager();
     return;
   }
   $("mainContent").innerHTML = `
@@ -269,22 +319,98 @@ async function renderCards(scope) {
 
 function processingQueueHtml(cards, scope=currentView) {
   const tab = ["receiving","quality","processing","labeling","storage"].includes(scope) ? scope : "processing";
-  const brands = [...new Set(cards.map((c)=>c.brand).filter(Boolean))].sort();
+  const brands = productionQueueBrands.length ? productionQueueBrands : [...new Set(cards.map(card=>card.brand).filter(Boolean))].sort();
   return `<div class="work-queue">
     <div class="queue-toolbar">
-      <div class="queue-search"><span>⌕</span><input id="productionMaterialSearch" placeholder="Compra, fornecedor, marca, produto ou Casulo" oninput="filterProductionQueue()"></div>
-      <select id="productionTypeFilter" onchange="filterProductionQueue()"><option value="">Todos os tipos</option><option value="GRADE">Grade</option><option value="SALDO">Saldo</option></select>
-      <select id="productionStatusFilter" onchange="filterProductionQueue()"><option value="">Todos os status</option><option value="AGUARDANDO">Aguardando</option><option value="ATIVO">Em produção</option><option value="PAUSADO">Pausados</option></select>
-      <select id="productionBrandFilter" onchange="filterProductionQueue()"><option value="">Todas as marcas</option>${brands.map((b)=>`<option value="${esc(b)}">${esc(b)}</option>`).join("")}</select>
-      <button class="ghost" onclick="clearProductionFilters()">Limpar</button>
+      <div class="queue-search"><span>⌕</span><input id="productionMaterialSearch" placeholder="Compra, fornecedor, marca, produto ou Casulo" oninput="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"></div>
+      <select id="productionTypeFilter" onchange="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"><option value="">Todos os tipos</option><option value="GRADE">Grade</option><option value="SALDO">Saldo</option></select>
+      <select id="productionStatusFilter" onchange="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"><option value="">Todos os status</option><option value="AGUARDANDO">Aguardando</option><option value="ATIVO">Em produção</option><option value="PAUSADO">Pausados</option></select>
+      <select id="productionBrandFilter" onchange="filterProductionQueue();scheduleProductionQueueSearch('${tab}')"><option value="">Todas as marcas</option>${brands.map((b)=>`<option value="${esc(b)}">${esc(b)}</option>`).join("")}</select>
+      <button class="ghost" onclick="clearProductionFilters('${tab}')">Limpar</button>
     </div>
-    <div class="queue-counter"><b id="productionVisibleCount">${cards.length}</b> materiais encontrados <span>• selecione uma linha para continuar</span></div>
+    <div class="queue-counter"><b id="productionVisibleCount">${cards.length}</b> materiais nesta página <span>• selecione uma linha para continuar</span></div>
     <div class="panel queue-panel"><div class="table-wrap queue-table-wrap"><table class="compact-table production-queue-table">
       <thead><tr><th class="select-col"></th><th>Material / compra</th><th>Fornecedor</th><th>Marca</th><th>Tipo</th><th>Itens</th><th>Qtd.</th><th>Casulo</th><th>Status</th><th></th></tr></thead>
       <tbody id="productionQueueBody">${cards.map((card)=>productionQueueRow(card,tab)).join("") || '<tr><td colspan="10">Nenhum material disponível.</td></tr>'}</tbody>
     </table></div></div>
+    <div id="productionQueuePager" class="warehouse-pager hidden"></div>
     <div id="productionSelectionBar" class="selection-bar hidden"><div><span>Material selecionado</span><b id="productionSelectionLabel"></b></div><div class="actions"><button class="ghost" onclick="clearProductionSelection()">Cancelar</button><button class="primary" onclick="openSelectedProduction('${tab}')">Abrir controle →</button></div></div>
   </div>`;
+}
+
+function productionQueueUrl(scope, offset) {
+  const search = $("productionMaterialSearch")?.value?.trim() || "";
+  const purchaseMode = $("productionTypeFilter")?.value || "";
+  const activity = $("productionStatusFilter")?.value || "";
+  const brand = $("productionBrandFilter")?.value || "";
+  return `/api/cards?scope=${encodeURIComponent(scope)}&search=${encodeURIComponent(search)}&purchase_mode=${encodeURIComponent(purchaseMode)}&activity=${encodeURIComponent(activity)}&brand=${encodeURIComponent(brand)}&limit=${PRODUCTION_QUEUE_PAGE_SIZE}&offset=${Math.max(0,offset)}`;
+}
+
+function updateProductionQueuePager() {
+  const pager = $("productionQueuePager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${productionQueueOffset.toLocaleString("pt-BR")} cards carregados</span><button class="secondary small-btn" onclick="loadMoreProductionQueue()" ${!productionQueueHasMore || productionQueueLoading ? "disabled" : ""}>${productionQueueLoading ? "Carregando..." : "Carregar mais"}</button>`;
+  pager.classList.toggle("hidden", !productionQueueHasMore && !productionQueueLoading);
+}
+
+function scheduleProductionQueueSearch(scope=productionQueueScope) {
+  clearTimeout(productionQueueSearchTimer);
+  productionQueueSearchTimer = setTimeout(() => searchProductionQueue(scope), 300);
+}
+
+async function searchProductionQueue(scope=productionQueueScope) {
+  if (currentView !== scope) return;
+  const token = ++productionQueueRequestId;
+  productionQueueScope = scope;
+  productionQueueOffset = 0;
+  productionQueueHasMore = false;
+  productionQueueLoading = true;
+  updateProductionQueuePager();
+  try {
+    const cards = await api(productionQueueUrl(scope,0));
+    if (token !== productionQueueRequestId || currentView !== scope) return;
+    const tbody = $("productionQueueBody");
+    if (!tbody) return;
+    tbody.innerHTML = cards.map(card=>productionQueueRow(card,scope)).join("") || '<tr><td colspan="10">Nenhum material disponível.</td></tr>';
+    productionQueueOffset = cards.length;
+    productionQueueHasMore = cards.length === PRODUCTION_QUEUE_PAGE_SIZE;
+    filterProductionQueue();
+  } catch(error) {
+    if (token === productionQueueRequestId && currentView === scope) toast(error.message);
+  } finally {
+    if (token === productionQueueRequestId) {
+      productionQueueLoading = false;
+      updateProductionQueuePager();
+    }
+  }
+}
+
+async function loadMoreProductionQueue() {
+  if (productionQueueLoading || !productionQueueHasMore || currentView !== productionQueueScope) return;
+  const scope = productionQueueScope;
+  const token = productionQueueRequestId;
+  const offset = productionQueueOffset;
+  productionQueueLoading = true;
+  updateProductionQueuePager();
+  try {
+    const cards = await api(productionQueueUrl(scope,offset));
+    if (token !== productionQueueRequestId || currentView !== scope) return;
+    const tbody = $("productionQueueBody");
+    if (!tbody) return;
+    const emptyRow = tbody.querySelector("tr td[colspan]");
+    if (emptyRow && productionQueueOffset === 0) tbody.innerHTML = "";
+    tbody.insertAdjacentHTML("beforeend",cards.map(card=>productionQueueRow(card,scope)).join(""));
+    productionQueueOffset += cards.length;
+    productionQueueHasMore = cards.length === PRODUCTION_QUEUE_PAGE_SIZE;
+    filterProductionQueue();
+  } catch(error) {
+    if (token === productionQueueRequestId && currentView === scope) toast(error.message);
+  } finally {
+    if (token === productionQueueRequestId) {
+      productionQueueLoading = false;
+      updateProductionQueuePager();
+    }
+  }
 }
 
 function productionActivity(card, tab="processing") {
@@ -319,7 +445,7 @@ function filterProductionQueue() {
   if ($("productionVisibleCount")) $("productionVisibleCount").textContent=visible;
 }
 function normalizeSearch(value){return String(value||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim();}
-function clearProductionFilters(){["productionMaterialSearch","productionTypeFilter","productionStatusFilter","productionBrandFilter"].forEach((id)=>{if($(id))$(id).value=""});filterProductionQueue();}
+function clearProductionFilters(scope=productionQueueScope){["productionMaterialSearch","productionTypeFilter","productionStatusFilter","productionBrandFilter"].forEach((id)=>{if($(id))$(id).value=""});filterProductionQueue();scheduleProductionQueueSearch(scope);}
 function selectProductionMaterial(id){selectedProductionCardId=id;document.querySelectorAll(".production-material-row").forEach((row)=>row.classList.toggle("selected",Number(row.dataset.id)===id));const row=document.querySelector(`.production-material-row[data-id="${id}"]`);$("productionSelectionLabel").textContent=row?.dataset.label||"";$("productionSelectionBar").classList.remove("hidden");}
 function clearProductionSelection(){selectedProductionCardId=null;document.querySelectorAll(".production-material-row").forEach((row)=>row.classList.remove("selected"));$("productionSelectionBar")?.classList.add("hidden");}
 function openSelectedProduction(tab="processing"){if(selectedProductionCardId)openCard(selectedProductionCardId,tab);}
@@ -342,6 +468,7 @@ async function searchCards(scope) {
 async function renderImport() {
   setPage("Importar Excel", "Leitura completa das compras operacionais");
   const imports = await api("/api/imports");
+  if (currentView !== "import") return;
   const allowed = currentUser.role === "admin";
   $("mainContent").innerHTML = `
     <div class="panel"><div class="panel-header">Relatório de Compras</div><div class="panel-body">
@@ -378,8 +505,9 @@ async function renderTestTools() {
     return;
   }
   const [receiving, quality, processing, outside] = await Promise.all([
-    api("/api/cards?scope=receiving"), api("/api/cards?scope=quality"), api("/api/cards?scope=processing"), api("/api/cards?scope=outside")
+    api("/api/cards?scope=receiving&limit=200"), api("/api/cards?scope=quality&limit=200"), api("/api/cards?scope=processing&limit=200"), api("/api/cards?scope=outside&limit=200")
   ]);
+  if (currentView !== "test") return;
   const costuraCards = receiving.filter((card) => card.status === "EM_COSTURA_CD01");
   const allCards = [...receiving, ...quality, ...processing, ...outside];
   const processingCandidates = allCards.filter((card) => card.status !== "DESPACHO_CD02" && card.current_sector !== "PROCESSAMENTO");
@@ -421,6 +549,7 @@ async function simulateSendProcessing(cardId) {
 async function renderGlobalHistory() {
   setPage("Histórico", "Todas as movimentações do Card único");
   const rows = await api("/api/history?limit=500");
+  if (currentView !== "history") return;
   $("mainContent").innerHTML = `<div class="panel"><div class="panel-header">Últimos eventos</div><div class="panel-body"><div class="timeline">
     ${rows.map((event) => `<div class="timeline-event"><b>Compra ${esc(event.purchase_id)} — ${esc(event.description)}</b><br><small>${fmtDateTime(event.created_at)} ${event.user_name ? "• "+esc(event.user_name) : ""}</small></div>`).join("") || '<div class="notice">Nenhum evento.</div>'}
   </div></div></div>`;
@@ -1804,18 +1933,25 @@ function statusBadge(value) {
   return `<span class="badge ${cls}">${esc(String(value||"—").replaceAll("_"," "))}</span>`;
 }
 
-const WAREHOUSE_PAGE_SIZE = 200;
-let warehouseVisibleCount = WAREHOUSE_PAGE_SIZE;
+const WAREHOUSE_PAGE_SIZE = 100;
+let warehouseOffset = 0;
+let warehouseRequestToken = 0;
+let warehouseSearchTimer = null;
+let storeLocationRequestToken = 0;
+let simLocationRequestToken = 0;
+let simLocationSearchTimer = null;
 
 async function renderWarehouse() {
   setPage("Mapa e Capacidade", "Endereçamento físico, ocupação e guarda das mercadorias");
-  const data=await api("/api/unified/warehouse"); unifiedCache.warehouse=data;
-  warehouseVisibleCount = WAREHOUSE_PAGE_SIZE;
-  $("mainContent").innerHTML=`
+  const data = await api(`/api/unified/warehouse?limit=${WAREHOUSE_PAGE_SIZE}&offset=0`);
+  if (currentView !== "warehouse") return;
+  unifiedCache.warehouse = data;
+  warehouseOffset = 0;
+  $("mainContent").innerHTML = `
     ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse")}
-    <div class="zone-grid">${data.zones.map(z=>`<div class="zone-card"><div><small>Zona ${esc(z.code)}</small><b>${esc(z.name)}</b></div><strong>${z.occupancy}%</strong><div class="capacity-track"><i style="width:${Math.min(100,z.occupancy)}%"></i></div><span>${Number(z.occupied).toLocaleString("pt-BR")} / ${Number(z.capacity).toLocaleString("pt-BR")} peças</span></div>`).join("")}</div>
+    <div class="zone-grid">${(data.zones||[]).map(z=>`<div class="zone-card"><div><small>Zona ${esc(z.code)}</small><b>${esc(z.name)}</b></div><strong>${z.occupancy}%</strong><div class="capacity-track"><i style="width:${Math.min(100,z.occupancy)}%"></i></div><span>${Number(z.occupied).toLocaleString("pt-BR")} / ${Number(z.capacity).toLocaleString("pt-BR")} peças</span></div>`).join("")}</div>
     <div class="panel"><div class="panel-header">Endereços do centro de distribuição <button class="primary small-btn" onclick="showStoreForm()">+ Guardar mercadoria</button></div>
-      <div class="panel-body compact-filter"><div class="queue-search"><span>⌕</span><input id="warehouseSearch" placeholder="Endereço, categoria ou estrutura" oninput="filterWarehouseRows()"></div><select id="warehouseZone" onchange="filterWarehouseRows()"><option value="">Todas as zonas</option>${data.zones.map(z=>`<option>${esc(z.code)}</option>`).join("")}</select></div>
+      <div class="panel-body compact-filter"><div class="queue-search"><span>⌕</span><input id="warehouseSearch" placeholder="Endereço, categoria ou estrutura" oninput="filterWarehouseRows()"></div><select id="warehouseZone" onchange="filterWarehouseRows()"><option value="">Todas as zonas</option>${(data.zones||[]).map(z=>`<option value="${esc(z.code)}">${esc(z.code)}</option>`).join("")}</select></div>
       <div id="storeForm" class="panel-body hidden"></div>
       <div class="table-wrap warehouse-table"><table class="compact-table"><thead><tr><th>Endereço</th><th>Zona</th><th>Estrutura</th><th>Categoria</th><th>Ocupação</th><th>Disponível</th><th>Status</th></tr></thead><tbody id="warehouseTableBody"></tbody></table></div>
       <div id="warehousePager" class="panel-body warehouse-pager"></div>
@@ -1823,18 +1959,103 @@ async function renderWarehouse() {
   renderWarehouseRows();
 }
 
-function warehouseRowHtml(location){return `<tr class="warehouse-row"><td><b>${esc(location.address)}</b></td><td>${esc(location.zone_code)}</td><td>${esc(location.structure_type||"—")}</td><td>${esc(location.category||"Livre")}</td><td><div class="inline-capacity"><i style="width:${Math.min(100,location.occupancy)}%"></i></div><small>${location.occupied_qty}/${location.capacity} • ${location.occupancy}%</small></td><td><b>${Math.max(0,location.capacity-location.occupied_qty)}</b></td><td>${statusBadge(location.status)}</td></tr>`;}
-
-function renderWarehouseRows(){
-  const data=unifiedCache.warehouse;if(!data)return;
-  const term=normalizeSearch($("warehouseSearch")?.value||""),zone=$("warehouseZone")?.value||"";
-  const filtered=data.locations.filter(location=>(!zone||location.zone_code===zone)&&(!term||normalizeSearch([location.address,location.category,location.structure_type].join(" ")).includes(term)));
-  const visible=filtered.slice(0,warehouseVisibleCount),remaining=filtered.length-visible.length;
-  $("warehouseTableBody").innerHTML=visible.length?visible.map(warehouseRowHtml).join(""):'<tr><td colspan="7" class="empty-cell">Nenhum casulo encontrado.</td></tr>';
-  $("warehousePager").innerHTML=`<span>Mostrando ${visible.length.toLocaleString("pt-BR")} de ${filtered.length.toLocaleString("pt-BR")} casulos</span>${remaining>0?`<button class="secondary small-btn" onclick="loadMoreWarehouseRows()">Carregar mais ${Math.min(remaining,WAREHOUSE_PAGE_SIZE).toLocaleString("pt-BR")}</button>`:""}`;
+function warehouseRowHtml(location) {
+  return `<tr class="warehouse-row"><td><b>${esc(location.address)}</b></td><td>${esc(location.zone_code)}</td><td>${esc(location.structure_type||"—")}</td><td>${esc(location.category||"Livre")}</td><td><div class="inline-capacity"><i style="width:${Math.min(100,location.occupancy)}%"></i></div><small>${location.occupied_qty}/${location.capacity} • ${location.occupancy}%</small></td><td><b>${Math.max(0,location.capacity-location.occupied_qty)}</b></td><td>${statusBadge(location.status)}</td></tr>`;
 }
-function loadMoreWarehouseRows(){warehouseVisibleCount+=WAREHOUSE_PAGE_SIZE;renderWarehouseRows();}
-function filterWarehouseRows(){warehouseVisibleCount=WAREHOUSE_PAGE_SIZE;renderWarehouseRows();}
+
+function renderWarehouseRows() {
+  const data = unifiedCache.warehouse;
+  if (!data || !$("warehouseTableBody")) return;
+  const locations = data.locations || [];
+  const total = Number(data.total_locations || 0);
+  const pageCount = Math.max(1, Math.ceil(total / WAREHOUSE_PAGE_SIZE));
+  const currentPage = Math.floor(warehouseOffset / WAREHOUSE_PAGE_SIZE) + 1;
+  $("warehouseTableBody").innerHTML = locations.length
+    ? locations.map(warehouseRowHtml).join("")
+    : '<tr><td colspan="7" class="empty-cell">Nenhum casulo encontrado.</td></tr>';
+  $("warehousePager").innerHTML = `
+    <span>Mostrando ${total ? warehouseOffset + 1 : 0}–${Math.min(warehouseOffset + locations.length, total)} de ${total.toLocaleString("pt-BR")} casulos · Página ${currentPage} de ${pageCount}</span>
+    <div class="actions">
+      <button class="secondary small-btn" onclick="changeWarehousePage(-1)" ${warehouseOffset <= 0 ? "disabled" : ""}>Anterior</button>
+      <button class="secondary small-btn" onclick="changeWarehousePage(1)" ${warehouseOffset + WAREHOUSE_PAGE_SIZE >= total ? "disabled" : ""}>Próxima</button>
+    </div>`;
+}
+
+async function loadWarehousePage(offset = 0) {
+  if (currentView !== "warehouse") return;
+  const token = ++warehouseRequestToken;
+  const search = $("warehouseSearch")?.value?.trim() || "";
+  const zone = $("warehouseZone")?.value || "";
+  if ($("warehouseTableBody")) $("warehouseTableBody").innerHTML = '<tr><td colspan="7" class="empty-cell">Carregando endereços...</td></tr>';
+  const query = `limit=${WAREHOUSE_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent(search)}&zone=${encodeURIComponent(zone)}&include_zones=false`;
+  try {
+    const data = await api(`/api/unified/warehouse?${query}`);
+    if (token !== warehouseRequestToken || currentView !== "warehouse") return;
+    unifiedCache.warehouse = data;
+    warehouseOffset = Math.max(0, offset);
+    renderWarehouseRows();
+  } catch (error) {
+    if (token !== warehouseRequestToken || currentView !== "warehouse") return;
+    if ($("warehouseTableBody")) $("warehouseTableBody").innerHTML = `<tr><td colspan="7" class="empty-cell">${esc(error.message)}</td></tr>`;
+  }
+}
+
+function changeWarehousePage(delta) {
+  loadWarehousePage(Math.max(0, warehouseOffset + delta * WAREHOUSE_PAGE_SIZE));
+}
+
+function filterWarehouseRows() {
+  clearTimeout(warehouseSearchTimer);
+  warehouseSearchTimer = setTimeout(() => loadWarehousePage(0), 250);
+}
+
+function showStoreForm() {
+  const form = $("storeForm");
+  if (!form) return;
+  form.classList.remove("hidden");
+  form.innerHTML = `<div class="inline-form">
+    <div class="field"><label>Buscar endereço disponível</label><input id="storeLocationSearch" placeholder="Digite rua, endereço ou estrutura" oninput="scheduleStoreLocationSearch()"></div>
+    <div class="field"><label>Endereço</label><select id="storeLocation"><option value="">Carregando endereços...</option></select></div>
+    <div class="field"><label>ID do Card</label><input id="storeCard" type="number" placeholder="Opcional"></div>
+    <div class="field"><label>Quantidade</label><input id="storeQty" type="number" min="1"></div>
+    <div class="field"><label>Marca / categoria</label><input id="storeBrand" placeholder="Marca ou grupo"></div>
+    <button class="success" onclick="storeMaterial()">Confirmar guarda</button>
+  </div>`;
+  searchStoreLocations();
+}
+
+function scheduleStoreLocationSearch() {
+  clearTimeout(window.storeLocationSearchTimer);
+  window.storeLocationSearchTimer = setTimeout(() => searchStoreLocations(), 250);
+}
+
+async function searchStoreLocations() {
+  const select = $("storeLocation");
+  if (!select) return;
+  const token = ++storeLocationRequestToken;
+  const search = $("storeLocationSearch")?.value?.trim() || "";
+  select.innerHTML = '<option value="">Buscando endereços...</option>';
+  try {
+    const data = await api(`/api/unified/warehouse?available_only=true&include_zones=false&limit=100&offset=0&search=${encodeURIComponent(search)}`);
+    if (token !== storeLocationRequestToken || !$("storeLocation")) return;
+    const locations = data.locations || [];
+    select.innerHTML = locations.length
+      ? '<option value="">Selecione um endereço</option>' + locations.map(l => `<option value="${l.id}">${esc(l.address)} • livre ${Math.max(0,Number(l.capacity)-Number(l.occupied_qty))}</option>`).join("")
+      : '<option value="">Nenhum endereço disponível encontrado</option>';
+  } catch (error) {
+    if (token === storeLocationRequestToken && $("storeLocation")) select.innerHTML = `<option value="">${esc(error.message)}</option>`;
+  }
+}
+
+async function storeMaterial() {
+  try {
+    const locationId = Number($("storeLocation")?.value || 0);
+    if (!locationId) { toast("Selecione um endereço disponível."); return; }
+    await api("/api/unified/warehouse/store",{method:"POST",body:JSON.stringify({user_id:currentUser.id,location_id:locationId,card_id:Number($("storeCard").value||0),quantity:Number($("storeQty").value),brand:$("storeBrand").value,category:$("storeBrand").value})});
+    toast("Mercadoria guardada e capacidade atualizada.");
+    renderWarehouse();
+  } catch(e) { toast(e.message); }
+}
 
 function heatmapColor(percentage){
   if(percentage>=90)return "#d92d20";
@@ -1847,6 +2068,7 @@ function heatmapColor(percentage){
 async function renderWarehouseHeatmap(){
   setPage("Mapa de Calor","Ocupação por Rua e coluna");
   const data=await api("/api/unified/warehouse/heatmap");
+  if (currentView !== "warehouse-heatmap") return;
   const sideBlock=(columns,title)=>`<div class="heatmap-side"><div class="heatmap-side-title">${title}</div><div class="heatmap-grid">${columns.map(column=>`<div class="heatmap-box" style="background:${heatmapColor(column.ocupacao_pct)}" title="Coluna ${column.coluna} — ${column.ocupado}/${column.capacidade} peças (${column.ocupacao_pct}%)">${column.coluna}</div>`).join("")||'<span class="empty-visual">Sem posições</span>'}</div></div>`;
   const streets=(data.ruas||[]).map(street=>{
     const odd=street.colunas.filter(column=>column.secao==="impar").sort((a,b)=>a.coluna-b.coluna);
@@ -1857,30 +2079,119 @@ async function renderWarehouseHeatmap(){
   $("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse-heatmap")}<div class="heatmap-legend"><span><i style="background:#2a3646"></i>Vazio</span><span><i style="background:#16803c"></i>Baixa</span><span><i style="background:#f5c400"></i>Média</span><span><i style="background:#e98b08"></i>Alta</span><span><i style="background:#d92d20"></i>Quase cheio</span></div>${streets||'<div class="empty-visual">Nenhum casulo cadastrado.</div>'}`;
 }
 
-function showStoreForm(){const data=unifiedCache.warehouse;const free=data.locations.filter(l=>l.status!=="BLOQUEADO"&&l.occupied_qty<l.capacity);$("storeForm").classList.remove("hidden");$("storeForm").innerHTML=`<div class="inline-form"><div class="field"><label>Endereço</label><select id="storeLocation"><option value="">Selecione</option>${free.map(l=>`<option value="${l.id}">${esc(l.address)} • livre ${l.capacity-l.occupied_qty}</option>`).join("")}</select></div><div class="field"><label>ID do Card</label><input id="storeCard" type="number" placeholder="Opcional"></div><div class="field"><label>Quantidade</label><input id="storeQty" type="number" min="1"></div><div class="field"><label>Marca / categoria</label><input id="storeBrand" placeholder="Marca ou grupo"></div><button class="success" onclick="storeMaterial()">Confirmar guarda</button></div>`;}
-async function storeMaterial(){try{await api("/api/unified/warehouse/store",{method:"POST",body:JSON.stringify({user_id:currentUser.id,location_id:Number($("storeLocation").value),card_id:Number($("storeCard").value||0),quantity:Number($("storeQty").value),brand:$("storeBrand").value,category:$("storeBrand").value})});toast("Mercadoria guardada e capacidade atualizada.");renderWarehouse();}catch(e){toast(e.message)}}
+async function renderSgo() {
+  setPage("SGO e Entradas","Previsão de compras e distribuição de serviço por setor");
+  const [rows,summary] = await Promise.all([
+    api(`/api/unified/sgo?limit=${SGO_PAGE_SIZE}&offset=0`),
+    api("/api/unified/sgo/summary")
+  ]);
+  if (currentView !== "sgo") return;
+  unifiedCache.sgo = rows;
+  sgoListOffset = rows.length;
+  sgoListHasMore = rows.length === SGO_PAGE_SIZE;
+  sgoListLoading = false;
+  const counts = Object.fromEntries((summary.by_status||[]).map(row=>[row.status,Number(row.count||0)]));
+  $("mainContent").innerHTML = `
+    <div class="kpi-grid compact-kpis">${["EM_TRANSITO","QUALIDADE","PROCESSAMENTO","ESTOCAGEM","CONCLUIDO"].map(status=>`<div class="kpi"><div class="kpi-label">${status.replaceAll('_',' ')}</div><div class="kpi-value">${counts[status]||0}</div></div>`).join("")}</div>
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-header">Relatório SGO <button class="primary small-btn" onclick="document.getElementById('sgoFile').click()">Importar Excel</button><input id="sgoFile" class="hidden" type="file" accept=".xlsx,.xlsm" onchange="importSgo(this)"></div>
+      <div class="panel-body"><div class="queue-search"><span>⌕</span><input id="sgoSearch" placeholder="Compra, grupo, descrição ou marca" oninput="filterSgoRows()"></div></div>
+      <div class="table-wrap"><table class="compact-table"><thead><tr><th>Compra</th><th>Grupo / descrição</th><th>Marca</th><th>Quantidade</th><th>Previsão</th><th>Etapa</th><th>Ação</th></tr></thead><tbody id="sgoBody">${rows.map(sgoRowHtml).join("")||'<tr><td colspan="7">Importe um relatório SGO para iniciar.</td></tr>'}</tbody></table></div>
+      <div id="sgoPager" class="panel-body warehouse-pager"></div>
+    </div>`;
+  updateSgoPager();
+}
 
-async function renderSgo(){setPage("SGO e Entradas","Previsão de compras e distribuição de serviço por setor");const rows=await api("/api/unified/sgo");unifiedCache.sgo=rows;const counts=Object.fromEntries(["EM_TRANSITO","QUALIDADE","PROCESSAMENTO","ESTOCAGEM","CONCLUIDO"].map(s=>[s,rows.filter(r=>r.status===s).length]));$("mainContent").innerHTML=`<div class="kpi-grid compact-kpis">${Object.entries(counts).map(([s,n])=>`<div class="kpi"><div class="kpi-label">${s.replaceAll('_',' ')}</div><div class="kpi-value">${n}</div></div>`).join("")}</div><div class="panel" style="margin-top:14px"><div class="panel-header">Relatório SGO <button class="primary small-btn" onclick="document.getElementById('sgoFile').click()">Importar Excel</button><input id="sgoFile" class="hidden" type="file" accept=".xlsx,.xlsm" onchange="importSgo(this)"></div><div class="panel-body"><div class="queue-search"><span>⌕</span><input id="sgoSearch" placeholder="Compra, grupo, descrição ou marca" oninput="filterSgoRows()"></div></div><div class="table-wrap"><table class="compact-table"><thead><tr><th>Compra</th><th>Grupo / descrição</th><th>Marca</th><th>Quantidade</th><th>Previsão</th><th>Etapa</th><th>Ação</th></tr></thead><tbody>${rows.map(r=>`<tr class="sgo-row" data-search="${esc(normalizeSearch([r.purchase_id,r.group_name,r.description,r.brand].join(' ')))}"><td><b>${esc(r.purchase_id||'—')}</b><small>${esc(r.origin||'')}</small></td><td><b>${esc(r.group_name||'—')}</b><small>${esc(r.description||'')}</small></td><td>${esc(r.brand||'—')}</td><td><b>${r.quantity}</b></td><td>${esc(r.forecast_date||'—')}</td><td>${statusBadge(r.status)}</td><td><button class="secondary small-btn" onclick="createSgoTask(${r.id},'${r.status}')">Criar tarefa</button></td></tr>`).join("")||'<tr><td colspan="7">Importe um relatório SGO para iniciar.</td></tr>'}</tbody></table></div></div>`;}
-function filterSgoRows(){const t=normalizeSearch($("sgoSearch")?.value||"");document.querySelectorAll(".sgo-row").forEach(r=>r.classList.toggle("hidden",t&&!r.dataset.search.includes(t)));}
+function sgoRowHtml(row) {
+  return `<tr class="sgo-row"><td><b>${esc(row.purchase_id||'—')}</b><small>${esc(row.origin||'')}</small></td><td><b>${esc(row.group_name||'—')}</b><small>${esc(row.description||'')}</small></td><td>${esc(row.brand||'—')}</td><td><b>${row.quantity}</b></td><td>${esc(row.forecast_date||'—')}</td><td>${statusBadge(row.status)}</td><td><button class="secondary small-btn" onclick="createSgoTask(${row.id},'${row.status}')">Criar tarefa</button></td></tr>`;
+}
+
+function sgoListUrl(offset) {
+  return `/api/unified/sgo?limit=${SGO_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent($("sgoSearch")?.value?.trim()||"")}`;
+}
+
+function updateSgoPager() {
+  const pager = $("sgoPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${sgoListOffset.toLocaleString("pt-BR")} entradas carregadas</span><button class="secondary small-btn" onclick="loadMoreSgo()" ${!sgoListHasMore||sgoListLoading?"disabled":""}>${sgoListLoading?"Carregando...":"Carregar mais entradas"}</button>`;
+  pager.classList.toggle("hidden",!sgoListHasMore&&!sgoListLoading);
+}
+
+function filterSgoRows() {
+  clearTimeout(sgoSearchTimer);
+  sgoSearchTimer = setTimeout(() => searchSgo(),250);
+}
+
+async function searchSgo() {
+  const token = ++sgoRequestToken;
+  sgoListOffset = 0;
+  sgoListHasMore = false;
+  sgoListLoading = true;
+  updateSgoPager();
+  try {
+    const rows = await api(sgoListUrl(0));
+    if (token !== sgoRequestToken || currentView !== "sgo") return;
+    const body = $("sgoBody");
+    if (!body) return;
+    body.innerHTML = rows.map(sgoRowHtml).join("") || '<tr><td colspan="7">Nenhuma entrada encontrada.</td></tr>';
+    sgoListOffset = rows.length;
+    sgoListHasMore = rows.length === SGO_PAGE_SIZE;
+    unifiedCache.sgo = rows;
+  } catch(error) {
+    if (token === sgoRequestToken && currentView === "sgo") toast(error.message);
+  } finally {
+    if (token === sgoRequestToken) {
+      sgoListLoading = false;
+      updateSgoPager();
+    }
+  }
+}
+
+async function loadMoreSgo() {
+  if (sgoListLoading||!sgoListHasMore||currentView!=="sgo")return;
+  const token=sgoRequestToken,offset=sgoListOffset;
+  sgoListLoading=true;updateSgoPager();
+  try {
+    const rows=await api(sgoListUrl(offset));
+    if(token!==sgoRequestToken||currentView!=="sgo")return;
+    const body=$("sgoBody");if(!body)return;
+    const empty=body.querySelector("td[colspan]");
+    if(empty&&offset===0)body.innerHTML="";
+    body.insertAdjacentHTML("beforeend",rows.map(sgoRowHtml).join(""));
+    sgoListOffset+=rows.length;sgoListHasMore=rows.length===SGO_PAGE_SIZE;
+    unifiedCache.sgo=[...unifiedCache.sgo,...rows];
+  } catch(error) {
+    if(token===sgoRequestToken&&currentView==="sgo")toast(error.message);
+  } finally {
+    if(token===sgoRequestToken){sgoListLoading=false;updateSgoPager();}
+  }
+}
+
 async function importSgo(input){if(!input.files?.[0])return;const form=new FormData();form.append("file",input.files[0]);try{const d=await api(`/api/unified/sgo/import?user_id=${currentUser.id}`,{method:"POST",body:form});toast(`${d.rows} entradas SGO importadas.`);renderSgo();}catch(e){toast(e.message)}}
 async function createSgoTask(id,status){const sector=prompt("Setor da tarefa:",status||"RECEBIMENTO");if(!sector)return;try{await api(`/api/unified/sgo/${id}/task`,{method:"POST",body:JSON.stringify({user_id:currentUser.id,sector})});toast("Tarefa criada.");}catch(e){toast(e.message)}}
 
-async function renderTasks(){setPage("Tarefas Operacionais","Responsáveis, prioridades e andamento por setor");const rows=await api("/api/unified/tasks");unifiedCache.tasks=rows;const cols=["PENDENTE","EM_ANDAMENTO","CONCLUIDA"];$("mainContent").innerHTML=`<div class="tasks-toolbar"><button class="primary" onclick="showTaskForm()">+ Nova tarefa</button><select id="taskSectorFilter" onchange="filterTaskCards()"><option value="">Todos os setores</option>${[...new Set(rows.map(r=>r.sector))].map(s=>`<option>${esc(s)}</option>`).join("")}</select></div><div id="taskForm" class="panel hidden"></div><div class="task-board">${cols.map(status=>`<section><h3>${status.replaceAll('_',' ')} <span>${rows.filter(r=>r.status===status).length}</span></h3>${rows.filter(r=>r.status===status).map(t=>taskCard(t)).join("")||'<div class="empty-column">Nenhuma tarefa</div>'}</section>`).join("")}</div>`;}
+async function renderTasks(){setPage("Tarefas Operacionais","Responsáveis, prioridades e andamento por setor");const rows=await api("/api/unified/tasks");if(currentView!=="tasks")return;unifiedCache.tasks=rows;const cols=["PENDENTE","EM_ANDAMENTO","CONCLUIDA"];$("mainContent").innerHTML=`<div class="tasks-toolbar"><button class="primary" onclick="showTaskForm()">+ Nova tarefa</button><select id="taskSectorFilter" onchange="filterTaskCards()"><option value="">Todos os setores</option>${[...new Set(rows.map(r=>r.sector))].map(s=>`<option>${esc(s)}</option>`).join("")}</select></div><div id="taskForm" class="panel hidden"></div><div class="task-board">${cols.map(status=>`<section><h3>${status.replaceAll('_',' ')} <span>${rows.filter(r=>r.status===status).length}</span></h3>${rows.filter(r=>r.status===status).map(t=>taskCard(t)).join("")||'<div class="empty-column">Nenhuma tarefa</div>'}</section>`).join("")}</div>`;}
 function taskCard(t){return `<article class="task-card" data-sector="${esc(t.sector)}"><div><span class="priority ${String(t.priority).toLowerCase()}">${esc(t.priority)}</span><small>${esc(t.sector)}</small></div><h4>${esc(t.title)}</h4><p>${esc(t.description||'Sem descrição')}</p><footer><span>${esc(t.responsible_name||'Não atribuída')}</span>${t.status!=="CONCLUIDA"?`<button class="small-btn ${t.status==='PENDENTE'?'primary':'success'}" onclick="advanceTask(${t.id},'${t.status==='PENDENTE'?'EM_ANDAMENTO':'CONCLUIDA'}')">${t.status==='PENDENTE'?'Iniciar':'Concluir'}</button>`:''}</footer></article>`;}
 function filterTaskCards(){const s=$("taskSectorFilter").value;document.querySelectorAll(".task-card").forEach(c=>c.classList.toggle("hidden",s&&c.dataset.sector!==s));}
 function showTaskForm(){$("taskForm").classList.remove("hidden");$("taskForm").innerHTML=`<div class="panel-body inline-form"><div class="field"><label>Título</label><input id="taskTitle"></div><div class="field"><label>Setor</label><select id="taskSector">${["RECEBIMENTO","QUALIDADE","PROCESSAMENTO","ETIQUETAGEM","ESTOCAGEM","EXPEDICAO","DEVOLUCOES"].map(s=>`<option>${s}</option>`).join("")}</select></div><div class="field"><label>Prioridade</label><select id="taskPriority"><option>NORMAL</option><option>ALTA</option><option>URGENTE</option></select></div><div class="field grow"><label>Descrição</label><input id="taskDescription"></div><button class="primary" onclick="createTask()">Criar tarefa</button></div>`;}
 async function createTask(){try{await api("/api/unified/tasks",{method:"POST",body:JSON.stringify({user_id:currentUser.id,title:$("taskTitle").value,sector:$("taskSector").value,priority:$("taskPriority").value,description:$("taskDescription").value})});toast("Tarefa criada.");renderTasks();}catch(e){toast(e.message)}}
 async function advanceTask(id,status){try{await api(`/api/unified/tasks/${id}`,{method:"PATCH",body:JSON.stringify({user_id:currentUser.id,status})});renderTasks();}catch(e){toast(e.message)}}
 
-async function renderShipping(){
+async function renderShipping() {
   setPage("Expedição","Preenchimento, conferência e liberação da saída");
-  const rows=await api("/api/unified/shipments");unifiedCache.shipments=rows;
-  const allowed=["expedicao","estocagem","supervisor","admin"].includes(currentUser.role);
-  const preparing=rows.filter(s=>s.status!=="EXPEDIDO"&&s.status!=="PRONTO").length;
-  const ready=rows.filter(s=>s.status==="PRONTO").length;
-  const shipped=rows.filter(s=>s.status==="EXPEDIDO").length;
-  const checked=rows.reduce((a,s)=>a+Number(s.checked_qty||0),0),total=rows.reduce((a,s)=>a+Number(s.total_qty||0),0);
-  $("mainContent").innerHTML=`
+  const [rows,summary] = await Promise.all([
+    api(`/api/unified/shipments?limit=${SHIPMENTS_PAGE_SIZE}&offset=0`),
+    api("/api/unified/shipments/summary")
+  ]);
+  if (currentView !== "shipping") return;
+  unifiedCache.shipments = rows;
+  shipmentsListOffset = rows.length;
+  shipmentsListHasMore = rows.length === SHIPMENTS_PAGE_SIZE;
+  shipmentsListLoading = false;
+  const allowed = ["expedicao","estocagem","supervisor","admin"].includes(currentUser.role);
+  const preparing = Number(summary.preparing||0), ready = Number(summary.ready||0), shipped = Number(summary.shipped||0);
+  const checked = Number(summary.checked_qty||0), total = Number(summary.total_qty||0);
+  $("mainContent").innerHTML = `
     <div class="kpi-grid compact-kpis shipping-kpis">
       <div class="kpi"><div class="kpi-label">Em preenchimento</div><div class="kpi-value">${preparing}</div><div class="kpi-hint">Romaneios</div></div>
       <div class="kpi"><div class="kpi-label">Prontos para saída</div><div class="kpi-value">${ready}</div><div class="kpi-hint">Conferidos</div></div>
@@ -1891,12 +2202,87 @@ async function renderShipping(){
       <div class="panel-header"><span>Controle de romaneios</span><div>${allowed?`<button class="ghost small-btn" onclick="document.getElementById('shipmentPdf').click()">Importar PDF</button> <button class="primary small-btn" onclick="showShipmentForm()">+ Novo romaneio</button><input id="shipmentPdf" class="hidden" type="file" accept=".pdf" onchange="importShipmentPdf(this)">`:''}</div></div>
       <div class="panel-body shipping-toolbar"><div class="queue-search"><span>⌕</span><input id="shipmentSearch" placeholder="Romaneio, destino, transportadora, placa ou motorista" oninput="filterShipmentRows()"></div><select id="shipmentStatus" onchange="filterShipmentRows()"><option value="">Todos os status</option><option>RASCUNHO</option><option>PREPARANDO</option><option>EM_CONFERENCIA</option><option>PRONTO</option><option>EXPEDIDO</option></select></div>
       <div id="shipmentForm" class="panel-body hidden"></div>
-      <div class="table-wrap"><table class="compact-table"><thead><tr><th>Documento</th><th>Destino / transporte</th><th>Conferência</th><th>Volumes</th><th>Saída prevista</th><th>Status</th><th></th></tr></thead><tbody>
-        ${rows.map(s=>{const pct=s.total_qty?Math.min(100,Math.round(Number(s.checked_qty||0)*100/s.total_qty)):0;return `<tr class="shipment-row" data-status="${esc(s.status)}" data-search="${esc(normalizeSearch([s.document_no,s.destination,s.carrier,s.vehicle_plate,s.driver_name].join(' ')))}"><td><button class="link-button" onclick="openShipment(${s.id})"><b>${esc(s.document_no)}</b></button><small>${s.item_count||0} item(ns)</small></td><td><b>${esc(s.destination||'Pendente')}</b><small>${esc(s.carrier||'Transportadora não informada')} ${s.vehicle_plate?`• ${esc(s.vehicle_plate)}`:''}</small></td><td><div class="shipping-progress"><i style="width:${pct}%"></i></div><small>${Number(s.checked_qty||0).toLocaleString('pt-BR')} / ${Number(s.total_qty||0).toLocaleString('pt-BR')} peças • ${pct}%</small></td><td>${Number(s.volume_count||0)||'—'}</td><td>${s.scheduled_at?fmtDateTime(s.scheduled_at):'—'}</td><td>${statusBadge(s.status)}</td><td><button class="secondary small-btn" onclick="openShipment(${s.id})">Preencher</button></td></tr>`}).join("")||'<tr><td colspan="7">Nenhum romaneio cadastrado.</td></tr>'}
-      </tbody></table></div>
+      <div class="table-wrap"><table class="compact-table"><thead><tr><th>Documento</th><th>Destino / transporte</th><th>Conferência</th><th>Volumes</th><th>Saída prevista</th><th>Status</th><th></th></tr></thead><tbody id="shipmentsBody">${rows.map(shipmentRowHtml).join("")||'<tr><td colspan="7">Nenhum romaneio cadastrado.</td></tr>'}</tbody></table></div>
+      <div id="shipmentsPager" class="panel-body warehouse-pager"></div>
     </div>`;
+  updateShipmentsPager();
 }
-function filterShipmentRows(){const term=normalizeSearch($("shipmentSearch")?.value||""),status=$("shipmentStatus")?.value||"";document.querySelectorAll(".shipment-row").forEach(row=>row.classList.toggle("hidden",(term&&!row.dataset.search.includes(term))||(status&&row.dataset.status!==status)));}
+
+function shipmentRowHtml(s) {
+  const pct = s.total_qty ? Math.min(100,Math.round(Number(s.checked_qty||0)*100/Number(s.total_qty))) : 0;
+  return `<tr class="shipment-row" data-status="${esc(s.status)}" data-search="${esc(normalizeSearch([s.document_no,s.destination,s.carrier,s.vehicle_plate,s.driver_name].join(' ')))}"><td><button class="link-button" onclick="openShipment(${s.id})"><b>${esc(s.document_no)}</b></button><small>${s.item_count||0} item(ns)</small></td><td><b>${esc(s.destination||'Pendente')}</b><small>${esc(s.carrier||'Transportadora não informada')} ${s.vehicle_plate?`• ${esc(s.vehicle_plate)}`:''}</small></td><td><div class="shipping-progress"><i style="width:${pct}%"></i></div><small>${Number(s.checked_qty||0).toLocaleString('pt-BR')} / ${Number(s.total_qty||0).toLocaleString('pt-BR')} peças • ${pct}%</small></td><td>${Number(s.volume_count||0)||'—'}</td><td>${s.scheduled_at?fmtDateTime(s.scheduled_at):'—'}</td><td>${statusBadge(s.status)}</td><td><button class="secondary small-btn" onclick="openShipment(${s.id})">Preencher</button></td></tr>`;
+}
+
+function updateShipmentsPager() {
+  const pager = $("shipmentsPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${shipmentsListOffset.toLocaleString("pt-BR")} romaneios carregados</span><button class="secondary small-btn" onclick="loadMoreShipments()" ${!shipmentsListHasMore||shipmentsListLoading?"disabled":""}>${shipmentsListLoading?"Carregando...":"Carregar mais romaneios"}</button>`;
+  pager.classList.toggle("hidden",!shipmentsListHasMore&&!shipmentsListLoading);
+}
+
+function shipmentListUrl(offset) {
+  const search = $("shipmentSearch")?.value?.trim() || "";
+  const status = $("shipmentStatus")?.value || "";
+  return `/api/unified/shipments?limit=${SHIPMENTS_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent(search)}&status=${encodeURIComponent(status)}`;
+}
+
+function filterShipmentRows() {
+  clearTimeout(shipmentsSearchTimer);
+  shipmentsSearchTimer = setTimeout(() => searchShipments(),250);
+}
+
+async function searchShipments() {
+  const token = ++shipmentsRequestToken;
+  shipmentsListOffset = 0;
+  shipmentsListHasMore = false;
+  shipmentsListLoading = true;
+  updateShipmentsPager();
+  try {
+    const rows = await api(shipmentListUrl(0));
+    if (token !== shipmentsRequestToken || currentView !== "shipping") return;
+    const body = $("shipmentsBody");
+    if (!body) return;
+    body.innerHTML = rows.map(shipmentRowHtml).join("") || '<tr><td colspan="7">Nenhum romaneio cadastrado.</td></tr>';
+    shipmentsListOffset = rows.length;
+    shipmentsListHasMore = rows.length === SHIPMENTS_PAGE_SIZE;
+    unifiedCache.shipments = rows;
+  } catch(error) {
+    if (token === shipmentsRequestToken && currentView === "shipping") toast(error.message);
+  } finally {
+    if (token === shipmentsRequestToken) {
+      shipmentsListLoading = false;
+      updateShipmentsPager();
+    }
+  }
+}
+
+async function loadMoreShipments() {
+  if (shipmentsListLoading || !shipmentsListHasMore || currentView !== "shipping") return;
+  const token = shipmentsRequestToken;
+  const offset = shipmentsListOffset;
+  shipmentsListLoading = true;
+  updateShipmentsPager();
+  try {
+    const rows = await api(shipmentListUrl(offset));
+    if (token !== shipmentsRequestToken || currentView !== "shipping") return;
+    const body = $("shipmentsBody");
+    if (!body) return;
+    const empty = body.querySelector("td[colspan]");
+    if (empty && offset === 0) body.innerHTML = "";
+    body.insertAdjacentHTML("beforeend",rows.map(shipmentRowHtml).join(""));
+    shipmentsListOffset += rows.length;
+    shipmentsListHasMore = rows.length === SHIPMENTS_PAGE_SIZE;
+    unifiedCache.shipments = [...unifiedCache.shipments,...rows];
+  } catch(error) {
+    if (token === shipmentsRequestToken && currentView === "shipping") toast(error.message);
+  } finally {
+    if (token === shipmentsRequestToken) {
+      shipmentsListLoading = false;
+      updateShipmentsPager();
+    }
+  }
+}
+
 function showShipmentForm(){
   $("shipmentForm").classList.remove("hidden");
   $("shipmentForm").innerHTML=`<div class="shipping-form-title"><div><b>Novo romaneio</b><span>Preencha os dados conhecidos agora; o restante pode ser concluído depois.</span></div><button class="ghost small-btn" onclick="$('shipmentForm').classList.add('hidden')">Fechar</button></div>
@@ -1911,7 +2297,68 @@ async function openShipment(id){try{const d=await api(`/api/unified/shipments/${
 async function saveShipmentFilling(id){try{const items=[...document.querySelectorAll('.shipment-edit-item')].map(row=>({id:Number(row.dataset.id),checked_qty:Number(row.querySelector('[data-field=checked]').value||0),notes:row.querySelector('[data-field=notes]').value}));const d=await api(`/api/unified/shipments/${id}/filling`,{method:'PATCH',body:JSON.stringify({user_id:currentUser.id,document_no:$("shipEditDoc").value,destination:$("shipEditDest").value,carrier:$("shipEditCarrier").value,vehicle_plate:$("shipEditPlate").value,driver_name:$("shipEditDriver").value,scheduled_at:$("shipEditScheduled").value,volume_count:Number($("shipEditVolumes").value||0),notes:$("shipEditNotes").value,items})});toast(d.status==='PRONTO'?'Conferência completa. Romaneio liberado para saída.':'Preenchimento salvo. Ainda existem pendências.');await renderShipping();openShipment(id);}catch(e){toast(e.message)}}
 async function finishShipment(id){try{await api(`/api/unified/shipments/${id}`,{method:"PATCH",body:JSON.stringify({user_id:currentUser.id,status:"EXPEDIDO"})});closeModal();toast("Saída confirmada e romaneio concluído.");renderShipping();}catch(e){toast(e.message)}}
 
-async function renderReturns(){setPage("Devoluções","Conferência Loja × CD × Anápolis, pendências e tratativas");const rows=await api("/api/unified/returns");unifiedCache.returns=rows;const open=rows.filter(r=>r.status!=="CONCLUIDA");$("mainContent").innerHTML=`<div class="kpi-grid compact-kpis"><div class="kpi"><div class="kpi-label">Registradas</div><div class="kpi-value">${rows.length}</div></div><div class="kpi"><div class="kpi-label">Abertas</div><div class="kpi-value">${open.length}</div></div><div class="kpi"><div class="kpi-label">Divergentes</div><div class="kpi-value">${rows.filter(r=>r.status==='DIVERGENTE').length}</div></div><div class="kpi"><div class="kpi-label">Peças em Anápolis</div><div class="kpi-value">${rows.reduce((a,r)=>a+Number(r.total_anapolis||0),0)}</div></div></div><div class="panel" style="margin-top:14px"><div class="panel-header"><span>Devoluções</span><div><button class="ghost small-btn" onclick="showReturnPdfForm()">Comparar PDFs</button> <button class="primary small-btn" onclick="showReturnForm()">+ Registrar devolução</button></div></div><div id="returnForm" class="panel-body hidden"></div><div class="table-wrap"><table><thead><tr><th>Documento</th><th>Loja / cliente</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td><button class="link-button" onclick="openReturn(${r.id})"><b>${esc(r.document_no)}</b></button></td><td>${esc(r.store||r.customer||'—')}</td><td>${r.total_store}</td><td>${r.total_cd}</td><td>${r.total_anapolis}</td><td><b class="${r.difference?'text-danger':''}">${r.difference}</b></td><td>${statusBadge(r.status)}</td><td>${r.status!=="CONCLUIDA"?`<button class="success small-btn" onclick="finishReturn(${r.id})">Concluir</button>`:''}</td></tr>`).join("")||'<tr><td colspan="8">Nenhuma devolução.</td></tr>'}</tbody></table></div></div>`;}
+async function renderReturns() {
+  setPage("Devoluções","Conferência Loja × CD × Anápolis, pendências e tratativas");
+  const [rows,analytics] = await Promise.all([
+    api(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=0`),
+    safeApi("/api/unified/returns/analytics",{totals:{},by_status:[],by_store:[]})
+  ]);
+  if (currentView !== "returns") return;
+  unifiedCache.returns = rows;
+  returnsListOffset = rows.length;
+  returnsListHasMore = rows.length === RETURNS_PAGE_SIZE;
+  returnsListLoading = false;
+  const totals = analytics.totals || {};
+  const statusCounts = Object.fromEntries((analytics.by_status||[]).map(row=>[row.status,Number(row.quantity||0)]));
+  const open = Object.entries(statusCounts).reduce((sum,[status,count])=>sum+(status==="CONCLUIDA"?0:count),0);
+  $("mainContent").innerHTML = `
+    <div class="kpi-grid compact-kpis">
+      <div class="kpi"><div class="kpi-label">Registradas</div><div class="kpi-value">${Number(totals.total||0).toLocaleString("pt-BR")}</div></div>
+      <div class="kpi"><div class="kpi-label">Abertas</div><div class="kpi-value">${open.toLocaleString("pt-BR")}</div></div>
+      <div class="kpi"><div class="kpi-label">Divergentes</div><div class="kpi-value">${Number(statusCounts.DIVERGENTE||0).toLocaleString("pt-BR")}</div></div>
+      <div class="kpi"><div class="kpi-label">Peças em Anápolis</div><div class="kpi-value">${Number(totals.total_anapolis||0).toLocaleString("pt-BR")}</div></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-header"><span>Devoluções</span><div><button class="ghost small-btn" onclick="showReturnPdfForm()">Comparar PDFs</button> <button class="primary small-btn" onclick="showReturnForm()">+ Registrar devolução</button></div></div>
+      <div id="returnForm" class="panel-body hidden"></div>
+      <div class="table-wrap"><table><thead><tr><th>Documento</th><th>Loja / cliente</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th></th></tr></thead><tbody id="returnsBody">${rows.map(returnQueueRow).join("")||'<tr><td colspan="8">Nenhuma devolução.</td></tr>'}</tbody></table></div>
+      <div id="returnsPager" class="panel-body warehouse-pager"></div>
+    </div>`;
+  updateReturnsPager();
+}
+
+function returnQueueRow(row) {
+  return `<tr><td><button class="link-button" onclick="openReturn(${row.id})"><b>${esc(row.document_no)}</b></button></td><td>${esc(row.store||row.customer||'—')}</td><td>${row.total_store}</td><td>${row.total_cd}</td><td>${row.total_anapolis}</td><td><b class="${row.difference?'text-danger':''}">${row.difference}</b></td><td>${statusBadge(row.status)}</td><td>${row.status!=="CONCLUIDA"?`<button class="success small-btn" onclick="finishReturn(${row.id})">Concluir</button>`:''}</td></tr>`;
+}
+
+function updateReturnsPager() {
+  const pager = $("returnsPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${returnsListOffset.toLocaleString("pt-BR")} documentos carregados</span><button class="secondary small-btn" onclick="loadMoreReturns()" ${!returnsListHasMore||returnsListLoading?"disabled":""}>${returnsListLoading?"Carregando...":"Carregar mais devoluções"}</button>`;
+  pager.classList.toggle("hidden",!returnsListHasMore&&!returnsListLoading);
+}
+
+async function loadMoreReturns() {
+  if (returnsListLoading||!returnsListHasMore||currentView!=="returns") return;
+  returnsListLoading = true;
+  updateReturnsPager();
+  try {
+    const rows = await api(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=${returnsListOffset}`);
+    if (currentView!=="returns") return;
+    const tbody = $("returnsBody");
+    if (!tbody) return;
+    tbody.insertAdjacentHTML("beforeend",rows.map(returnQueueRow).join(""));
+    returnsListOffset += rows.length;
+    returnsListHasMore = rows.length===RETURNS_PAGE_SIZE;
+    unifiedCache.returns = [...unifiedCache.returns,...rows];
+  } catch(error) {
+    if (currentView==="returns") toast(error.message);
+  } finally {
+    returnsListLoading = false;
+    updateReturnsPager();
+  }
+}
+
 function showReturnForm(){$("returnForm").classList.remove("hidden");$("returnForm").innerHTML=`<div class="return-form-grid"><div class="field"><label>Documento</label><input id="returnDoc"></div><div class="field"><label>Loja</label><input id="returnStore"></div><div class="field"><label>Código de barras</label><input id="returnBarcode"></div><div class="field"><label>Descrição</label><input id="returnDescription"></div><div class="field"><label>Quantidade Loja</label><input id="returnStoreQty" type="number" min="0"></div><div class="field"><label>Quantidade CD</label><input id="returnCdQty" type="number" min="0"></div><div class="field"><label>Quantidade Anápolis</label><input id="returnAnaQty" type="number" min="0"></div><button class="primary" onclick="createReturn()">Conferir e registrar</button></div>`;}
 function showReturnPdfForm(){$("returnForm").classList.remove("hidden");$("returnForm").innerHTML=`<div class="notice">Selecione os relatórios da mesma devolução. O sistema compara por código de barras usando a regra <b>Loja = CD + Anápolis</b>.</div><div class="return-form-grid"><div class="field"><label>Relatório da Loja</label><input id="returnPdfStore" type="file" accept=".pdf"></div><div class="field"><label>Conferência do CD</label><input id="returnPdfCd" type="file" accept=".pdf"></div><div class="field"><label>Itens em Anápolis (opcional)</label><input id="returnPdfAna" type="file" accept=".pdf"></div><button class="primary" onclick="compareReturnPdfs()">Comparar e registrar</button></div>`;}
 async function createReturn(){try{await api("/api/unified/returns",{method:"POST",body:JSON.stringify({user_id:currentUser.id,document_no:$("returnDoc").value,store:$("returnStore").value,items:[{barcode:$("returnBarcode").value,description:$("returnDescription").value,qty_store:Number($("returnStoreQty").value||0),qty_cd:Number($("returnCdQty").value||0),qty_anapolis:Number($("returnAnaQty").value||0)}]})});toast("Devolução registrada.");renderReturns();}catch(e){toast(e.message)}}
@@ -1929,10 +2376,15 @@ async function renderDashboard() {
   const [data,unified,warehouseSummary,quality,processing,returns] = await Promise.all([
     safeApi("/api/dashboard",{totals:{receiving:0,quality:0,processing:0,storage:0},recent:[],status_counts:[]}),
     safeApi("/api/unified/overview",{warehouse:{percentage:0},tasks:{},returns:{},sgo:{},recent_movements:[]}),
-    safeApi("/api/unified/warehouse/summary",{genders:[]}),
-    safeApi("/api/cards?scope=quality",[]),safeApi("/api/cards?scope=processing",[]),safeApi("/api/unified/returns",[])
+    safeApi("/api/unified/warehouse/summary",{genders:[],zones:[],totals:{}}),
+    safeApi("/api/cards?scope=quality&limit=5",[]),
+    safeApi("/api/cards?scope=processing&limit=5",[]),
+    safeApi("/api/unified/returns?limit=5",[])
   ]);
+  if (currentView !== "dashboard") return;
   const active=[...processing,...data.recent.filter(c=>["QUALIDADE","PROCESSAMENTO","ETIQUETAGEM"].includes(c.current_sector))].filter((c,i,a)=>a.findIndex(x=>x.id===c.id)===i).slice(0,5);
+  const returnCounts=unified.returns||{};
+  const openReturns=Object.entries(returnCounts).reduce((sum,[status,count])=>sum+(status==="CONCLUIDA"?0:Number(count||0)),0);
   $("mainContent").innerHTML=`<div class="reference-dashboard">
     <div class="hero-kpis">
       ${heroKpi("Aguardando recebimento",data.totals.receiving,"Pedidos","▣","blue","receiving")}
@@ -1946,9 +2398,9 @@ async function renderDashboard() {
       ${dashboardPanel("⌁","Estoque conectado",`<span class="online-pill">Online</span>`,gendersTable(warehouseSummary.genders))}
     </div>
     <div class="dash-row dash-row-secondary">
-      ${dashboardPanel("◇","Qualidade",`<span class="panel-count">${quality.length}</span>`,qualityTable(quality.slice(0,5)))}
-      ${dashboardPanel("⚙","Processamento",`<span class="panel-count">${processing.length}</span>`,processingTable(processing.slice(0,5)))}
-      ${dashboardPanel("↩","Devoluções",`<span class="panel-count red-count">${returns.filter(r=>r.status!=="CONCLUIDA").length}</span>`,returnsTable(returns.slice(0,5)))}
+      ${dashboardPanel("◇","Qualidade",`<span class="panel-count">${data.totals.quality||0}</span>`,qualityTable(quality.slice(0,5)))}
+      ${dashboardPanel("⚙","Processamento",`<span class="panel-count">${data.totals.processing||0}</span>`,processingTable(processing.slice(0,5)))}
+      ${dashboardPanel("↩","Devoluções",`<span class="panel-count red-count">${openReturns}</span>`,returnsTable(returns.slice(0,5)))}
     </div>
     <div class="flow-strip">${[["🛒","Compras","import"],["⇩","Recebimento","receiving"],["◇","Qualidade","quality"],["⚙","Processamento","processing"],["♢","Etiquetagem","labeling"],["⌂","Estocagem","storage-hub"],["▣","Expedição / Devolução","returns-hub"]].map(([icon,label,view],i)=>`${i?'<i>→</i>':''}<button onclick="goTo('${view}')"><b>${icon}</b><span>${label}</span>${i===1?'<small>+ 10%</small>':''}</button>`).join("")}</div>
   </div>`;
@@ -1980,6 +2432,7 @@ async function renderGoatIndicators(){
   setPage("Indicadores (GOAT)","Compras, fornecedores, perdas e divergências — importado do relatório de operações do GOAT");
   const status=await safeApi('/api/goat/status',{last_import:null,sheets:[]});
   const summary=await safeApi('/api/goat/summary',{totals:{},top_rejeitados_fornecedor:[],top_perdas_responsavel:[],fornecedores_criticos:[]});
+  if(currentView!=="goat-indicators")return;
   const t=summary.totals||{};
   $("mainContent").innerHTML=`
     <div class="hero-kpis">
@@ -2165,29 +2618,231 @@ async function prodRenderQuadro(body){
   </div>`;
 }
 
-async function renderStorageHub(){setPage("Estocagem","");const [cards,warehouse,analytics]=await Promise.all([safeApi('/api/cards?scope=storage',[]),safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const occupied=warehouse.locations.filter(l=>l.occupied_qty>0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}<div class="hero-kpis storage-kpis">${heroKpi("Aguardando estocagem",cards.length,"Cards","⌂","blue","storage")}${heroKpi("Endereços ocupados",occupied.length,"Casulos","▦","teal","warehouse")}${heroKpi("Endereços livres",warehouse.locations.filter(l=>l.status==='DISPONIVEL').length,"Casulos","◇","blue","warehouse")}<div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${warehouse.zones.length?Math.round(warehouse.zones.reduce((a,z)=>a+z.occupancy,0)/warehouse.zones.length):0}%</strong><small>Capacidade cadastrada</small></div></div></div><div class="dash-row storage-layout">${dashboardPanel("▦","Visualizador de casulos","",zonesTable(warehouse.zones))}${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Digite endereço, marca ou categoria" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.slice(0,12).map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}</div><section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;}
+async function renderStorageHub() {
+  setPage("Estocagem","");
+  const [dashboard,warehouse,analytics] = await Promise.all([
+    safeApi("/api/dashboard",{totals:{storage:0}}),
+    safeApi("/api/unified/warehouse/summary",{zones:[],totals:{},occupied_preview:[]}),
+    safeApi("/api/unified/warehouse/analytics",{structures:[],categories:[],brands:[],groups:[]})
+  ]);
+  if (currentView !== "storage-hub") return;
+  const totals = warehouse.totals || {};
+  const occupied = warehouse.occupied_preview || [];
+  const zones = warehouse.zones || [];
+  const avgOccupancy = zones.length ? Math.round(zones.reduce((sum,z)=>sum+Number(z.occupancy||0),0)/zones.length) : 0;
+  $("mainContent").innerHTML = `
+    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}
+    <div class="hero-kpis storage-kpis">
+      ${heroKpi("Aguardando estocagem",dashboard.totals.storage||0,"Cards","⌂","blue","storage")}
+      ${heroKpi("Endereços ocupados",totals.occupied_locations||0,"Casulos","▦","teal","warehouse")}
+      ${heroKpi("Endereços livres",totals.available_locations||0,"Casulos","◇","blue","warehouse")}
+      <div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${avgOccupancy}%</strong><small>Capacidade cadastrada</small></div></div>
+    </div>
+    <div class="dash-row storage-layout">
+      ${dashboardPanel("▦","Visualizador de casulos","",zonesTable(zones))}
+      ${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Filtrar endereços ocupados" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}
+    </div>
+    <section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;
+}
 function moduleTabs(items,current){if(items.some(([,view])=>view==="warehouse")&&!items.some(([,view])=>view==="warehouse-heatmap")){const position=items.findIndex(([,view])=>view==="warehouse")+1;items=[...items.slice(0,position),["Mapa de Calor","warehouse-heatmap"],...items.slice(position)];}return `<div class="module-tabs">${items.map(([label,view])=>`<button class="${view===current?'active':''}" onclick="goTo('${view}')">${label}</button>`).join('')}</div>`;}
 function filterStockQuick(){const t=normalizeSearch($("stockQuickSearch")?.value||'');document.querySelectorAll('.stock-quick-row').forEach(r=>r.classList.toggle('hidden',t&&!r.dataset.search.includes(t)));}
 async function importStockGroupReport(input){if(!input.files?.[0])return;const form=new FormData();form.append('file',input.files[0]);try{const d=await api(`/api/unified/warehouse/import-group-report?user_id=${currentUser.id}`,{method:'POST',body:form});toast(`${d.groups} grupos e ${d.total_qty} peças importados.`);renderStorageHub();}catch(e){toast(e.message)}}
 
-async function renderStockStatistics(){setPage("Estatísticas de Casulos","");const [warehouse,a]=await Promise.all([safeApi('/api/unified/warehouse',{zones:[],locations:[]}),safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})]);const cap=warehouse.locations.reduce((s,l)=>s+Number(l.capacity),0),occ=warehouse.locations.reduce((s,l)=>s+Number(l.occupied_qty),0);$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"stock-stats")}<div class="hero-kpis">${heroKpi("Total de casulos",warehouse.locations.length,"Estrutura física","▦","blue","warehouse")}${heroKpi("Capacidade estimada",cap.toLocaleString('pt-BR'),"Peças","⌂","teal","storage-hub")}${heroKpi("Ocupação real",occ.toLocaleString('pt-BR'),"Peças","◇","blue","storage-hub")}${heroKpi("Disponibilidade",Math.max(0,cap-occ).toLocaleString('pt-BR'),"Peças","＋","teal","capacity-simulator")}</div><div class="dash-row analytics-grid">${analyticsBars("Estruturas",a.structures.map(x=>({label:x.label,value:x.locations,hint:`${x.occupied}/${x.capacity}`})))}${analyticsBars("Estoque por categoria",a.categories.map(x=>({label:x.label,value:x.quantity})))}${analyticsBars("Estoque por marca",a.brands.map(x=>({label:x.label,value:x.quantity})))}</div>${a.groups?.length?dashboardPanel("▣","Último relatório por grupo",`<span>${esc(a.latest_report?.filename||'')}</span>`,analyticsBarsBody(a.groups.map(x=>({label:x.group_name,value:x.quantity,hint:x.gender})))):''}`;}
+async function renderStockStatistics() {
+  setPage("Estatísticas de Casulos","");
+  const [warehouse,a] = await Promise.all([
+    safeApi('/api/unified/warehouse/summary',{totals:{},zones:[]}),
+    safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})
+  ]);
+  if (currentView !== "stock-stats") return;
+  const totals = warehouse.totals || {};
+  const capacity = Number(totals.capacity||0), occupied = Number(totals.occupied||0);
+  $("mainContent").innerHTML = `${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"stock-stats")}
+    <div class="hero-kpis">
+      ${heroKpi("Total de casulos",Number(totals.locations||0).toLocaleString('pt-BR'),"Estrutura física","▦","blue","warehouse")}
+      ${heroKpi("Capacidade estimada",capacity.toLocaleString('pt-BR'),"Peças","⌂","teal","storage-hub")}
+      ${heroKpi("Ocupação real",occupied.toLocaleString('pt-BR'),"Peças","◇","blue","storage-hub")}
+      ${heroKpi("Disponibilidade",Math.max(0,capacity-occupied).toLocaleString('pt-BR'),"Peças","＋","teal","capacity-simulator")}
+    </div>
+    <div class="dash-row analytics-grid">
+      ${analyticsBars("Estruturas",a.structures.map(x=>({label:x.label,value:x.locations,hint:`${x.occupied}/${x.capacity}`})))}
+      ${analyticsBars("Estoque por categoria",a.categories.map(x=>({label:x.label,value:x.quantity})))}
+      ${analyticsBars("Estoque por marca",a.brands.map(x=>({label:x.label,value:x.quantity})))}
+    </div>
+    ${a.groups?.length?dashboardPanel("▣","Último relatório por grupo",`<span>${esc(a.latest_report?.filename||'')}</span>`,analyticsBarsBody(a.groups.map(x=>({label:x.group_name,value:x.quantity,hint:x.gender})))):''}`;
+}
 function analyticsBars(title,rows){return dashboardPanel("▥",title,"",analyticsBarsBody(rows));}
 function analyticsBarsBody(rows){const max=Math.max(1,...rows.map(r=>Number(r.value)||0));return `<div class="analytics-bars">${rows.slice(0,15).map(r=>`<div><span>${esc(r.label)}</span><i><b style="width:${Number(r.value)*100/max}%"></b></i><strong>${Number(r.value).toLocaleString('pt-BR')}</strong><small>${esc(r.hint||'')}</small></div>`).join('')||'<div class="empty-visual">Sem dados para exibir.</div>'}</div>`;}
 
-async function renderCapacitySimulator(){setPage("Simulador de Capacidade","");const w=await safeApi('/api/unified/warehouse',{locations:[],zones:[]});$("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"capacity-simulator")}<section class="dash-panel simulator-panel"><header><b>⌁</b><strong>Teste uma entrada sem alterar o estoque</strong></header><div class="dash-panel-body simulator-form"><div class="field"><label>Endereço</label><select id="simLocation" onchange="calculateCapacitySimulation()"><option value="">Selecione</option>${w.locations.map(l=>`<option value="${l.id}" data-cap="${l.capacity}" data-occ="${l.occupied_qty}">${esc(l.address)} • livre ${Math.max(0,l.capacity-l.occupied_qty)}</option>`).join('')}</select></div><div class="field"><label>Quantidade a armazenar</label><input id="simQty" type="number" min="0" value="10" oninput="calculateCapacitySimulation()"></div><div id="simResult" class="simulation-result"><span>Selecione um endereço para simular.</span></div></div></section>`;unifiedCache.warehouse=w;}
+async function renderCapacitySimulator() {
+  setPage("Simulador de Capacidade","");
+  $("mainContent").innerHTML = `
+    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"capacity-simulator")}
+    <section class="dash-panel simulator-panel"><header><b>⌁</b><strong>Teste uma entrada sem alterar o estoque</strong></header>
+      <div class="dash-panel-body simulator-form">
+        <div class="field"><label>Pesquisar endereço</label><input id="simLocationSearch" placeholder="Digite o endereço, rua ou estrutura" oninput="scheduleSimulationLocationSearch()"></div>
+        <div class="field"><label>Endereço</label><select id="simLocation" onchange="calculateCapacitySimulation()"><option value="">Carregando endereços...</option></select></div>
+        <div class="field"><label>Quantidade a armazenar</label><input id="simQty" type="number" min="0" value="10" oninput="calculateCapacitySimulation()"></div>
+        <div id="simResult" class="simulation-result"><span>Selecione um endereço para simular.</span></div>
+      </div>
+    </section>`;
+  await searchSimulationLocations();
+}
+
+function scheduleSimulationLocationSearch() {
+  clearTimeout(simLocationSearchTimer);
+  simLocationSearchTimer = setTimeout(() => searchSimulationLocations(), 250);
+}
+
+async function searchSimulationLocations() {
+  const select = $("simLocation");
+  if (!select || currentView !== "capacity-simulator") return;
+  const token = ++simLocationRequestToken;
+  const search = $("simLocationSearch")?.value?.trim() || "";
+  select.innerHTML = '<option value="">Buscando endereços...</option>';
+  try {
+    const data = await api(`/api/unified/warehouse?include_zones=false&limit=100&offset=0&search=${encodeURIComponent(search)}`);
+    if (token !== simLocationRequestToken || currentView !== "capacity-simulator" || !$("simLocation")) return;
+    const locations = data.locations || [];
+    select.innerHTML = locations.length
+      ? '<option value="">Selecione um endereço</option>' + locations.map(l=>`<option value="${l.id}" data-cap="${l.capacity}" data-occ="${l.occupied_qty}">${esc(l.address)} • livre ${Math.max(0,Number(l.capacity)-Number(l.occupied_qty))}</option>`).join("")
+      : '<option value="">Nenhum endereço encontrado</option>';
+    $("simResult").innerHTML = '<span>Selecione um endereço para simular.</span>';
+  } catch (error) {
+    if (token === simLocationRequestToken && $("simLocation")) select.innerHTML = `<option value="">${esc(error.message)}</option>`;
+  }
+}
 function calculateCapacitySimulation(){const option=$("simLocation")?.selectedOptions?.[0],qty=Number($("simQty")?.value||0);if(!option?.value)return;const cap=Number(option.dataset.cap),occ=Number(option.dataset.occ),after=occ+qty,pct=cap?Math.round(after*100/cap):0,excess=Math.max(0,after-cap);$("simResult").innerHTML=`<div class="capacity-gauge"><i style="width:${Math.min(100,pct)}%" class="${excess?'danger-fill':pct>80?'warn-fill':''}"></i></div><strong>${pct}% após a entrada</strong><span>${occ} atuais + ${qty} novas = ${after} de ${cap}</span>${excess?`<b class="text-danger">Excede a capacidade em ${excess} peças.</b>`:'<b class="text-success">Entrada compatível com a capacidade.</b>'}`;}
 
-async function renderSgoIndicators(){setPage("SGO e Indicadores","");const [rows,tasks]=await Promise.all([safeApi('/api/unified/sgo',[]),safeApi('/api/unified/tasks',[])]);const total=rows.reduce((a,r)=>a+Number(r.quantity||0),0),late=rows.filter(r=>r.forecast_date&&new Date(r.forecast_date)<new Date()&&r.status!=='CONCLUIDO');const byStatus=Object.entries(rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+Number(r.quantity||0),a),{})).map(([label,value])=>({label,value}));$("mainContent").innerHTML=`${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}<div class="hero-kpis">${heroKpi("Entradas previstas",rows.length,"Compras / lotes","⇩","blue","sgo")}${heroKpi("Peças previstas",total.toLocaleString('pt-BR'),"Quantidade SGO","▣","teal","sgo")}${heroKpi("Previsões atrasadas",late.length,"Requer atenção","!","blue","sgo")}${heroKpi("Tarefas abertas",tasks.filter(t=>t.status!=='CONCLUIDA').length,"Operação","☑","teal","tasks")}</div><div class="dash-row indicators-layout">${analyticsBars("Distribuição por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${rows.length}</span>`,awaitingTable(rows.slice(0,10),[]))}</div>`;}
+async function renderSgoIndicators() {
+  setPage("SGO e Indicadores","");
+  const [summary,tasks,upcoming] = await Promise.all([
+    safeApi("/api/unified/sgo/summary",{totals:{},by_status:[]}),
+    safeApi("/api/unified/tasks",[]),
+    safeApi("/api/unified/sgo?limit=10&offset=0",[])
+  ]);
+  if (currentView !== "sgo-indicators") return;
+  const totals = summary.totals || {};
+  const byStatus = (summary.by_status||[]).map(row=>({label:row.status,value:Number(row.quantity||0)}));
+  const late = Number(totals.overdue_count||0);
+  const taskOpen = tasks.filter(task=>task.status!=="CONCLUIDA").length;
+  $("mainContent").innerHTML = `${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}
+    <div class="hero-kpis">
+      ${heroKpi("Entradas previstas",Number(totals.total_count||0).toLocaleString("pt-BR"),"Compras / lotes","⇩","blue","sgo")}
+      ${heroKpi("Peças previstas",Number(totals.total_quantity||0).toLocaleString("pt-BR"),"Quantidade SGO","▣","teal","sgo")}
+      ${heroKpi("Previsões atrasadas",late.toLocaleString("pt-BR"),"Requer atenção","!","blue","sgo")}
+      ${heroKpi("Tarefas abertas",taskOpen.toLocaleString("pt-BR"),"Operação","☑","teal","tasks")}
+    </div>
+    <div class="dash-row indicators-layout">${analyticsBars("Peças por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${Number(totals.total_count||0)}</span>`,awaitingTable(upcoming,[]))}</div>`;
+}
 
-async function renderReturnsHub(){setPage("Devoluções","");const rows=await safeApi('/api/unified/returns',[]),movements=await safeApi('/api/unified/movements?limit=80',[]);const open=rows.filter(r=>r.status!=='CONCLUIDA'),div=open.filter(r=>r.status==='DIVERGENTE');$("mainContent").innerHTML=`${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"returns-hub")}<div class="hero-kpis">${heroKpi("Devoluções registradas",rows.length,"Documentos","↩","blue","returns")}${heroKpi("Aguardando tratamento",open.length,"Pendências","!","teal","returns")}${heroKpi("Divergentes",div.length,"Conferir","◇","blue","returns")}${heroKpi("Concluídas",rows.filter(r=>r.status==='CONCLUIDA').length,"Finalizadas","✓","teal","returns")}</div><div class="dash-row returns-layout">${dashboardPanel("!","Pendências",`<span class="panel-count red-count">${open.length}</span>`,returnsTable(open.slice(0,10)))}${dashboardPanel("◷","Movimentos recentes","",`<div class="movement-list">${movements.filter(m=>m.domain==='DEVOLUCOES').slice(0,12).map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)}</small></div>`).join('')||'<div class="empty-visual">Nenhum movimento de devolução.</div>'}</div>`)}</div>`;}
+async function renderReturnsHub() {
+  setPage("Devoluções","");
+  const [analytics,recent,movements] = await Promise.all([
+    safeApi("/api/unified/returns/analytics",{totals:{},by_status:[],by_store:[]}),
+    safeApi("/api/unified/returns?limit=10",[]),
+    safeApi("/api/unified/movements?limit=80",[])
+  ]);
+  if (currentView !== "returns-hub") return;
+  const totals = analytics.totals || {};
+  const statusCounts = Object.fromEntries((analytics.by_status||[]).map(row=>[row.status,Number(row.quantity||0)]));
+  const open = Object.entries(statusCounts).reduce((sum,[status,count])=>sum+(status==="CONCLUIDA"?0:count),0);
+  $("mainContent").innerHTML = `${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"returns-hub")}
+    <div class="hero-kpis">
+      ${heroKpi("Devoluções registradas",Number(totals.total||0).toLocaleString("pt-BR"),"Documentos","↩","blue","returns")}
+      ${heroKpi("Aguardando tratamento",open.toLocaleString("pt-BR"),"Pendências","!","teal","returns")}
+      ${heroKpi("Divergentes",Number(statusCounts.DIVERGENTE||0).toLocaleString("pt-BR"),"Conferir","◇","blue","returns")}
+      ${heroKpi("Peças em Anápolis",Number(totals.total_anapolis||0).toLocaleString("pt-BR"),"Registradas","✓","teal","returns")}
+    </div>
+    <div class="dash-row returns-layout">
+      ${dashboardPanel("!","Pendências",`<span class="panel-count red-count">${open}</span>`,returnsTable(recent.filter(r=>r.status!=="CONCLUIDA").slice(0,10)))}
+      ${dashboardPanel("◷","Movimentos recentes","",`<div class="movement-list">${movements.filter(m=>m.domain==='DEVOLUCOES').slice(0,12).map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)}</small></div>`).join('')||'<div class="empty-visual">Nenhum movimento de devolução.</div>'}</div>`)}
+    </div>`;
+}
 
-async function renderReturnsV3(){await renderReturns();$("mainContent").insertAdjacentHTML("afterbegin",moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"returns"));}
+async function renderReturnsV3(){await renderReturns();if(currentView!=="returns")return;$("mainContent").insertAdjacentHTML("afterbegin",moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"returns"));}
 
-async function renderReturnIndicators(){setPage("Indicadores de Devoluções","");const rows=await safeApi('/api/unified/returns',[]);const loja=rows.reduce((a,r)=>a+Number(r.total_store||0),0),found=rows.reduce((a,r)=>a+Number(r.total_cd||0)+Number(r.total_anapolis||0),0);const byStore=Object.entries(rows.reduce((a,r)=>{const k=r.store||r.customer||'Não informada';a[k]=(a[k]||0)+Number(r.total_store||0);return a},{})).map(([label,value])=>({label,value}));const byStatus=Object.entries(rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+1,a),{})).map(([label,value])=>({label,value}));$("mainContent").innerHTML=`${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-indicators")}<div class="hero-kpis">${heroKpi("Devoluções",rows.length,"Registros","↩","blue","returns-hub")}${heroKpi("Peças da loja",loja.toLocaleString('pt-BR'),"Declaradas","▣","teal","returns")}${heroKpi("CD + Anápolis",found.toLocaleString('pt-BR'),"Encontradas","◇","blue","returns")}${heroKpi("Diferença",(found-loja).toLocaleString('pt-BR'),"Acumulada","!","teal","returns")}</div><div class="dash-row indicators-layout">${analyticsBars("Peças por loja",byStore)}${analyticsBars("Distribuição por status",byStatus)}</div>`;}
+async function renderReturnIndicators() {
+  setPage("Indicadores de Devoluções","");
+  const data = await safeApi("/api/unified/returns/analytics",{totals:{},by_status:[],by_store:[]});
+  if (currentView !== "return-indicators") return;
+  const totals = data.totals || {};
+  const byStore = (data.by_store||[]).map(row=>({label:row.label,value:Number(row.value||0)}));
+  const byStatus = (data.by_status||[]).map(row=>({label:row.status,value:Number(row.quantity||0)}));
+  const loja = Number(totals.total_store||0);
+  const found = Number(totals.total_cd||0)+Number(totals.total_anapolis||0);
+  $("mainContent").innerHTML = `${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-indicators")}
+    <div class="hero-kpis">
+      ${heroKpi("Devoluções",Number(totals.total||0).toLocaleString('pt-BR'),"Registros","↩","blue","returns-hub")}
+      ${heroKpi("Peças da loja",loja.toLocaleString('pt-BR'),"Declaradas","▣","teal","returns")}
+      ${heroKpi("CD + Anápolis",found.toLocaleString('pt-BR'),"Encontradas","◇","blue","returns")}
+      ${heroKpi("Diferença",(found-loja).toLocaleString('pt-BR'),"Acumulada","!","teal","returns")}
+    </div>
+    <div class="dash-row indicators-layout">${analyticsBars("Peças por loja",byStore)}${analyticsBars("Distribuição por status",byStatus)}</div>`;
+}
 
-async function renderReturnHistory(){setPage("Histórico de Devoluções","");const [rows,moves]=await Promise.all([safeApi('/api/unified/returns',[]),safeApi('/api/unified/movements?limit=500',[])]);$("mainContent").innerHTML=`${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-history")}<section class="dash-panel"><header><b>◷</b><strong>Documentos e movimentações</strong><span class="panel-count">${rows.length}</span></header><div class="dash-panel-body"><table class="dash-table"><thead><tr><th>Documento</th><th>Loja</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th>Data</th></tr></thead><tbody>${rows.map(r=>`<tr onclick="openReturn(${r.id})"><td>${esc(r.document_no)}</td><td>${esc(r.store||r.customer||'—')}</td><td>${r.total_store}</td><td>${r.total_cd}</td><td>${r.total_anapolis}</td><td>${r.difference}</td><td>${statusBadge(r.status)}</td><td>${fmtDateTime(r.created_at)}</td></tr>`).join('')||emptyRows(8)}</tbody></table></div></section><section class="dash-panel" style="margin-top:14px"><header><b>↯</b><strong>Auditoria das tratativas</strong></header><div class="dash-panel-body movement-list">${moves.filter(m=>m.domain==='DEVOLUCOES').map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)} • ${esc(m.user_name||'Sistema')}</small></div>`).join('')||'<div class="empty-visual">Nenhuma tratativa registrada.</div>'}</div></section>`;}
+async function renderReturnHistory() {
+  setPage("Histórico de Devoluções","");
+  const [rows,moves] = await Promise.all([
+    safeApi(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=0`,[]),
+    safeApi('/api/unified/movements?limit=100',[])
+  ]);
+  if (currentView !== "return-history") return;
+  returnHistoryOffset = rows.length;
+  returnHistoryHasMore = rows.length === RETURNS_PAGE_SIZE;
+  returnHistoryLoading = false;
+  $("mainContent").innerHTML = `${moduleTabs([["Dashboard","returns-hub"],["Conferência e tratamento","returns"],["Indicadores","return-indicators"],["Histórico","return-history"]],"return-history")}
+    <section class="dash-panel"><header><b>◷</b><strong>Documentos e movimentações</strong><span class="panel-count">${Number(rows.length).toLocaleString("pt-BR")} nesta página</span></header>
+      <div class="dash-panel-body"><table class="dash-table"><thead><tr><th>Documento</th><th>Loja</th><th>Loja</th><th>CD</th><th>Anápolis</th><th>Diferença</th><th>Status</th><th>Data</th></tr></thead><tbody id="returnHistoryBody">${rows.map(returnHistoryRow).join('')||emptyRows(8)}</tbody></table>
+      <div id="returnHistoryPager" class="warehouse-pager"></div></div>
+    </section>
+    <section class="dash-panel" style="margin-top:14px"><header><b>↯</b><strong>Auditoria das tratativas</strong></header><div class="dash-panel-body movement-list">${moves.filter(m=>m.domain==='DEVOLUCOES').map(m=>`<div><b>${esc(m.event_type.replaceAll('_',' '))}</b><span>${esc(m.description)}</span><small>${fmtDateTime(m.created_at)} • ${esc(m.user_name||'Sistema')}</small></div>`).join('')||'<div class="empty-visual">Nenhuma tratativa registrada.</div>'}</div></section>`;
+  updateReturnHistoryPager();
+}
 
-async function renderRegistrations(){setPage("Cadastros","");const [users,w,a]=await Promise.all([safeApi('/api/users',[]),safeApi('/api/unified/warehouse',{zones:[]}),safeApi('/api/unified/warehouse/analytics',{groups:[]})]);$("mainContent").innerHTML=`<div class="actions" style="margin-bottom:12px"><button class="primary" onclick="openGoatCardModal()">+ Criar Card</button></div><div class="dash-row registrations-grid">${dashboardPanel("♙","Usuários e perfis",`<span class="panel-count">${users.length}</span>`,`<table class="dash-table"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${statusBadge(u.role)}</td></tr>`).join('')}</tbody></table>`)}${dashboardPanel("▦","Zonas do CD",`<span class="panel-count">${w.zones.length}</span>`,`<table class="dash-table"><thead><tr><th>Zona</th><th>Descrição</th><th>Capacidade</th></tr></thead><tbody>${w.zones.map(z=>`<tr><td>${esc(z.code)}</td><td>${esc(z.name)}</td><td>${Number(z.capacity).toLocaleString('pt-BR')}</td></tr>`).join('')}</tbody></table>`)}${dashboardPanel("▣","Grupos do último relatório","",analyticsBarsBody((a.groups||[]).map(g=>({label:g.group_name,value:g.quantity,hint:g.gender}))))}</div>`;}
+function returnHistoryRow(row) {
+  return `<tr onclick="openReturn(${row.id})"><td>${esc(row.document_no)}</td><td>${esc(row.store||row.customer||'—')}</td><td>${row.total_store}</td><td>${row.total_cd}</td><td>${row.total_anapolis}</td><td>${row.difference}</td><td>${statusBadge(row.status)}</td><td>${fmtDateTime(row.created_at)}</td></tr>`;
+}
+
+function updateReturnHistoryPager() {
+  const pager = $("returnHistoryPager");
+  if (!pager) return;
+  pager.innerHTML = `<span>${returnHistoryOffset.toLocaleString("pt-BR")} documentos carregados</span><button class="secondary small-btn" onclick="loadMoreReturnHistory()" ${!returnHistoryHasMore||returnHistoryLoading?"disabled":""}>${returnHistoryLoading?"Carregando...":"Carregar mais"}</button>`;
+  pager.classList.toggle("hidden",!returnHistoryHasMore&&!returnHistoryLoading);
+}
+
+async function loadMoreReturnHistory() {
+  if(returnHistoryLoading||!returnHistoryHasMore||currentView!=="return-history")return;
+  returnHistoryLoading=true;updateReturnHistoryPager();
+  try {
+    const rows=await api(`/api/unified/returns?limit=${RETURNS_PAGE_SIZE}&offset=${returnHistoryOffset}`);
+    if(currentView!=="return-history")return;
+    $("returnHistoryBody")?.insertAdjacentHTML("beforeend",rows.map(returnHistoryRow).join(""));
+    returnHistoryOffset+=rows.length;
+    returnHistoryHasMore=rows.length===RETURNS_PAGE_SIZE;
+  } catch(e) {
+    if(currentView==="return-history")toast(e.message);
+  } finally {
+    returnHistoryLoading=false;updateReturnHistoryPager();
+  }
+}
+
+async function renderRegistrations() {
+  setPage("Cadastros","");
+  const [users,w,a] = await Promise.all([
+    safeApi('/api/users',[]),
+    safeApi('/api/unified/warehouse/summary',{zones:[]}),
+    safeApi('/api/unified/warehouse/analytics',{groups:[]})
+  ]);
+  if (currentView !== "registrations") return;
+  const zones = w.zones || [];
+  $("mainContent").innerHTML = `<div class="actions" style="margin-bottom:12px"><button class="primary" onclick="openGoatCardModal()">+ Criar Card</button></div>
+    <div class="dash-row registrations-grid">
+      ${dashboardPanel("♙","Usuários e perfis",`<span class="panel-count">${users.length}</span>`,`<table class="dash-table"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${statusBadge(u.role)}</td></tr>`).join('')}</tbody></table>`)}
+      ${dashboardPanel("▦","Zonas do CD",`<span class="panel-count">${zones.length}</span>`,`<table class="dash-table"><thead><tr><th>Zona</th><th>Descrição</th><th>Capacidade</th></tr></thead><tbody>${zones.map(z=>`<tr><td>${esc(z.code)}</td><td>${esc(z.name)}</td><td>${Number(z.capacity).toLocaleString('pt-BR')}</td></tr>`).join('')}</tbody></table>`)}
+      ${dashboardPanel("▣","Grupos do último relatório","",analyticsBarsBody((a.groups||[]).map(g=>({label:g.group_name,value:g.quantity,hint:g.gender}))))}
+    </div>`;
+}
 
 async function renderSettings(){setPage("Configurações","");$("mainContent").innerHTML=`<div class="settings-grid"><button onclick="goTo('import')"><b>⇧</b><strong>Importar compras</strong><span>Atualizar Cards a partir do relatório Excel.</span></button><button onclick="goTo('tasks')"><b>☑</b><strong>Quadro de tarefas</strong><span>Responsáveis, prioridades e andamento.</span></button><button onclick="goTo('test')"><b>⚙</b><strong>Administração e testes</strong><span>Ferramentas controladas para validação.</span></button><button onclick="goTo('history')"><b>◷</b><strong>Histórico global</strong><span>Rastreabilidade das movimentações.</span></button></div><div class="state-panel"><b>DistriLog V3</b><span>Uma interface, um backend e uma base SQLite. As regras congeladas de Recebimento, Qualidade e Processamento permanecem no motor operacional.</span></div>`;}
 

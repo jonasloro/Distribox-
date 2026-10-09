@@ -76,15 +76,34 @@ async def persist_card_state(request: Request, call_next):
             print(f"[aviso] não consegui sincronizar os itens do Card {allocation_card_id} antes da alocação: {e}")
 
     response = await call_next(request)
+    # A maior parte das gravações (/login, tarefas, chat, devoluções, relatórios,
+    # configuração de endereços etc.) não altera Cards nem Recebimentos. Evita
+    # sincronizar todas essas tabelas nessas rotas sem relação com o fluxo operacional.
+    path = request.url.path
+    sync_relevant_state = (
+        path == "/api/import-excel"
+        or path == "/api/cards"
+        or path.startswith("/api/cards/")
+        or path.startswith("/api/receivings/")
+        or path.startswith("/api/quality/")
+        or path.startswith("/api/processing/")
+        or path.startswith("/api/downstream/")
+        or path.startswith("/api/test/cards/")
+        or path.startswith("/api/goat/create-card")
+        or path.startswith("/api/goat/confirm-receiving")
+        or path == "/api/unified/warehouse/store"
+    )
     if (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
-        and request.url.path.startswith("/api/")
+        and path.startswith("/api/")
+        and sync_relevant_state
+        and not allocation_path
     ):
         try:
             con = db_connect()
             sync_all_cards_to_supabase(
                 con,
-                include_items=request.url.path == "/api/import-excel",
+                include_items=path == "/api/import-excel",
             )
             sync_all_receiving_state_to_supabase(con)
             con.close()
@@ -801,6 +820,16 @@ def init_db() -> None:
            AND NOT EXISTS (SELECT 1 FROM receivings r WHERE r.card_id=c.id AND r.closed_at IS NULL)"""
     ).fetchall():
         ensure_pending_receiving(con, orphan["id"])
+
+    # Índices leves de consulta: melhoram filas, indicadores e verificações de etapa
+    # sem modificar os registros operacionais existentes.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_items_card_id ON items(card_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_items_card_stage ON items(card_id,source_stage)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_items_card_reference ON items(card_id,reference)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_cards_sector_updated ON cards(current_sector,updated_at DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_cards_source_snapshot ON cards(source_snapshot_at,updated_at DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_receivings_card_latest ON receivings(card_id,id DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_history_card_event ON history(card_id,event_type)")
     con.commit()
     con.close()
 
@@ -1632,7 +1661,7 @@ def manual_card_reference(source_notes: Any) -> str:
 
 
 @app.get("/api/cards")
-def list_cards(scope: str = "receiving", search: str = ""):
+def list_cards(scope: str = "receiving", search: str = "", limit: int = 100, offset: int = 0, purchase_mode: str = "", activity: str = "", brand: str = ""):
     con = db_connect()
     sql = """SELECT c.id,c.purchase_id,c.supplier,c.original_type,c.purchase_mode,c.brand,c.forecast_date,c.current_sector,c.status,
              c.receiving_type,c.quality_destination,c.casulo_current,c.source_location_summary,c.source_snapshot_at,c.source_notes,c.updated_at,
@@ -1658,7 +1687,41 @@ def list_cards(scope: str = "receiving", search: str = ""):
         sql += " AND (c.purchase_id LIKE ? OR c.supplier LIKE ? OR c.brand LIKE ? OR c.casulo_current LIKE ? OR i.product LIKE ? OR i.reference LIKE ? OR i.sku LIKE ?)"
         q = f"%{search}%"
         params.extend([q, q, q, q, q, q, q])
+    if purchase_mode:
+        sql += " AND UPPER(COALESCE(c.purchase_mode,''))=?"
+        params.append(purchase_mode.strip().upper())
+    if brand:
+        sql += " AND c.brand=?"
+        params.append(brand)
+    activity = activity.strip().upper()
+    if activity in {"AGUARDANDO", "ATIVO", "PAUSADO"}:
+        if scope == "receiving":
+            receiving_activity_sql = "(SELECT r.ten_percent_status FROM receivings r WHERE r.card_id=c.id ORDER BY r.id DESC LIMIT 1)"
+            if activity == "PAUSADO":
+                sql += f" AND {receiving_activity_sql}='PAUSADA'"
+            elif activity == "ATIVO":
+                sql += f" AND {receiving_activity_sql}='EM_ANDAMENTO'"
+            else:
+                sql += f" AND COALESCE({receiving_activity_sql},'PENDENTE') NOT IN ('PAUSADA','EM_ANDAMENTO')"
+        elif scope == "quality":
+            if activity == "PAUSADO":
+                sql += " AND c.status='INSPECAO_PAUSADA'"
+            elif activity == "ATIVO":
+                sql += " AND c.status IN ('EM_INSPECAO','AGUARDANDO_CONCLUSAO_QUALIDADE')"
+            else:
+                sql += " AND c.status NOT IN ('INSPECAO_PAUSADA','EM_INSPECAO','AGUARDANDO_CONCLUSAO_QUALIDADE')"
+        elif scope == "processing":
+            if activity == "ATIVO":
+                sql += " AND c.status='EM_PROCESSAMENTO'"
+            elif activity == "PAUSADO":
+                sql += " AND c.status='PROCESSAMENTO_PAUSADO'"
+            else:
+                sql += " AND c.status NOT IN ('EM_PROCESSAMENTO','PROCESSAMENTO_PAUSADO')"
+        elif activity != "AGUARDANDO":
+            sql += " AND 1=0"
     sql += " GROUP BY c.id ORDER BY c.updated_at DESC"
+    sql += " LIMIT ? OFFSET ?"
+    params.extend([max(1, min(int(limit or 100), 200)), max(0, int(offset))])
     rows = con.execute(sql, params).fetchall()
     transit = {r["id"]: awaiting_arrival(con, r["id"]) for r in rows if r["status"] in TRANSIT_STATUSES}
     con.close()
@@ -1676,6 +1739,26 @@ def list_cards(scope: str = "receiving", search: str = ""):
         item["in_transit"] = transit.get(item["id"], False)
         result.append(item)
     return result
+
+
+@app.get("/api/cards/brands")
+def list_card_brands(scope: str = "receiving"):
+    con = db_connect()
+    sql = "SELECT DISTINCT c.brand FROM cards c WHERE c.brand IS NOT NULL AND TRIM(c.brand)!=''"
+    params: list[Any] = []
+    if scope == "receiving":
+        sql += " AND (c.current_sector='RECEBIMENTO' OR c.source_snapshot_at IS NOT NULL)"
+    elif scope == "quality":
+        sql += " AND (c.current_sector='QUALIDADE' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage IN ('QUALIDADE','QUALIDADE_RETRABALHO','QUALIDADE_REJEITADO')))"
+    elif scope == "processing":
+        sql += " AND (c.current_sector='PROCESSAMENTO' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO')))"
+    elif scope == "labeling":
+        sql += " AND (c.current_sector='ETIQUETAGEM' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage='ETIQUETAGEM'))"
+    elif scope == "storage":
+        sql += " AND (c.current_sector='ESTOCAGEM' OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id AND si.source_stage='ESTOCAGEM'))"
+    rows = con.execute(sql + " ORDER BY c.brand COLLATE NOCASE", params).fetchall()
+    con.close()
+    return [row["brand"] for row in rows]
 
 
 

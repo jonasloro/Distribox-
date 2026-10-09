@@ -262,6 +262,11 @@ def init_unified_db() -> None:
     # supabase_module.seed_warehouse_supabase, chamada no startup do
     # app.py). As tabelas continuam existindo no SQLite só por
     # compatibilidade com o schema antigo, mas ficam vazias e sem uso.
+    # Índices para listas operacionais e detalhes de romaneio.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sgo_forecast_order ON sgo_entries(COALESCE(forecast_date,'9999-12-31'),id DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sgo_status_forecast ON sgo_entries(status,forecast_date,id DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_shipment_items_shipment ON shipment_items(shipment_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status_sector ON operational_tasks(status,sector)")
     con.commit()
     con.close()
 
@@ -303,60 +308,130 @@ def register_unified_routes(app) -> None:
 
     @app.get("/api/unified/warehouse/summary")
     def warehouse_summary():
-        """Versão leve do endereçamento, só com os totais por gênero — usada no
-        Central de Operações pra não precisar baixar o CD inteiro (milhares de
-        casulos) só pra mostrar um resumo."""
+        """Retorna somente agregados e uma amostra pequena para evitar baixar milhares de casulos."""
         try:
             with pg_connect() as con:
                 with con.cursor() as cur:
                     cur.execute(
                         """SELECT COALESCE(z.gender,'Sem gênero') AS gender,
                            COALESCE(SUM(z.capacity),0) AS capacity,
-                           COALESCE(SUM(l.occupied_qty),0) AS occupied
-                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                           COALESCE(SUM(loc.occupied),0) AS occupied
+                           FROM warehouse_zones z
+                           LEFT JOIN (
+                             SELECT zone_id,SUM(occupied_qty) AS occupied
+                             FROM warehouse_locations GROUP BY zone_id
+                           ) loc ON loc.zone_id=z.id
                            WHERE z.active GROUP BY z.gender ORDER BY z.gender"""
                     )
-                    rows = cur.fetchall()
+                    gender_rows = cur.fetchall()
+                    cur.execute(
+                        """SELECT z.id,z.code,z.name,z.gender,z.capacity,
+                           COALESCE(SUM(l.occupied_qty),0) AS occupied,COUNT(l.id) AS locations,
+                           CASE WHEN z.capacity>0
+                             THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1)
+                             ELSE 0 END AS occupancy
+                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                           WHERE z.active GROUP BY z.id ORDER BY z.code"""
+                    )
+                    zone_rows = cur.fetchall()
+                    cur.execute(
+                        """SELECT COALESCE(SUM(l.capacity),0) AS capacity,
+                           COALESCE(SUM(l.occupied_qty),0) AS occupied,COUNT(l.id) AS locations,
+                           COUNT(l.id) FILTER (WHERE l.occupied_qty>0) AS occupied_locations,
+                           COUNT(l.id) FILTER (WHERE l.status='DISPONIVEL') AS available_locations
+                           FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
+                           WHERE z.active"""
+                    )
+                    totals_row = cur.fetchone()
+                    cur.execute(
+                        """SELECT l.id,l.address,z.code AS zone_code,l.structure_type,l.category,
+                           l.capacity,l.occupied_qty,l.status,
+                           CASE WHEN l.capacity>0
+                             THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy
+                           FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
+                           WHERE z.active AND l.occupied_qty>0
+                           ORDER BY l.updated_at DESC,l.id DESC LIMIT 12"""
+                    )
+                    occupied_preview = cur.fetchall()
         except RuntimeError:
-            return {"genders": []}
+            return {"genders": [], "zones": [], "totals": {
+                "capacity": 0, "occupied": 0, "locations": 0,
+                "occupied_locations": 0, "available_locations": 0, "percentage": 0
+            }, "occupied_preview": []}
+
         genders = []
-        for r in rows:
-            cap = int(r["capacity"] or 0)
-            occ = int(r["occupied"] or 0)
+        for row in gender_rows:
+            capacity = int(row["capacity"] or 0)
+            occupied = int(row["occupied"] or 0)
             genders.append({
-                "gender": r["gender"],
-                "capacity": cap,
-                "occupied": occ,
-                "occupancy": round(occ * 100 / cap, 1) if cap else 0,
+                "gender": row["gender"],
+                "capacity": capacity,
+                "occupied": occupied,
+                "occupancy": round(occupied * 100 / capacity, 1) if capacity else 0,
             })
-        return {"genders": genders}
+
+        totals = {
+            "capacity": int(totals_row["capacity"] or 0),
+            "occupied": int(totals_row["occupied"] or 0),
+            "locations": int(totals_row["locations"] or 0),
+            "occupied_locations": int(totals_row["occupied_locations"] or 0),
+            "available_locations": int(totals_row["available_locations"] or 0),
+        }
+        totals["percentage"] = round(totals["occupied"] * 100 / totals["capacity"], 1) if totals["capacity"] else 0
+        return {
+            "genders": genders,
+            "zones": [dict(row) for row in zone_rows],
+            "totals": totals,
+            "occupied_preview": [dict(row) for row in occupied_preview],
+        }
 
     @app.get("/api/unified/warehouse")
-    def warehouse(search: str = "", zone: str = "", status: str = ""):
+    def warehouse(search: str = "", zone: str = "", status: str = "", limit: int = 100, offset: int = 0, available_only: bool = False, include_zones: bool = True):
+        """Consulta endereços com paginação opcional; os resumos não devem baixar o CD inteiro."""
+        where = """ FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
+        args: list[Any] = []
+        if search:
+            where += " AND (l.address ILIKE %s OR l.category ILIKE %s OR l.structure_type ILIKE %s)"
+            q = f"%{search}%"
+            args += [q, q, q]
+        if zone:
+            where += " AND z.code=%s"
+            args.append(zone)
+        if status:
+            where += " AND l.status=%s"
+            args.append(status)
+        if available_only:
+            where += " AND l.occupied_qty<l.capacity AND l.status<>'BLOQUEADO'"
+
+        safe_limit = max(1, min(int(limit or 100), 200))
+        safe_offset = max(0, int(offset))
         with pg_connect() as con:
             with con.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS total_locations" + where, args)
+                total_locations = int(cur.fetchone()["total_locations"] or 0)
                 sql = """SELECT l.*,z.code AS zone_code,z.name AS zone_name,
-                         CASE WHEN l.capacity>0 THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy
-                         FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
-                args: list[Any] = []
-                if search:
-                    sql += " AND (l.address ILIKE %s OR l.category ILIKE %s OR l.structure_type ILIKE %s)"
-                    q = f"%{search}%"; args += [q, q, q]
-                if zone:
-                    sql += " AND z.code=%s"; args.append(zone)
-                if status:
-                    sql += " AND l.status=%s"; args.append(status)
-                sql += " ORDER BY z.code,l.column_no,l.level_no"
-                cur.execute(sql, args)
+                         CASE WHEN l.capacity>0 THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy""" + where + " ORDER BY z.code,l.column_no,l.level_no,l.id"
+                page_args = list(args)
+                sql += " LIMIT %s OFFSET %s"
+                page_args.extend([safe_limit, safe_offset])
+                cur.execute(sql, page_args)
                 locations = cur.fetchall()
-                cur.execute(
-                    """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) AS occupied,
-                       CASE WHEN z.capacity>0 THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1) ELSE 0 END AS occupancy
-                       FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
-                       WHERE z.active GROUP BY z.id ORDER BY z.code"""
-                )
-                zones = cur.fetchall()
-        return {"zones": zones, "locations": locations}
+                zones = []
+                if include_zones:
+                    cur.execute(
+                        """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) AS occupied,
+                           CASE WHEN z.capacity>0 THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1) ELSE 0 END AS occupancy
+                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
+                           WHERE z.active GROUP BY z.id ORDER BY z.code"""
+                    )
+                    zones = cur.fetchall()
+        return {
+            "zones": zones,
+            "locations": locations,
+            "total_locations": total_locations,
+            "limit": safe_limit or total_locations,
+            "offset": safe_offset,
+        }
 
     @app.post("/api/unified/warehouse/locations/{location_id}")
     async def update_location(location_id: int, request: Request):
@@ -458,14 +533,38 @@ def register_unified_routes(app) -> None:
         con.commit();con.close();return {"ok":True,"groups":len(groups),"total_qty":total}
 
     @app.get("/api/unified/sgo")
-    def list_sgo(status: str = "", search: str = ""):
-        con = db_connect(); sql = "SELECT * FROM sgo_entries WHERE 1=1"; args: list[Any] = []
-        if status: sql += " AND status=?"; args.append(status)
+    def list_sgo(status: str = "", search: str = "", limit: int = 100, offset: int = 0):
+        con = db_connect()
+        sql = "SELECT * FROM sgo_entries WHERE 1=1"
+        args: list[Any] = []
+        if status:
+            sql += " AND status=?"
+            args.append(status)
         if search:
-            q = f"%{search}%"; sql += " AND (purchase_id LIKE ? OR group_name LIKE ? OR description LIKE ? OR brand LIKE ?)"; args += [q, q, q, q]
-        sql += " ORDER BY COALESCE(forecast_date,'9999-12-31'),id DESC"
-        rows = [dict(r) for r in con.execute(sql, args).fetchall()]
-        con.close(); return rows
+            q = f"%{search}%"
+            sql += " AND (purchase_id LIKE ? OR group_name LIKE ? OR description LIKE ? OR brand LIKE ?)"
+            args += [q, q, q, q]
+        sql += " ORDER BY COALESCE(forecast_date,'9999-12-31'),id DESC LIMIT ? OFFSET ?"
+        args.extend([max(1, min(int(limit or 100), 200)), max(0, int(offset))])
+        rows = [dict(row) for row in con.execute(sql, args).fetchall()]
+        con.close()
+        return rows
+
+    @app.get("/api/unified/sgo/summary")
+    def sgo_summary():
+        con = db_connect()
+        totals = con.execute(
+            """SELECT COUNT(*) AS total_count,COALESCE(SUM(quantity),0) AS total_quantity,
+               SUM(CASE WHEN forecast_date IS NOT NULL AND date(forecast_date)<date('now')
+                    AND status<>'CONCLUIDO' THEN 1 ELSE 0 END) AS overdue_count
+               FROM sgo_entries"""
+        ).fetchone()
+        by_status = con.execute(
+            """SELECT status,COUNT(*) AS count,COALESCE(SUM(quantity),0) AS quantity
+               FROM sgo_entries GROUP BY status ORDER BY status"""
+        ).fetchall()
+        con.close()
+        return {"totals": dict(totals), "by_status": [dict(row) for row in by_status]}
 
     @app.post("/api/unified/sgo/import")
     async def import_sgo(user_id: int, file: UploadFile = File(...)):
@@ -557,13 +656,45 @@ def register_unified_routes(app) -> None:
         con.commit();con.close();return {"ok":True}
 
     @app.get("/api/unified/shipments")
-    def list_shipments():
-        con=db_connect();rows=[dict(r) for r in con.execute(
+    def list_shipments(status: str = "", search: str = "", limit: int = 100, offset: int = 0):
+        con = db_connect()
+        where = " WHERE 1=1"
+        args: list[Any] = []
+        if status:
+            where += " AND s.status=?"
+            args.append(status)
+        if search:
+            where += " AND (s.document_no LIKE ? OR s.destination LIKE ? OR s.carrier LIKE ? OR s.vehicle_plate LIKE ? OR s.driver_name LIKE ?)"
+            query = f"%{search}%"
+            args.extend([query, query, query, query, query])
+        safe_limit = max(1, min(int(limit or 100), 200))
+        safe_offset = max(0, int(offset))
+        rows = [dict(row) for row in con.execute(
             """SELECT s.*,
                       COALESCE((SELECT SUM(si.checked_qty) FROM shipment_items si WHERE si.shipment_id=s.id),0) checked_qty,
                       COALESCE((SELECT COUNT(*) FROM shipment_items si WHERE si.shipment_id=s.id),0) item_count
-               FROM shipments s ORDER BY s.id DESC"""
-        ).fetchall()];con.close();return rows
+               FROM shipments s""" + where + " ORDER BY s.id DESC LIMIT ? OFFSET ?",
+            [*args, safe_limit, safe_offset],
+        ).fetchall()]
+        con.close()
+        return rows
+
+    @app.get("/api/unified/shipments/summary")
+    def shipments_summary():
+        con = db_connect()
+        row = con.execute(
+            """SELECT COUNT(*) AS total,
+               SUM(CASE WHEN s.status NOT IN ('EXPEDIDO','PRONTO') THEN 1 ELSE 0 END) AS preparing,
+               SUM(CASE WHEN s.status='PRONTO' THEN 1 ELSE 0 END) AS ready,
+               SUM(CASE WHEN s.status='EXPEDIDO' THEN 1 ELSE 0 END) AS shipped,
+               COALESCE(SUM(s.total_qty),0) AS total_qty,
+               COALESCE(SUM(COALESCE(v.checked_qty,0)),0) AS checked_qty
+               FROM shipments s
+               LEFT JOIN (SELECT shipment_id,SUM(checked_qty) AS checked_qty
+                          FROM shipment_items GROUP BY shipment_id) v ON v.shipment_id=s.id"""
+        ).fetchone()
+        con.close()
+        return dict(row)
 
     @app.get("/api/unified/shipments/{shipment_id}")
     def shipment_detail(shipment_id:int):
@@ -660,11 +791,29 @@ def register_unified_routes(app) -> None:
         con.commit();con.close();return {"ok":True,"shipment_id":cur.lastrowid,"document_no":doc,"items":len(items),"total_qty":total}
 
     @app.get("/api/unified/returns")
-    def list_returns(status:str="",search:str=""):
+    def list_returns(status:str="",search:str="",limit:int=100,offset:int=0):
         con=db_connect();sql="SELECT * FROM returns WHERE 1=1";args=[]
         if status:sql+=" AND status=?";args.append(status)
         if search:q=f"%{search}%";sql+=" AND (document_no LIKE ? OR store LIKE ? OR customer LIKE ?)";args += [q,q,q]
-        sql+=" ORDER BY id DESC";rows=[dict(r) for r in con.execute(sql,args).fetchall()];con.close();return rows
+        sql+=" ORDER BY id DESC LIMIT ? OFFSET ?"
+        args.extend([max(1,min(int(limit or 100),200)),max(0,int(offset))])
+        rows=[dict(r) for r in con.execute(sql,args).fetchall()];con.close();return rows
+
+    @app.get("/api/unified/returns/analytics")
+    def returns_analytics():
+        con = db_connect()
+        totals = con.execute("""SELECT COUNT(*) AS total,
+            COALESCE(SUM(total_store),0) AS total_store,
+            COALESCE(SUM(total_cd),0) AS total_cd,
+            COALESCE(SUM(total_anapolis),0) AS total_anapolis,
+            COALESCE(SUM(difference),0) AS difference FROM returns""").fetchone()
+        statuses = con.execute("SELECT status,COUNT(*) AS quantity FROM returns GROUP BY status").fetchall()
+        stores = con.execute("""SELECT COALESCE(NULLIF(TRIM(store),''),NULLIF(TRIM(customer),''),'Não informada') AS label,
+            COALESCE(SUM(total_store),0) AS value FROM returns
+            GROUP BY COALESCE(NULLIF(TRIM(store),''),NULLIF(TRIM(customer),''),'Não informada')
+            ORDER BY value DESC LIMIT 50""").fetchall()
+        con.close()
+        return {"totals": dict(totals), "by_status": [dict(row) for row in statuses], "by_store": [dict(row) for row in stores]}
 
     @app.get("/api/unified/returns/{return_id}")
     def return_detail(return_id:int):
