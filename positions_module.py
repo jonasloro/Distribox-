@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException
+from psycopg import Error as PsycopgError
 
 from supabase_module import pg_connect
 
@@ -63,6 +64,10 @@ def init_positions_db() -> None:
                     "ON card_allocations(item_id, setor, address)"
                 )
                 cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_card_allocations_position "
+                    "ON card_allocations(setor, address)"
+                )
+                cur.execute(
                     """CREATE TABLE IF NOT EXISTS outlog_migrations (
                         version TEXT PRIMARY KEY,
                         applied_at TEXT NOT NULL DEFAULT now()::text
@@ -90,8 +95,8 @@ def init_positions_db() -> None:
                     rows,
                 )
             con.commit()
-    except RuntimeError as e:
-        print(f"[aviso] Endereçamento: {e}")
+    except (RuntimeError, PsycopgError) as e:
+        print(f"[aviso] Endereçamento indisponível na inicialização: {e}")
 
 
 @router.get("")
@@ -112,8 +117,15 @@ def list_positions(setor: str, zona: Optional[str] = None) -> list[dict[str, Any
                 sql += " GROUP BY p.address,p.setor,p.zona,p.casulo,p.nivel ORDER BY p.zona,p.casulo,p.nivel"
                 cur.execute(sql, args)
                 rows = cur.fetchall()
-    except RuntimeError:
-        return []
+    except RuntimeError as e:
+        print(f"[erro] Banco de endereçamento indisponível: {e}")
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except PsycopgError as e:
+        print(f"[erro] Falha ao consultar os endereços: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Não foi possível consultar os endereços no Supabase. Tente novamente em alguns instantes.",
+        ) from e
     return [
         {
             "address": r["address"], "setor": r["setor"], "zona": r["zona"],
@@ -325,6 +337,12 @@ def allocation_status(card_id: int, setor: str) -> dict[str, Any]:
         rows, item_rows, item_positions = [], [], []
         global_total, global_item_rows = 0, []
         por_setor_rows, volumes_total = [], None
+    except PsycopgError as e:
+        print(f"[erro] Falha ao consultar as alocações do Card {card_id}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Não foi possível consultar as alocações no Supabase. Tente novamente em alguns instantes.",
+        ) from e
 
     total = sum(int(r["qty"] or 0) for r in rows)
     grouped: dict[int, dict[str, Any]] = {}
