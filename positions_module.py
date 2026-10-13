@@ -76,19 +76,19 @@ def init_positions_db() -> None:
                 if cur.rowcount == 1:
                     cur.execute("DELETE FROM card_allocations")
                     print("[migracao] Alocações de peças zeradas; tabela card_allocations preservada.")
-                cur.execute("SELECT COUNT(*) c FROM sector_positions")
-                if cur.fetchone()["c"] == 0:
-                    rows = []
-                    for setor, zonas in SECTOR_ZONES.items():
-                        for zona in zonas:
-                            for casulo in CASULOS:
-                                for nivel in NIVEIS:
-                                    address = f"{zona}{setor}{casulo}{nivel}"
-                                    rows.append((address, setor, zona, casulo, nivel))
-                    cur.executemany(
-                        "INSERT INTO sector_positions(address,setor,zona,casulo,nivel) VALUES(%s,%s,%s,%s,%s) ON CONFLICT (address) DO NOTHING",
-                        rows,
-                    )
+                # Garante a estrutura completa mesmo se uma inicialização anterior
+                # tiver criado apenas parte dos endereços.
+                rows = []
+                for setor, zonas in SECTOR_ZONES.items():
+                    for zona in zonas:
+                        for casulo in CASULOS:
+                            for nivel in NIVEIS:
+                                address = f"{zona}{setor}{casulo}{nivel}"
+                                rows.append((address, setor, zona, casulo, nivel))
+                cur.executemany(
+                    "INSERT INTO sector_positions(address,setor,zona,casulo,nivel) VALUES(%s,%s,%s,%s,%s) ON CONFLICT (address) DO NOTHING",
+                    rows,
+                )
             con.commit()
     except RuntimeError as e:
         print(f"[aviso] Endereçamento: {e}")
