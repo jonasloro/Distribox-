@@ -13,7 +13,7 @@ Os valores da Central vêm do banco real. Os números do mockup não foram coloc
 
 ## Visualizações recuperadas do OutLog
 
-- Estocagem com visão geral, fila operacional, mapa de casulos, consulta rápida, estatísticas e simulador;
+- Estocagem com fila operacional; o mapa físico de casulos, consulta de endereços, estatísticas de capacidade e simulador foram removidos para reduzir a carga da aplicação;
 - relatório de estoque por grupo, gênero e quantidade importado de PDF;
 - SGO com indicadores de entradas, peças, atrasos, etapas e tarefas;
 - Devoluções com dashboard, pendências, conferência/tratamento, indicadores e histórico próprio;
