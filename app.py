@@ -29,14 +29,12 @@ from unified_module import init_unified_db, register_unified_routes
 from supabase_module import (
     verificar_login_supabase,
     seed_usuarios_supabase,
-    seed_warehouse_supabase,
     bootstrap_card_persistence,
     sync_all_cards_to_supabase,
     sync_card_items_to_supabase,
     sync_all_receiving_state_to_supabase,
     delete_card_from_supabase,
 )
-from warehouse_structure import gerar_todos_casulos
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("OUTLOG_DATA_DIR", str(BASE_DIR / "data"))).resolve()
@@ -91,7 +89,6 @@ async def persist_card_state(request: Request, call_next):
         or path.startswith("/api/test/cards/")
         or path.startswith("/api/goat/create-card")
         or path.startswith("/api/goat/confirm-receiving")
-        or path == "/api/unified/warehouse/store"
     )
     if (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
@@ -1231,15 +1228,6 @@ def startup() -> None:
     except Exception as e:
         print(f"[aviso] não consegui popular usuarios no Supabase ainda: {e}")
 
-    # Popula os 19.582 casulos no Supabase (só na primeira vez — se a
-    # estrutura já existir lá, não mexe em nada). Mesma proteção contra
-    # Supabase indisponível: não derruba o app inteiro.
-    try:
-        seed_warehouse_supabase(gerar_todos_casulos)
-    except Exception as e:
-        print(f"[aviso] não consegui popular a estrutura de casulos no Supabase ainda: {e}")
-
-
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -1635,11 +1623,6 @@ def dashboard():
         "c.current_sector IN ('PROCESSAMENTO','TRIAGEM') OR EXISTS (SELECT 1 FROM items si WHERE si.card_id=c.id "
         "AND si.source_stage IN ('AGUARDANDO_PROCESSAMENTO','PROCESSAMENTO'))"
     )
-    capacity_row = con.execute(
-        """SELECT COALESCE(SUM(l.capacity),0) total FROM warehouse_locations l
-           JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active=1"""
-    ).fetchone()
-    totals["warehouse_capacity"] = int(capacity_row["total"] or 0)
     con.close()
     return {
         "totals": totals,
