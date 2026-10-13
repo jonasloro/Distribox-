@@ -153,7 +153,7 @@ def init_unified_db() -> None:
         CREATE TABLE IF NOT EXISTS shipment_items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           shipment_id INTEGER NOT NULL REFERENCES shipments(id) ON DELETE CASCADE,
-          stock_entry_id INTEGER REFERENCES stock_entries(id),
+          stock_entry_id INTEGER,
           barcode TEXT,
           description TEXT,
           quantity INTEGER NOT NULL DEFAULT 0
