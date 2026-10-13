@@ -51,6 +51,21 @@ async function api(url, options = {}) {
   return response.json();
 }
 
+async function apiWithTimeout(url, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await api(url, { signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("A consulta " + url + " ultrapassou " + Math.round(timeoutMs / 1000) + " segundos. Verifique a conexão do banco e tente novamente.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 function esc(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -2912,115 +2927,124 @@ function filterPositionMap(){
 async function loadPositionAllocator(cardId,setor){
   const box=$("posAllocBox");
   if(!box) return;
+  const requestId=(window.positionMapRequestId||0)+1;
+  window.positionMapRequestId=requestId;
   box.innerHTML='<div class="position-loading"><span class="spinner-dot"></span> Montando mapa de posições…</div>';
 
-  let results;
   try {
-    results=await Promise.all([
-      api("/api/positions/cards/"+cardId+"/status?setor="+encodeURIComponent(setor)),
-      api("/api/positions/suggest?setor="+encodeURIComponent(setor)),
-      api("/api/positions?setor="+encodeURIComponent(setor))
+    // O mapa só precisa do status e da lista de posições. A sugestão é calculada
+    // sobre a própria lista para evitar uma segunda consulta idêntica ao banco.
+    const results=await Promise.all([
+      apiWithTimeout("/api/positions/cards/"+cardId+"/status?setor="+encodeURIComponent(setor)),
+      apiWithTimeout("/api/positions?setor="+encodeURIComponent(setor))
     ]);
-    if(!Array.isArray(results[2])) throw new Error("O servidor retornou um formato inválido para as posições.");
-    if(!results[2].length) throw new Error("Nenhum endereço foi carregado. Confira a conexão com o Supabase e a tabela sector_positions.");
+    if(requestId!==window.positionMapRequestId) return;
+
+    const status=results[0];
+    const positions=results[1];
+    if(!status || typeof status!=="object") throw new Error("O servidor retornou um status inválido para as alocações.");
+    if(!Array.isArray(positions)) throw new Error("O servidor retornou um formato inválido para as posições.");
+    if(!positions.length) throw new Error("Nenhum endereço foi carregado. Confira a conexão com o Supabase e a tabela sector_positions.");
+
+    const suggestion=positions.reduce(function(best,p){
+      return !best || Number(p.ocupado||0)<Number(best.ocupado||0) ? p : best;
+    },null);
+    const rcv=cardData?.receiving||{};
+    const items=(Array.isArray(cardData?.items)?cardData.items:[]).filter(function(i){return Number(i.expected_qty||0)>0;});
+    const opIds=(Array.isArray(rcv.operation_items)?rcv.operation_items:[]).map(function(i){return Number(i.id);}).filter(Boolean);
+    const sourceItems=opIds.length?items.filter(function(i){return opIds.includes(Number(i.id));}):items;
+    const receivingVolumes=Number(rcv.volumes||0);
+    const sourceTotal=receivingVolumes;
+    const firstAvailable=sourceItems[0] || null;
+    const firstAllocated=(status.item_allocations||[]).find(function(i){return Number(i.total_alocado||0)>0;}) || null;
+
+    window.allocCtx={
+      cardId:cardId,setor:setor,
+      remaining:Math.max(0,sourceTotal-Number(status.global_total_alocado||0)),
+      positions:positions,status:status,suggestion:suggestion,
+      selectedItemId:Number(firstAvailable?.id||firstAllocated?.item_id||0),
+      selectedAddress:suggestion?.address||firstAllocated?.posicoes?.[0]?.address||"",
+      posFilter:"ALL",zoneFilter:"ALL",search:""
+    };
+
+    const zones=[...new Set(positions.map(function(p){return p.zona;}))].sort();
+    box.innerHTML=
+      '<div class="position-allocator">' +
+        '<div class="position-allocator-head">' +
+          '<div><div class="position-kicker">ENDEREÇAMENTO FÍSICO</div>' +
+            '<h3>'+({RM:"Alocar no Recebimento",QA:"Alocar na Qualidade",PR:"Alocar no Processamento"}[setor]||("Alocar no "+setor))+'</h3>' +
+            '<p>Escolha primeiro a referência, depois a posição. O controle desta etapa é feito em volumes da referência.</p>' +
+            '<div class="position-dest"><label for="positionDestSetor">Destino</label>' +
+              '<select id="positionDestSetor" onchange="changeAllocDestination(this.value)">'+
+                [["RM","Recebimento (RM)"],["QA","Qualidade (QA)"],["PR","Processamento (PR)"]].map(function(o){
+                  return '<option value="'+o[0]+'"'+(o[0]===setor?' selected':'')+'>'+o[1]+'</option>';
+                }).join("")+
+              '</select><small>O saldo do Card é único: o que for alocado em qualquer destino sai do mesmo total.</small></div>' +
+          '</div>' +
+          '<div class="position-suggest">'+
+            (suggestion?'<span>SUGESTÃO AUTOMÁTICA</span><b>'+esc(suggestion.address)+'</b><small>'+
+              Number(suggestion.ocupado||0).toLocaleString("pt-BR")+' volume(s) já ocupado(s)</small>':
+              '<span>SEM SUGESTÃO DISPONÍVEL</span>')+
+          '</div>' +
+        '</div>' +
+
+        '<div class="position-reference-panel">' +
+          '<div class="position-section-title"><b>Referência a alocar</b><span>Escolha uma por vez</span></div>' +
+          '<div id="positionItemPicker" class="allocation-item-grid"></div>' +
+        '</div>' +
+
+        '<div class="position-stat-grid">' +
+          '<div class="position-stat"><span>Total alocado</span><strong id="positionAllocatedTotal">'+Number(status.global_total_alocado||0).toLocaleString("pt-BR")+
+            '</strong><small>volumes globais · RM '+Number(status.global_por_setor?.RM||0).toLocaleString("pt-BR")+
+            ' · QA '+Number(status.global_por_setor?.QA||0).toLocaleString("pt-BR")+
+            ' · PR '+Number(status.global_por_setor?.PR||0).toLocaleString("pt-BR")+'</small></div>' +
+          '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">'+(status.posicoes?.length||0)+
+            '</strong><small>endereços</small></div>' +
+          '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemainingStat">—</strong><small>volumes restantes</small></div>' +
+        '</div>' +
+
+        '<div class="position-controls">' +
+          '<div class="position-search"><span>⌕</span><input id="positionSearch" placeholder="Buscar endereço, casulo ou nível" oninput="filterPositionMap()"></div>' +
+          '<select id="positionZoneFilter" onchange="filterPositionMap()"><option value="ALL">Todas as zonas</option>'+
+            zones.map(function(z){
+              const label=positions.find(function(p){return String(p.zona)===String(z);})?.zona_label||("Zona "+z);
+              return '<option value="'+esc(z)+'">'+esc(label)+'</option>';
+            }).join("")+'</select>' +
+          '<select id="positionStateFilter" onchange="filterPositionMap()"><option value="ALL">Todas as posições</option><option value="FREE">Livres</option><option value="OCCUPIED">Ocupadas</option><option value="CARD">Usadas neste Card</option></select>' +
+        '</div>' +
+
+        '<div class="position-legend"><span><i class="position-dot free"></i>Livre</span><span><i class="position-dot occupied"></i>Ocupada</span><span><i class="position-dot selected"></i>Selecionada</span><span><i class="position-dot item"></i>Usada pela referência</span></div>' +
+        '<div id="positionMap" class="position-map"></div>' +
+
+        '<div class="position-allocation-editor">' +
+          '<div class="position-selected"><span>REFERÊNCIA SELECIONADA</span><strong id="positionSelectedItemLabel">'+
+            esc(firstAvailable?referenceDetailLabel(firstAvailable):"Nenhuma")+'</strong><small id="positionReferenceRemainingLabel"></small><em id="positionSelectedLabel">'+
+            esc(window.allocCtx.selectedAddress||"Nenhuma")+'</em></div>' +
+          '<div class="position-editor-fields">' +
+            '<div class="field"><label>Volumes nessa posição</label><input id="posQty" type="number" min="1" placeholder="Ex.: 30" oninput="updateAllocHint()"><small id="posHint" class="muted">Saldo da referência: '+(firstAvailable?itemRemainingQty(firstAvailable).toLocaleString("pt-BR"):"—")+' volumes</small></div>' +
+            '<div class="position-editor-action"><button class="primary" onclick="submitAllocation('+cardId+',\''+setor+'\')">+ Alocar referência</button></div>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="position-current-allocations">' +
+          '<div class="position-section-title"><b>Alocações nesta área</b><span>separadas por referência</span></div>' +
+          '<div id="positionCurrentAllocations"></div>' +
+        '</div>' +
+      '</div>';
+
+    renderAllocationItemPicker();
+    renderCurrentItemAllocations();
+    updateReferenceRemaining();
+    renderPositionMap();
   } catch(error) {
+    if(requestId!==window.positionMapRequestId) return;
     console.error("Falha ao gerar mapa de posições:",error);
     window.allocCtx=null;
-    box.innerHTML='<div class="position-empty large"><strong>Não foi possível gerar o mapa de casulos.</strong><p>'+esc(error.message||"Falha ao carregar os endereços.")+'</p><button type="button" class="secondary" onclick="loadPositionAllocator('+Number(cardId)+',\''+esc(setor)+'\')">Tentar novamente</button></div>';
-    return;
+    const activeBox=$("posAllocBox");
+    if(!activeBox || !activeBox.isConnected) return;
+    activeBox.innerHTML='<div class="position-empty large"><strong>Não foi possível gerar o mapa de casulos.</strong><p>'+esc(error?.message||"Falha ao carregar ou montar os endereços.")+'</p><button type="button" class="secondary" onclick="loadPositionAllocator('+Number(cardId)+',\''+esc(setor)+'\')">Tentar novamente</button></div>';
   }
-  const status=results[0];
-  const suggestion=results[1];
-  const positions=results[2];
-  const rcv=cardData?.receiving||{};
-  const items=(cardData.items||[]).filter(function(i){return Number(i.expected_qty||0)>0;});
-  const opIds=(rcv.operation_items||[]).map(function(i){return Number(i.id);}).filter(Boolean);
-  const sourceItems=opIds.length?items.filter(function(i){return opIds.includes(Number(i.id));}):items;
-  const receivingVolumes=Number(rcv.volumes||0);
-  const sourceTotal=receivingVolumes;
-  const firstAvailable=sourceItems[0] || null;
-  const firstAllocated=status.item_allocations?.find(function(i){return Number(i.total_alocado||0)>0;}) || null;
-
-  window.allocCtx={
-    cardId:cardId,setor:setor,
-    remaining:Math.max(0,sourceTotal-Number(status.global_total_alocado||0)),
-    positions:positions,status:status,suggestion:suggestion,
-    selectedItemId:Number(firstAvailable?.id||firstAllocated?.item_id||0),
-    selectedAddress:suggestion?.address||firstAllocated?.posicoes?.[0]?.address||"",
-    posFilter:"ALL",zoneFilter:"ALL",search:""
-  };
-
-  const zones=[...new Set(positions.map(function(p){return p.zona;}))].sort();
-  box.innerHTML=
-    '<div class="position-allocator">' +
-      '<div class="position-allocator-head">' +
-        '<div><div class="position-kicker">ENDEREÇAMENTO FÍSICO</div>' +
-          '<h3>'+({RM:"Alocar no Recebimento",QA:"Alocar na Qualidade",PR:"Alocar no Processamento"}[setor]||("Alocar no "+setor))+'</h3>' +
-          '<p>Escolha primeiro a referência, depois a posição. O controle desta etapa é feito em volumes da referência.</p>' +
-          '<div class="position-dest"><label for="positionDestSetor">Destino</label>' +
-            '<select id="positionDestSetor" onchange="changeAllocDestination(this.value)">'+
-              [["RM","Recebimento (RM)"],["QA","Qualidade (QA)"],["PR","Processamento (PR)"]].map(function(o){
-                return '<option value="'+o[0]+'"'+(o[0]===setor?' selected':'')+'>'+o[1]+'</option>';
-              }).join("")+
-            '</select><small>O saldo do Card é único: o que for alocado em qualquer destino sai do mesmo total.</small></div>' +
-        '</div>' +
-        '<div class="position-suggest">'+
-          (suggestion?'<span>SUGESTÃO AUTOMÁTICA</span><b>'+esc(suggestion.address)+'</b><small>'+
-            Number(suggestion.ocupado||0).toLocaleString("pt-BR")+' volume(s) já ocupado(s)</small>':
-            '<span>SEM SUGESTÃO DISPONÍVEL</span>')+
-        '</div>' +
-      '</div>' +
-
-      '<div class="position-reference-panel">' +
-        '<div class="position-section-title"><b>Referência a alocar</b><span>Escolha uma por vez</span></div>' +
-        '<div id="positionItemPicker" class="allocation-item-grid"></div>' +
-      '</div>' +
-
-      '<div class="position-stat-grid">' +
-        '<div class="position-stat"><span>Total alocado</span><strong id="positionAllocatedTotal">'+Number(status.global_total_alocado||0).toLocaleString("pt-BR")+
-          '</strong><small>volumes globais · RM '+Number(status.global_por_setor?.RM||0).toLocaleString("pt-BR")+
-          ' · QA '+Number(status.global_por_setor?.QA||0).toLocaleString("pt-BR")+
-          ' · PR '+Number(status.global_por_setor?.PR||0).toLocaleString("pt-BR")+'</small></div>' +
-        '<div class="position-stat"><span>Posições usadas</span><strong id="positionUsedCount">'+(status.posicoes?.length||0)+
-          '</strong><small>endereços</small></div>' +
-        '<div class="position-stat"><span>Saldo da referência</span><strong id="positionReferenceRemainingStat">—</strong><small>volumes restantes</small></div>' +
-      '</div>' +
-
-      '<div class="position-controls">' +
-        '<div class="position-search"><span>⌕</span><input id="positionSearch" placeholder="Buscar endereço, casulo ou nível" oninput="filterPositionMap()"></div>' +
-        '<select id="positionZoneFilter" onchange="filterPositionMap()"><option value="ALL">Todas as zonas</option>'+
-          zones.map(function(z){
-            const label=positions.find(function(p){return String(p.zona)===String(z);})?.zona_label||("Zona "+z);
-            return '<option value="'+esc(z)+'">'+esc(label)+'</option>';
-          }).join("")+'</select>' +
-        '<select id="positionStateFilter" onchange="filterPositionMap()"><option value="ALL">Todas as posições</option><option value="FREE">Livres</option><option value="OCCUPIED">Ocupadas</option><option value="CARD">Usadas neste Card</option></select>' +
-      '</div>' +
-
-      '<div class="position-legend"><span><i class="position-dot free"></i>Livre</span><span><i class="position-dot occupied"></i>Ocupada</span><span><i class="position-dot selected"></i>Selecionada</span><span><i class="position-dot item"></i>Usada pela referência</span></div>' +
-      '<div id="positionMap" class="position-map"></div>' +
-
-      '<div class="position-allocation-editor">' +
-        '<div class="position-selected"><span>REFERÊNCIA SELECIONADA</span><strong id="positionSelectedItemLabel">'+
-          esc(firstAvailable?referenceDetailLabel(firstAvailable):"Nenhuma")+'</strong><small id="positionReferenceRemainingLabel"></small><em id="positionSelectedLabel">'+
-          esc(window.allocCtx.selectedAddress||"Nenhuma")+'</em></div>' +
-        '<div class="position-editor-fields">' +
-          '<div class="field"><label>Volumes nessa posição</label><input id="posQty" type="number" min="1" placeholder="Ex.: 30" oninput="updateAllocHint()"><small id="posHint" class="muted">Saldo da referência: '+(firstAvailable?itemRemainingQty(firstAvailable).toLocaleString("pt-BR"):"—")+' volumes</small></div>' +
-          '<div class="position-editor-action"><button class="primary" onclick="submitAllocation('+cardId+',\''+setor+'\')">+ Alocar referência</button></div>' +
-        '</div>' +
-      '</div>' +
-
-      '<div class="position-current-allocations">' +
-        '<div class="position-section-title"><b>Alocações nesta área</b><span>separadas por referência</span></div>' +
-        '<div id="positionCurrentAllocations"></div>' +
-      '</div>' +
-    '</div>';
-
-  renderAllocationItemPicker();
-  renderCurrentItemAllocations();
-  updateReferenceRemaining();
-  renderPositionMap();
 }
-
 function changeAllocDestination(setor){
   const ctx=window.allocCtx;
   if(!ctx||!setor||setor===ctx.setor) return;
