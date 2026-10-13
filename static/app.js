@@ -17,7 +17,7 @@ let productionQueueRequestId = 0;
 let productionQueueLoading = false;
 let productionQueueHasMore = false;
 let productionQueueBrands = [];
-let unifiedCache = {warehouse:null,sgo:[],tasks:[],shipments:[],returns:[]};
+let unifiedCache = {sgo:[],tasks:[],shipments:[],returns:[]};
 const RETURNS_PAGE_SIZE = 100;
 let returnsListOffset = 0;
 let returnsListHasMore = false;
@@ -124,7 +124,7 @@ function setPage(title, subtitle) {
 }
 
 function activeNav(view) {
-  const parent = ({storage:"storage-hub",warehouse:"storage-hub","warehouse-heatmap":"storage-hub","stock-stats":"storage-hub","capacity-simulator":"storage-hub",returns:"returns-hub","return-indicators":"returns-hub","return-history":"returns-hub",sgo:"settings",tasks:"settings",import:"settings",test:"settings"})[view] || view;
+  const parent = ({storage:"storage-hub",returns:"returns-hub","return-indicators":"returns-hub","return-history":"returns-hub",sgo:"settings",tasks:"settings",import:"settings",test:"settings"})[view] || view;
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === parent);
   });
@@ -144,10 +144,6 @@ async function goTo(view) {
     if (view === "labeling") await renderCards("labeling");
     if (view === "storage") await renderCards("storage");
     if (view === "storage-hub") await renderStorageHub();
-    if (view === "warehouse") await renderWarehouse();
-    if (view === "warehouse-heatmap") await renderWarehouseHeatmap();
-    if (view === "stock-stats") await renderStockStatistics();
-    if (view === "capacity-simulator") await renderCapacitySimulator();
     if (view === "sgo") await renderSgo();
     if (view === "sgo-indicators") await renderSgoIndicators();
     if (view === "production") await renderProduction();
@@ -194,71 +190,14 @@ document.addEventListener("keydown", (event) => {
 });
 
 function showQuickHelp() {
-  $("modalBody").innerHTML = `<div class="card-title"><div><h2>Ajuda rápida</h2><div class="card-subtitle">DistriLog — fluxo operacional</div></div></div><div class="help-grid"><button onclick="closeModal();goTo('receiving')"><b>Recebimento</b><span>Recebimento físico e tiragem de 10%.</span></button><button onclick="closeModal();goTo('quality')"><b>Qualidade</b><span>Inspeções, amostras e resultados.</span></button><button onclick="closeModal();goTo('storage-hub')"><b>Estocagem</b><span>Fila, mapa, consulta e capacidade.</span></button><button onclick="closeModal();goTo('returns-hub')"><b>Devoluções</b><span>Conferência, pendências e indicadores.</span></button></div>`;
+  $("modalBody").innerHTML = `<div class="card-title"><div><h2>Ajuda rápida</h2><div class="card-subtitle">DistriLog — fluxo operacional</div></div></div><div class="help-grid"><button onclick="closeModal();goTo('receiving')"><b>Recebimento</b><span>Recebimento físico e tiragem de 10%.</span></button><button onclick="closeModal();goTo('quality')"><b>Qualidade</b><span>Inspeções, amostras e resultados.</span></button><button onclick="closeModal();goTo('storage-hub')"><b>Estocagem</b><span>Fila operacional e relatório de estoque por grupo.</span></button><button onclick="closeModal();goTo('returns-hub')"><b>Devoluções</b><span>Conferência, pendências e indicadores.</span></button></div>`;
   $("modal").classList.remove("hidden");
-}
-
-async function renderDashboardLegacy() {
-  setPage("Central de Operações", "Produção, estoque, SGO, expedição e devoluções na mesma visão");
-  const [data, unified] = await Promise.all([api("/api/dashboard"), api("/api/unified/overview")]);
-  const metrics = [
-    ["No Recebimento", data.totals.receiving, "#0891b2"],
-    ["Na Qualidade", data.totals.quality, "#0f766e"],
-    ["No Processamento", data.totals.processing, "#0f766e"],
-    ["Na Estocagem", data.totals.storage, "#166534"],
-    ["Capacidade utilizada", `${unified.warehouse.percentage}%`, unified.warehouse.percentage > 90 ? "#d92d20" : "#22c55e"],
-    ["Entradas SGO", Object.values(unified.sgo).reduce((a,b)=>a+b,0), "#2563eb"],
-    ["Tarefas pendentes", (unified.tasks.PENDENTE||0)+(unified.tasks.EM_ANDAMENTO||0), "#e98b08"],
-    ["Devoluções abertas", Object.entries(unified.returns).filter(([k])=>k!=="CONCLUIDA").reduce((a,[,v])=>a+v,0), "#d92d20"],
-  ];
-  const max = Math.max(1, ...data.status_counts.map((row) => row.value));
-  $("mainContent").innerHTML = `
-    <div class="kpi-grid">
-      ${metrics.map(([label, value, color]) => `
-        <div class="kpi" style="--accent:${color}">
-          <div class="kpi-label">${label}</div><div class="kpi-value">${value}</div><div class="kpi-hint">Cards</div>
-        </div>`).join("")}
-    </div>
-    <div class="operation-flow">
-      ${[["Compra / SGO","sgo",Object.values(unified.sgo).reduce((a,b)=>a+b,0)],["Recebimento + 10%","receiving",data.totals.receiving],["Qualidade","quality",data.totals.quality],["Processamento","processing",data.totals.processing],["Etiquetagem","labeling",data.totals.labeling||0],["Estocagem","storage",data.totals.storage],["Expedição","shipping","→"],["Devoluções","returns",Object.values(unified.returns).reduce((a,b)=>a+b,0)]].map(([label,view,total])=>`<button onclick="goTo('${view}')"><span>Etapa</span><strong>${total}</strong><small>${label}</small></button>`).join("")}
-    </div>
-    <div class="grid-two dashboard-panels">
-      <div class="panel">
-        <div class="panel-header">Distribuição por situação</div>
-        <div class="panel-body">
-          ${data.status_counts.length ? data.status_counts.map((row) => `
-            <div class="bar-row"><span>${esc(row.label)}</span><div class="bar-track"><i style="width:${(row.value/max)*100}%"></i></div><b>${row.value}</b></div>
-          `).join("") : '<div class="notice">Importe o relatório para iniciar.</div>'}
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-header">Regra de liberação</div>
-        <div class="panel-body">
-          <div class="notice"><b>Mercadoria nova</b><br>Recebimento físico e separação dos 10% podem terminar em qualquer ordem.</div>
-          <div class="notice warn"><b>O Card só sai do Recebimento quando as duas partes estiverem concluídas.</b></div>
-          <div class="notice success-box"><b>Retorno CD01</b><br>O Recebimento separa uma nova amostra de 10% sobre a quantidade retornada. A Qualidade usa essa amostra na Inspeção 2 obrigatória.</div>
-        </div>
-      </div>
-    </div>
-    <div class="panel" style="margin-top:14px">
-      <div class="panel-header">Cards atualizados recentemente</div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Compra</th><th>Fornecedor</th><th>Marca</th><th>Tipo</th><th>Qtd.</th><th>Casulo</th><th>Setor</th><th>Status</th><th></th></tr></thead>
-        <tbody>${data.recent.map((card) => `
-          <tr><td><b>${esc(card.purchase_id)}</b></td><td>${esc(card.supplier||"—")}</td><td>${esc(card.brand||"—")}</td>
-          <td>${esc(card.purchase_mode === "GRADE" ? "Grade" : card.purchase_mode === "SALDO" ? "Saldo" : "—")}</td><td>${card.expected_total}</td><td>${esc(card.casulo_current||"—")}</td><td>${esc(card.current_sector)}</td>
-          <td><span class="badge ${statusClass(card.status)}">${esc(card.status_label)}</span></td>
-          <td><button class="primary small-btn" onclick="openCard(${card.id})">Abrir</button></td></tr>
-        `).join("") || '<tr><td colspan="9">Nenhum Card.</td></tr>'}</tbody>
-      </table></div>
-    </div>`;
 }
 
 function metricCardsHtml(scope, totals) {
   if (scope === "receiving") {
-    const qty = Number(totals.receiving_qty || 0), capacity = Number(totals.warehouse_capacity || 0);
-    const percentage = capacity ? (qty * 100 / capacity).toFixed(1) : "0.0";
-    return `<div class="metric-row-2"><div class="kpi"><div class="kpi-label">Peças aguardando recebimento</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div><div class="kpi"><div class="kpi-label">% da capacidade real do CD</div><div class="kpi-value">${percentage}%</div></div></div>`;
+    const qty = Number(totals.receiving_qty || 0);
+    return `<div class="metric-row-2"><div class="kpi"><div class="kpi-label">Peças aguardando recebimento</div><div class="kpi-value">${qty.toLocaleString("pt-BR")}</div></div></div>`;
   }
   if (scope === "quality") {
     const qty = Number(totals.quality_qty || 0), total = Number(totals.quality || 0), active = Number(totals.quality_in_progress || 0);
@@ -300,7 +239,7 @@ async function renderCards(scope) {
     productionQueueRequestId++;
   }
   if (["receiving","quality","processing","labeling","storage"].includes(scope)) {
-    const tabs = storage ? moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage") : "";
+    const tabs = storage ? moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"]],"storage") : "";
     $("mainContent").innerHTML = tabs + metrics + processingQueueHtml(cards, scope);
     filterProductionQueue();
     updateProductionQueuePager();
@@ -1933,152 +1872,6 @@ function statusBadge(value) {
   return `<span class="badge ${cls}">${esc(String(value||"—").replaceAll("_"," "))}</span>`;
 }
 
-const WAREHOUSE_PAGE_SIZE = 100;
-let warehouseOffset = 0;
-let warehouseRequestToken = 0;
-let warehouseSearchTimer = null;
-let storeLocationRequestToken = 0;
-let simLocationRequestToken = 0;
-let simLocationSearchTimer = null;
-
-async function renderWarehouse() {
-  setPage("Mapa e Capacidade", "Endereçamento físico, ocupação e guarda das mercadorias");
-  const data = await api(`/api/unified/warehouse?limit=${WAREHOUSE_PAGE_SIZE}&offset=0`);
-  if (currentView !== "warehouse") return;
-  unifiedCache.warehouse = data;
-  warehouseOffset = 0;
-  $("mainContent").innerHTML = `
-    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse")}
-    <div class="zone-grid">${(data.zones||[]).map(z=>`<div class="zone-card"><div><small>Zona ${esc(z.code)}</small><b>${esc(z.name)}</b></div><strong>${z.occupancy}%</strong><div class="capacity-track"><i style="width:${Math.min(100,z.occupancy)}%"></i></div><span>${Number(z.occupied).toLocaleString("pt-BR")} / ${Number(z.capacity).toLocaleString("pt-BR")} peças</span></div>`).join("")}</div>
-    <div class="panel"><div class="panel-header">Endereços do centro de distribuição <button class="primary small-btn" onclick="showStoreForm()">+ Guardar mercadoria</button></div>
-      <div class="panel-body compact-filter"><div class="queue-search"><span>⌕</span><input id="warehouseSearch" placeholder="Endereço, categoria ou estrutura" oninput="filterWarehouseRows()"></div><select id="warehouseZone" onchange="filterWarehouseRows()"><option value="">Todas as zonas</option>${(data.zones||[]).map(z=>`<option value="${esc(z.code)}">${esc(z.code)}</option>`).join("")}</select></div>
-      <div id="storeForm" class="panel-body hidden"></div>
-      <div class="table-wrap warehouse-table"><table class="compact-table"><thead><tr><th>Endereço</th><th>Zona</th><th>Estrutura</th><th>Categoria</th><th>Ocupação</th><th>Disponível</th><th>Status</th></tr></thead><tbody id="warehouseTableBody"></tbody></table></div>
-      <div id="warehousePager" class="panel-body warehouse-pager"></div>
-    </div>`;
-  renderWarehouseRows();
-}
-
-function warehouseRowHtml(location) {
-  return `<tr class="warehouse-row"><td><b>${esc(location.address)}</b></td><td>${esc(location.zone_code)}</td><td>${esc(location.structure_type||"—")}</td><td>${esc(location.category||"Livre")}</td><td><div class="inline-capacity"><i style="width:${Math.min(100,location.occupancy)}%"></i></div><small>${location.occupied_qty}/${location.capacity} • ${location.occupancy}%</small></td><td><b>${Math.max(0,location.capacity-location.occupied_qty)}</b></td><td>${statusBadge(location.status)}</td></tr>`;
-}
-
-function renderWarehouseRows() {
-  const data = unifiedCache.warehouse;
-  if (!data || !$("warehouseTableBody")) return;
-  const locations = data.locations || [];
-  const total = Number(data.total_locations || 0);
-  const pageCount = Math.max(1, Math.ceil(total / WAREHOUSE_PAGE_SIZE));
-  const currentPage = Math.floor(warehouseOffset / WAREHOUSE_PAGE_SIZE) + 1;
-  $("warehouseTableBody").innerHTML = locations.length
-    ? locations.map(warehouseRowHtml).join("")
-    : '<tr><td colspan="7" class="empty-cell">Nenhum casulo encontrado.</td></tr>';
-  $("warehousePager").innerHTML = `
-    <span>Mostrando ${total ? warehouseOffset + 1 : 0}–${Math.min(warehouseOffset + locations.length, total)} de ${total.toLocaleString("pt-BR")} casulos · Página ${currentPage} de ${pageCount}</span>
-    <div class="actions">
-      <button class="secondary small-btn" onclick="changeWarehousePage(-1)" ${warehouseOffset <= 0 ? "disabled" : ""}>Anterior</button>
-      <button class="secondary small-btn" onclick="changeWarehousePage(1)" ${warehouseOffset + WAREHOUSE_PAGE_SIZE >= total ? "disabled" : ""}>Próxima</button>
-    </div>`;
-}
-
-async function loadWarehousePage(offset = 0) {
-  if (currentView !== "warehouse") return;
-  const token = ++warehouseRequestToken;
-  const search = $("warehouseSearch")?.value?.trim() || "";
-  const zone = $("warehouseZone")?.value || "";
-  if ($("warehouseTableBody")) $("warehouseTableBody").innerHTML = '<tr><td colspan="7" class="empty-cell">Carregando endereços...</td></tr>';
-  const query = `limit=${WAREHOUSE_PAGE_SIZE}&offset=${Math.max(0,offset)}&search=${encodeURIComponent(search)}&zone=${encodeURIComponent(zone)}&include_zones=false`;
-  try {
-    const data = await api(`/api/unified/warehouse?${query}`);
-    if (token !== warehouseRequestToken || currentView !== "warehouse") return;
-    unifiedCache.warehouse = data;
-    warehouseOffset = Math.max(0, offset);
-    renderWarehouseRows();
-  } catch (error) {
-    if (token !== warehouseRequestToken || currentView !== "warehouse") return;
-    if ($("warehouseTableBody")) $("warehouseTableBody").innerHTML = `<tr><td colspan="7" class="empty-cell">${esc(error.message)}</td></tr>`;
-  }
-}
-
-function changeWarehousePage(delta) {
-  loadWarehousePage(Math.max(0, warehouseOffset + delta * WAREHOUSE_PAGE_SIZE));
-}
-
-function filterWarehouseRows() {
-  clearTimeout(warehouseSearchTimer);
-  warehouseSearchTimer = setTimeout(() => loadWarehousePage(0), 250);
-}
-
-function showStoreForm() {
-  const form = $("storeForm");
-  if (!form) return;
-  form.classList.remove("hidden");
-  form.innerHTML = `<div class="inline-form">
-    <div class="field"><label>Buscar endereço disponível</label><input id="storeLocationSearch" placeholder="Digite rua, endereço ou estrutura" oninput="scheduleStoreLocationSearch()"></div>
-    <div class="field"><label>Endereço</label><select id="storeLocation"><option value="">Carregando endereços...</option></select></div>
-    <div class="field"><label>ID do Card</label><input id="storeCard" type="number" placeholder="Opcional"></div>
-    <div class="field"><label>Quantidade</label><input id="storeQty" type="number" min="1"></div>
-    <div class="field"><label>Marca / categoria</label><input id="storeBrand" placeholder="Marca ou grupo"></div>
-    <button class="success" onclick="storeMaterial()">Confirmar guarda</button>
-  </div>`;
-  searchStoreLocations();
-}
-
-function scheduleStoreLocationSearch() {
-  clearTimeout(window.storeLocationSearchTimer);
-  window.storeLocationSearchTimer = setTimeout(() => searchStoreLocations(), 250);
-}
-
-async function searchStoreLocations() {
-  const select = $("storeLocation");
-  if (!select) return;
-  const token = ++storeLocationRequestToken;
-  const search = $("storeLocationSearch")?.value?.trim() || "";
-  select.innerHTML = '<option value="">Buscando endereços...</option>';
-  try {
-    const data = await api(`/api/unified/warehouse?available_only=true&include_zones=false&limit=100&offset=0&search=${encodeURIComponent(search)}`);
-    if (token !== storeLocationRequestToken || !$("storeLocation")) return;
-    const locations = data.locations || [];
-    select.innerHTML = locations.length
-      ? '<option value="">Selecione um endereço</option>' + locations.map(l => `<option value="${l.id}">${esc(l.address)} • livre ${Math.max(0,Number(l.capacity)-Number(l.occupied_qty))}</option>`).join("")
-      : '<option value="">Nenhum endereço disponível encontrado</option>';
-  } catch (error) {
-    if (token === storeLocationRequestToken && $("storeLocation")) select.innerHTML = `<option value="">${esc(error.message)}</option>`;
-  }
-}
-
-async function storeMaterial() {
-  try {
-    const locationId = Number($("storeLocation")?.value || 0);
-    if (!locationId) { toast("Selecione um endereço disponível."); return; }
-    await api("/api/unified/warehouse/store",{method:"POST",body:JSON.stringify({user_id:currentUser.id,location_id:locationId,card_id:Number($("storeCard").value||0),quantity:Number($("storeQty").value),brand:$("storeBrand").value,category:$("storeBrand").value})});
-    toast("Mercadoria guardada e capacidade atualizada.");
-    renderWarehouse();
-  } catch(e) { toast(e.message); }
-}
-
-function heatmapColor(percentage){
-  if(percentage>=90)return "#d92d20";
-  if(percentage>=60)return "#e98b08";
-  if(percentage>=25)return "#f5c400";
-  if(percentage>0)return "#16803c";
-  return "#2a3646";
-}
-
-async function renderWarehouseHeatmap(){
-  setPage("Mapa de Calor","Ocupação por Rua e coluna");
-  const data=await api("/api/unified/warehouse/heatmap");
-  if (currentView !== "warehouse-heatmap") return;
-  const sideBlock=(columns,title)=>`<div class="heatmap-side"><div class="heatmap-side-title">${title}</div><div class="heatmap-grid">${columns.map(column=>`<div class="heatmap-box" style="background:${heatmapColor(column.ocupacao_pct)}" title="Coluna ${column.coluna} — ${column.ocupado}/${column.capacidade} peças (${column.ocupacao_pct}%)">${column.coluna}</div>`).join("")||'<span class="empty-visual">Sem posições</span>'}</div></div>`;
-  const streets=(data.ruas||[]).map(street=>{
-    const odd=street.colunas.filter(column=>column.secao==="impar").sort((a,b)=>a.coluna-b.coluna);
-    const even=street.colunas.filter(column=>column.secao==="par").sort((a,b)=>a.coluna-b.coluna);
-    const sequential=street.colunas.filter(column=>column.secao==="sequencial").sort((a,b)=>a.coluna-b.coluna);
-    return `<section class="panel heatmap-street"><div class="panel-header">${esc(street.rua)} <small>${street.colunas.length} colunas</small></div><div class="panel-body"><div class="heatmap-sides">${sideBlock(odd,"◀ Lado ímpar")}${sideBlock(even,"Lado par ▶")}</div>${sequential.length?`<div class="heatmap-sequential"><div class="heatmap-side-title">Trecho sequencial</div><div class="heatmap-grid">${sequential.map(column=>`<div class="heatmap-box" style="background:${heatmapColor(column.ocupacao_pct)}" title="Coluna ${column.coluna} — ${column.ocupado}/${column.capacidade} peças (${column.ocupacao_pct}%)">${column.coluna}</div>`).join("")}</div></div>`:""}</div></section>`;
-  }).join("");
-  $("mainContent").innerHTML=`${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Mapa de Calor","warehouse-heatmap"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"warehouse-heatmap")}<div class="heatmap-legend"><span><i style="background:#2a3646"></i>Vazio</span><span><i style="background:#16803c"></i>Baixa</span><span><i style="background:#f5c400"></i>Média</span><span><i style="background:#e98b08"></i>Alta</span><span><i style="background:#d92d20"></i>Quase cheio</span></div>${streets||'<div class="empty-visual">Nenhum casulo cadastrado.</div>'}`;
-}
-
 async function renderSgo() {
   setPage("SGO e Entradas","Previsão de compras e distribuição de serviço por setor");
   const [rows,summary] = await Promise.all([
@@ -2373,10 +2166,9 @@ const progressFor = card => card.status?.includes("FINAL")||card.status?.include
 
 async function renderDashboard() {
   setPage("Central de Operações", "");
-  const [data,unified,warehouseSummary,quality,processing,returns] = await Promise.all([
+  const [data,unified,quality,processing,returns] = await Promise.all([
     safeApi("/api/dashboard",{totals:{receiving:0,quality:0,processing:0,storage:0},recent:[],status_counts:[]}),
-    safeApi("/api/unified/overview",{warehouse:{percentage:0},tasks:{},returns:{},sgo:{},recent_movements:[]}),
-    safeApi("/api/unified/warehouse/summary",{genders:[],zones:[],totals:{}}),
+    safeApi("/api/unified/overview",{tasks:{},returns:{},sgo:{},recent_movements:[]}),
     safeApi("/api/cards?scope=quality&limit=5",[]),
     safeApi("/api/cards?scope=processing&limit=5",[]),
     safeApi("/api/unified/returns?limit=5",[])
@@ -2390,12 +2182,11 @@ async function renderDashboard() {
       ${heroKpi("Aguardando recebimento",data.totals.receiving,"Pedidos","▣","blue","receiving")}
       ${heroKpi("Em qualidade",data.totals.quality,"Pedidos","◇","teal","quality")}
       ${heroKpi("Em processamento",data.totals.processing,"Pedidos","⚙","blue","processing")}
-      <button class="hero-card" onclick="goTo('storage-hub')"><div><span>Capacidade do CD</span><strong>${unified.warehouse.percentage||0}%</strong><small>Utilizada</small><em>Ver capacidade ›</em></div><div class="capacity-ring" style="--pct:${Math.min(100,unified.warehouse.percentage||0)}"><b>⌂</b></div></button>
     </div>
     <div class="dash-row dash-row-main">
       ${dashboardPanel("⌁","Produção ativa",`<span class="live-indicator">◷ ${new Date().toLocaleTimeString('pt-BR')}</span>`,compactProductionTable(active))}
       ${dashboardPanel("⇩","Aguardando recebimento",`<span class="panel-count">${data.totals.receiving}</span>`,awaitingTable([],data.recent))}
-      ${dashboardPanel("⌁","Estoque conectado",`<span class="online-pill">Online</span>`,gendersTable(warehouseSummary.genders))}
+      ${dashboardPanel("⌂","Aguardando estocagem",`<span class="panel-count">${data.totals.storage||0}</span>`,`<div class="empty-visual">${data.totals.storage||0} cards aguardando conclusão da Estocagem.</div><button class="panel-link" onclick="goTo('storage')">Abrir fila ›</button>`)}
     </div>
     <div class="dash-row dash-row-secondary">
       ${dashboardPanel("◇","Qualidade",`<span class="panel-count">${data.totals.quality||0}</span>`,qualityTable(quality.slice(0,5)))}
@@ -2405,8 +2196,6 @@ async function renderDashboard() {
     <div class="flow-strip">${[["🛒","Compras","import"],["⇩","Recebimento","receiving"],["◇","Qualidade","quality"],["⚙","Processamento","processing"],["♢","Etiquetagem","labeling"],["⌂","Estocagem","storage-hub"],["▣","Expedição / Devolução","returns-hub"]].map(([icon,label,view],i)=>`${i?'<i>→</i>':''}<button onclick="goTo('${view}')"><b>${icon}</b><span>${label}</span>${i===1?'<small>+ 10%</small>':''}</button>`).join("")}</div>
   </div>`;
 }
-function gendersTable(genders){return `<table class="dash-table"><thead><tr><th>Zona</th><th>Ocupação</th><th>Status</th></tr></thead><tbody>${(genders||[]).map(g=>`<tr><td>${esc(g.gender)}</td><td><div class="tiny-progress"><i class="${g.occupancy>90?'warn-bar':''}" style="width:${Math.min(100,g.occupancy)}%"></i></div><small>${g.occupancy}%</small></td><td><span class="dot-status ${g.occupancy>90?'attention':''}">${g.occupancy>90?'Atenção':'Normal'}</span></td></tr>`).join('')||emptyRows(3)}</tbody></table><small style="color:#6b7280;display:block;margin:4px 0 2px">Rua 01 é fora de estoque (porta-palete) — não entra nesse total.</small><button class="panel-link" onclick="goTo('warehouse')">Ver endereçamento ›</button>`;}
-
 function heroKpi(title,value,hint,icon,tone,view){return `<button class="hero-card" onclick="goTo('${view}')"><div><span>${title}</span><strong>${value||0}</strong><small>${hint}</small><em>Ver ${title.replace('Em ','').toLowerCase()} ›</em></div><b class="hero-icon ${tone}">${icon}</b></button>`;}
 function dashboardPanel(icon,title,action,body){return `<section class="dash-panel"><header><b>${icon}</b><strong>${title}</strong>${action}</header><div class="dash-panel-body">${body}</div></section>`;}
 function emptyRows(cols,text="Nenhum registro nesta visão."){return `<tr><td colspan="${cols}" class="empty-cell">${text}</td></tr>`;}
@@ -2619,121 +2408,39 @@ async function prodRenderQuadro(body){
 }
 
 async function renderStorageHub() {
-  setPage("Estocagem","");
-  const [dashboard,warehouse,analytics] = await Promise.all([
+  setPage("Estocagem", "Fila operacional e relatório de estoque por grupo");
+  const [dashboard,report] = await Promise.all([
     safeApi("/api/dashboard",{totals:{storage:0}}),
-    safeApi("/api/unified/warehouse/summary",{zones:[],totals:{},occupied_preview:[]}),
-    safeApi("/api/unified/warehouse/analytics",{structures:[],categories:[],brands:[],groups:[]})
+    safeApi("/api/unified/stock-group-report/analytics",{groups:[],latest_report:null})
   ]);
   if (currentView !== "storage-hub") return;
-  const totals = warehouse.totals || {};
-  const occupied = warehouse.occupied_preview || [];
-  const zones = warehouse.zones || [];
-  const avgOccupancy = zones.length ? Math.round(zones.reduce((sum,z)=>sum+Number(z.occupancy||0),0)/zones.length) : 0;
+  const groups = report.groups || [];
+  const genderTotals = ["FEMININO","MASCULINO","OUTROS"].map(gender=>({
+    gender, quantity:groups.filter(row=>row.gender===gender).reduce((sum,row)=>sum+Number(row.quantity||0),0)
+  }));
   $("mainContent").innerHTML = `
-    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"storage-hub")}
+    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"]],"storage-hub")}
     <div class="hero-kpis storage-kpis">
       ${heroKpi("Aguardando estocagem",dashboard.totals.storage||0,"Cards","⌂","blue","storage")}
-      ${heroKpi("Endereços ocupados",totals.occupied_locations||0,"Casulos","▦","teal","warehouse")}
-      ${heroKpi("Endereços livres",totals.available_locations||0,"Casulos","◇","blue","warehouse")}
-      <div class="hero-card static-card"><div><span>Ocupação geral</span><strong>${avgOccupancy}%</strong><small>Capacidade cadastrada</small></div></div>
     </div>
-    <div class="dash-row storage-layout">
-      ${dashboardPanel("▦","Visualizador de casulos","",zonesTable(zones))}
-      ${dashboardPanel("⌕","Consulta rápida","",`<div class="panel-search"><input id="stockQuickSearch" placeholder="Filtrar endereços ocupados" oninput="filterStockQuick()"></div><table class="dash-table"><tbody>${occupied.map(l=>`<tr class="stock-quick-row" data-search="${esc(normalizeSearch([l.address,l.category,l.structure_type].join(' ')))}"><td><b>${esc(l.address)}</b></td><td>${esc(l.category||'Sem categoria')}</td><td>${l.occupied_qty}/${l.capacity}</td><td>${statusBadge(l.status)}</td></tr>`).join('')||emptyRows(4)}</tbody></table>`)}
-    </div>
-    <section class="dash-panel stock-report-panel"><header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header><div class="dash-panel-body">${analytics.groups?.length?`<div class="group-summary">${['FEMININO','MASCULINO','OUTROS'].map(g=>`<div><span>${g}</span><strong>${analytics.groups.filter(x=>x.gender===g).reduce((a,x)=>a+Number(x.quantity),0).toLocaleString('pt-BR')}</strong></div>`).join('')}</div>`:'<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para recuperar a visão por gênero e grupo.</div>'}</div></section>`;
-}
-function moduleTabs(items,current){if(items.some(([,view])=>view==="warehouse")&&!items.some(([,view])=>view==="warehouse-heatmap")){const position=items.findIndex(([,view])=>view==="warehouse")+1;items=[...items.slice(0,position),["Mapa de Calor","warehouse-heatmap"],...items.slice(position)];}return `<div class="module-tabs">${items.map(([label,view])=>`<button class="${view===current?'active':''}" onclick="goTo('${view}')">${label}</button>`).join('')}</div>`;}
-function filterStockQuick(){const t=normalizeSearch($("stockQuickSearch")?.value||'');document.querySelectorAll('.stock-quick-row').forEach(r=>r.classList.toggle('hidden',t&&!r.dataset.search.includes(t)));}
-async function importStockGroupReport(input){if(!input.files?.[0])return;const form=new FormData();form.append('file',input.files[0]);try{const d=await api(`/api/unified/warehouse/import-group-report?user_id=${currentUser.id}`,{method:'POST',body:form});toast(`${d.groups} grupos e ${d.total_qty} peças importados.`);renderStorageHub();}catch(e){toast(e.message)}}
-
-async function renderStockStatistics() {
-  setPage("Estatísticas de Casulos","");
-  const [warehouse,a] = await Promise.all([
-    safeApi('/api/unified/warehouse/summary',{totals:{},zones:[]}),
-    safeApi('/api/unified/warehouse/analytics',{structures:[],categories:[],brands:[],groups:[]})
-  ]);
-  if (currentView !== "stock-stats") return;
-  const totals = warehouse.totals || {};
-  const capacity = Number(totals.capacity||0), occupied = Number(totals.occupied||0);
-  $("mainContent").innerHTML = `${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"stock-stats")}
-    <div class="hero-kpis">
-      ${heroKpi("Total de casulos",Number(totals.locations||0).toLocaleString('pt-BR'),"Estrutura física","▦","blue","warehouse")}
-      ${heroKpi("Capacidade estimada",capacity.toLocaleString('pt-BR'),"Peças","⌂","teal","storage-hub")}
-      ${heroKpi("Ocupação real",occupied.toLocaleString('pt-BR'),"Peças","◇","blue","storage-hub")}
-      ${heroKpi("Disponibilidade",Math.max(0,capacity-occupied).toLocaleString('pt-BR'),"Peças","＋","teal","capacity-simulator")}
-    </div>
-    <div class="dash-row analytics-grid">
-      ${analyticsBars("Estruturas",a.structures.map(x=>({label:x.label,value:x.locations,hint:`${x.occupied}/${x.capacity}`})))}
-      ${analyticsBars("Estoque por categoria",a.categories.map(x=>({label:x.label,value:x.quantity})))}
-      ${analyticsBars("Estoque por marca",a.brands.map(x=>({label:x.label,value:x.quantity})))}
-    </div>
-    ${a.groups?.length?dashboardPanel("▣","Último relatório por grupo",`<span>${esc(a.latest_report?.filename||'')}</span>`,analyticsBarsBody(a.groups.map(x=>({label:x.group_name,value:x.quantity,hint:x.gender})))):''}`;
-}
-function analyticsBars(title,rows){return dashboardPanel("▥",title,"",analyticsBarsBody(rows));}
-function analyticsBarsBody(rows){const max=Math.max(1,...rows.map(r=>Number(r.value)||0));return `<div class="analytics-bars">${rows.slice(0,15).map(r=>`<div><span>${esc(r.label)}</span><i><b style="width:${Number(r.value)*100/max}%"></b></i><strong>${Number(r.value).toLocaleString('pt-BR')}</strong><small>${esc(r.hint||'')}</small></div>`).join('')||'<div class="empty-visual">Sem dados para exibir.</div>'}</div>`;}
-
-async function renderCapacitySimulator() {
-  setPage("Simulador de Capacidade","");
-  $("mainContent").innerHTML = `
-    ${moduleTabs([["Visão geral","storage-hub"],["Fila operacional","storage"],["Mapa de casulos","warehouse"],["Estatísticas","stock-stats"],["Simulador","capacity-simulator"]],"capacity-simulator")}
-    <section class="dash-panel simulator-panel"><header><b>⌁</b><strong>Teste uma entrada sem alterar o estoque</strong></header>
-      <div class="dash-panel-body simulator-form">
-        <div class="field"><label>Pesquisar endereço</label><input id="simLocationSearch" placeholder="Digite o endereço, rua ou estrutura" oninput="scheduleSimulationLocationSearch()"></div>
-        <div class="field"><label>Endereço</label><select id="simLocation" onchange="calculateCapacitySimulation()"><option value="">Carregando endereços...</option></select></div>
-        <div class="field"><label>Quantidade a armazenar</label><input id="simQty" type="number" min="0" value="10" oninput="calculateCapacitySimulation()"></div>
-        <div id="simResult" class="simulation-result"><span>Selecione um endereço para simular.</span></div>
+    <section class="dash-panel stock-report-panel">
+      <header><b>⇧</b><strong>Relatório de estoque por grupo</strong><button class="panel-action" onclick="document.getElementById('stockGroupPdf').click()">Importar PDF</button><input id="stockGroupPdf" class="hidden" type="file" accept=".pdf" onchange="importStockGroupReport(this)"></header>
+      <div class="dash-panel-body">
+        ${report.latest_report ? `<p class="muted">Último arquivo: ${esc(report.latest_report.filename)} · ${Number(report.latest_report.total_qty||0).toLocaleString("pt-BR")} peças</p>` : '<div class="empty-visual">Importe o PDF “Resumo de Estoque do Grupo” para consultar os totais por gênero e grupo.</div>'}
+        ${groups.length ? `<div class="group-summary">${genderTotals.map(row=>`<div><span>${row.gender}</span><strong>${row.quantity.toLocaleString("pt-BR")}</strong></div>`).join("")}</div>
+        <div class="table-wrap"><table class="dash-table"><thead><tr><th>Grupo</th><th>Gênero</th><th>Quantidade</th></tr></thead><tbody>${groups.map(row=>`<tr><td>${esc(row.group_name)}</td><td>${esc(row.gender)}</td><td>${Number(row.quantity||0).toLocaleString("pt-BR")}</td></tr>`).join("")}</tbody></table></div>` : ""}
       </div>
     </section>`;
-  await searchSimulationLocations();
 }
-
-function scheduleSimulationLocationSearch() {
-  clearTimeout(simLocationSearchTimer);
-  simLocationSearchTimer = setTimeout(() => searchSimulationLocations(), 250);
-}
-
-async function searchSimulationLocations() {
-  const select = $("simLocation");
-  if (!select || currentView !== "capacity-simulator") return;
-  const token = ++simLocationRequestToken;
-  const search = $("simLocationSearch")?.value?.trim() || "";
-  select.innerHTML = '<option value="">Buscando endereços...</option>';
+function moduleTabs(items,current){return `<div class="module-tabs">${items.map(([label,view])=>`<button class="${view===current?'active':''}" onclick="goTo('${view}')">${label}</button>`).join("")}</div>`;}
+async function importStockGroupReport(input){
+  if(!input.files?.[0]) return;
+  const form = new FormData(); form.append("file",input.files[0]);
   try {
-    const data = await api(`/api/unified/warehouse?include_zones=false&limit=100&offset=0&search=${encodeURIComponent(search)}`);
-    if (token !== simLocationRequestToken || currentView !== "capacity-simulator" || !$("simLocation")) return;
-    const locations = data.locations || [];
-    select.innerHTML = locations.length
-      ? '<option value="">Selecione um endereço</option>' + locations.map(l=>`<option value="${l.id}" data-cap="${l.capacity}" data-occ="${l.occupied_qty}">${esc(l.address)} • livre ${Math.max(0,Number(l.capacity)-Number(l.occupied_qty))}</option>`).join("")
-      : '<option value="">Nenhum endereço encontrado</option>';
-    $("simResult").innerHTML = '<span>Selecione um endereço para simular.</span>';
-  } catch (error) {
-    if (token === simLocationRequestToken && $("simLocation")) select.innerHTML = `<option value="">${esc(error.message)}</option>`;
-  }
-}
-function calculateCapacitySimulation(){const option=$("simLocation")?.selectedOptions?.[0],qty=Number($("simQty")?.value||0);if(!option?.value)return;const cap=Number(option.dataset.cap),occ=Number(option.dataset.occ),after=occ+qty,pct=cap?Math.round(after*100/cap):0,excess=Math.max(0,after-cap);$("simResult").innerHTML=`<div class="capacity-gauge"><i style="width:${Math.min(100,pct)}%" class="${excess?'danger-fill':pct>80?'warn-fill':''}"></i></div><strong>${pct}% após a entrada</strong><span>${occ} atuais + ${qty} novas = ${after} de ${cap}</span>${excess?`<b class="text-danger">Excede a capacidade em ${excess} peças.</b>`:'<b class="text-success">Entrada compatível com a capacidade.</b>'}`;}
-
-async function renderSgoIndicators() {
-  setPage("SGO e Indicadores","");
-  const [summary,tasks,upcoming] = await Promise.all([
-    safeApi("/api/unified/sgo/summary",{totals:{},by_status:[]}),
-    safeApi("/api/unified/tasks",[]),
-    safeApi("/api/unified/sgo?limit=10&offset=0",[])
-  ]);
-  if (currentView !== "sgo-indicators") return;
-  const totals = summary.totals || {};
-  const byStatus = (summary.by_status||[]).map(row=>({label:row.status,value:Number(row.quantity||0)}));
-  const late = Number(totals.overdue_count||0);
-  const taskOpen = tasks.filter(task=>task.status!=="CONCLUIDA").length;
-  $("mainContent").innerHTML = `${moduleTabs([["Indicadores","sgo-indicators"],["Entradas SGO","sgo"],["Quadro de tarefas","tasks"],["Importar compras","import"]],"sgo-indicators")}
-    <div class="hero-kpis">
-      ${heroKpi("Entradas previstas",Number(totals.total_count||0).toLocaleString("pt-BR"),"Compras / lotes","⇩","blue","sgo")}
-      ${heroKpi("Peças previstas",Number(totals.total_quantity||0).toLocaleString("pt-BR"),"Quantidade SGO","▣","teal","sgo")}
-      ${heroKpi("Previsões atrasadas",late.toLocaleString("pt-BR"),"Requer atenção","!","blue","sgo")}
-      ${heroKpi("Tarefas abertas",taskOpen.toLocaleString("pt-BR"),"Operação","☑","teal","tasks")}
-    </div>
-    <div class="dash-row indicators-layout">${analyticsBars("Peças por etapa",byStatus)}${dashboardPanel("⇩","Próximas entradas",`<span class="panel-count">${Number(totals.total_count||0)}</span>`,awaitingTable(upcoming,[]))}</div>`;
+    const data = await api(`/api/unified/stock-group-report/import?user_id=${currentUser.id}`,{method:"POST",body:form});
+    toast(`${data.groups} grupos e ${data.total_qty.toLocaleString("pt-BR")} peças importados.`);
+    renderStorageHub();
+  } catch(error) { toast(error.message); }
 }
 
 async function renderReturnsHub() {
@@ -2829,19 +2536,10 @@ async function loadMoreReturnHistory() {
 
 async function renderRegistrations() {
   setPage("Cadastros","");
-  const [users,w,a] = await Promise.all([
-    safeApi('/api/users',[]),
-    safeApi('/api/unified/warehouse/summary',{zones:[]}),
-    safeApi('/api/unified/warehouse/analytics',{groups:[]})
-  ]);
+  const users = await safeApi("/api/users",[]);
   if (currentView !== "registrations") return;
-  const zones = w.zones || [];
   $("mainContent").innerHTML = `<div class="actions" style="margin-bottom:12px"><button class="primary" onclick="openGoatCardModal()">+ Criar Card</button></div>
-    <div class="dash-row registrations-grid">
-      ${dashboardPanel("♙","Usuários e perfis",`<span class="panel-count">${users.length}</span>`,`<table class="dash-table"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${statusBadge(u.role)}</td></tr>`).join('')}</tbody></table>`)}
-      ${dashboardPanel("▦","Zonas do CD",`<span class="panel-count">${zones.length}</span>`,`<table class="dash-table"><thead><tr><th>Zona</th><th>Descrição</th><th>Capacidade</th></tr></thead><tbody>${zones.map(z=>`<tr><td>${esc(z.code)}</td><td>${esc(z.name)}</td><td>${Number(z.capacity).toLocaleString('pt-BR')}</td></tr>`).join('')}</tbody></table>`)}
-      ${dashboardPanel("▣","Grupos do último relatório","",analyticsBarsBody((a.groups||[]).map(g=>({label:g.group_name,value:g.quantity,hint:g.gender}))))}
-    </div>`;
+    ${dashboardPanel("♙","Usuários e perfis",`<span class="panel-count">${users.length}</span>`,`<table class="dash-table"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.username)}</td><td>${statusBadge(u.role)}</td></tr>`).join("")}</tbody></table>`)}`;
 }
 
 async function renderSettings(){setPage("Configurações","");$("mainContent").innerHTML=`<div class="settings-grid"><button onclick="goTo('import')"><b>⇧</b><strong>Importar compras</strong><span>Atualizar Cards a partir do relatório Excel.</span></button><button onclick="goTo('tasks')"><b>☑</b><strong>Quadro de tarefas</strong><span>Responsáveis, prioridades e andamento.</span></button><button onclick="goTo('test')"><b>⚙</b><strong>Administração e testes</strong><span>Ferramentas controladas para validação.</span></button><button onclick="goTo('history')"><b>◷</b><strong>Histórico global</strong><span>Rastreabilidade das movimentações.</span></button></div><div class="state-panel"><b>DistriLog V3</b><span>Uma interface, um backend e uma base SQLite. As regras congeladas de Recebimento, Qualidade e Processamento permanecem no motor operacional.</span></div>`;}
@@ -2854,114 +2552,21 @@ if (currentUser) enterApp();
  * Baseado no layout analítico e visual da Opção 3.
  */
 function renderRecebimentoPanel() {
-    const mainContent = document.getElementById('mainContent');
-    
-    mainContent.innerHTML = `
-        <div class="dashboard-recebimento">
-            <div class="dash-header">
-                <h2>Painel Operacional do Centro de Distribuição</h2>
-                <p id="last-update">Atualizado agora · Turno A · CD Curitiba - PR</p>
-            </div>
-
-            <!-- KPIs Superiores -->
-            <div class="kpi-container">
-                <div class="kpi-box">
-                    <div class="kpi-info">
-                        <h4 style="color: #ffb800;">Peças Aguardando Recebimento</h4>
-                        <div class="kpi-value" id="kpi-pecas">0 <span>peças</span></div>
-                        <p style="color: var(--text-secondary); font-size: 0.8rem;">Cargas no pátio aguardando endereçamento.</p>
-                    </div>
-                </div>
-                <div class="kpi-box">
-                    <div class="kpi-info">
-                        <h4 style="color: #60a5fa;">% Da Capacidade Real do CD</h4>
-                        <div class="kpi-value" id="kpi-capacidade">0% <span>ocupado</span></div>
-                        <p style="color: var(--text-secondary); font-size: 0.8rem;">Limite de segurança operacional em 88%.</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Grid Principal -->
-            <div class="main-grid">
-                <!-- Mapa de Casulos -->
-                <div class="panel-section">
-                    <div class="panel-header">
-                        <div>
-                            <h3>Mapa de Casulos</h3>
-                            <p>Setores monitorados em tempo real</p>
-                        </div>
-                        <button class="btn btn-secondary btn-sm">Filtrar</button>
-                    </div>
-                    <div class="casulos-grid" id="casulos-grid">
-                        <!-- Casulos serão injetados aqui -->
-                    </div>
-                </div>
-
-                <!-- Fila de Recebimento -->
-                <div class="panel-section">
-                    <div class="panel-header">
-                        <div>
-                            <h3>Fila de Recebimento</h3>
-                            <p id="fila-count">0 cargas no pátio</p>
-                        </div>
-                        <span class="status-badge" style="background: rgba(16,185,129,0.1); color: #10b981;">● AO VIVO</span>
-                    </div>
-                    <div class="fila-list" id="fila-list">
-                        <!-- Fila será injetada aqui -->
-                    </div>
-                </div>
-            </div>
+  const mainContent = document.getElementById("mainContent");
+  mainContent.innerHTML = `
+    <div class="dashboard-recebimento">
+      <div class="dash-header">
+        <h2>Painel Operacional do Centro de Distribuição</h2>
+        <p>Fila de recebimento</p>
+      </div>
+      <div class="panel-section">
+        <div class="panel-header"><div><h3>Fila de Recebimento</h3><p id="fila-count">0 cargas no pátio</p></div>
+          <span class="status-badge">● AO VIVO</span>
         </div>
-    `;
-
-    loadCasulosData();
-    loadRecebimentoQueue();
-}
-
-/**
- * Simula/Carrega os dados dos casulos e injeta no DOM.
- * Em produção, conecte a um endpoint GET /api/casulos.
- */
-function loadCasulosData() {
-    // Dados de exemplo baseados na imagem
-    const casulos = [
-        { id: 'A-01', nome: 'Casulo Alfa', ocupacao: 92, pos_atuais: 1104, pos_total: 1200 },
-        { id: 'A-02', nome: 'Casulo Alfa', ocupacao: 78, pos_atuais: 936, pos_total: 1200 },
-        { id: 'A-03', nome: 'Casulo Alfa', ocupacao: 41, pos_atuais: 492, pos_total: 1200 },
-        { id: 'A-04', nome: 'Casulo Alfa', ocupacao: 12, pos_atuais: 144, pos_total: 1200 },
-        { id: 'B-01', nome: 'Casulo Beta', ocupacao: 100, pos_atuais: 800, pos_total: 800 },
-        { id: 'B-02', nome: 'Casulo Beta', ocupacao: 64, pos_atuais: 512, pos_total: 800 }
-    ];
-
-    const grid = document.getElementById('casulos-grid');
-    grid.innerHTML = '';
-
-    casulos.forEach(c => {
-        let statusClass = 'livre';
-        let statusLabel = 'LIVRE';
-        let bgColor = 'var(--status-free)';
-
-        if (c.ocupacao >= 90) { statusClass = 'critico'; statusLabel = c.ocupacao === 100 ? 'BLOQUEADO' : 'CRÍTICO'; bgColor = 'var(--status-critical)'; }
-        else if (c.ocupacao >= 75) { statusClass = 'atencao'; statusLabel = 'ATENÇÃO'; bgColor = 'var(--status-warning)'; }
-        else if (c.ocupacao >= 30) { statusClass = 'normal'; statusLabel = 'NORMAL'; bgColor = 'var(--status-normal)'; }
-
-        grid.innerHTML += `
-            <div class="casulo-card ${statusClass}" onclick="abrirModalFiltroCasulo('${c.id}')">
-                <div class="casulo-header">
-                    <div>
-                        <div class="casulo-id">${c.id}</div>
-                        <div style="font-size: 0.7rem; color: var(--text-secondary)">${c.nome}</div>
-                    </div>
-                    <div style="font-size: 0.65rem; font-weight: 600; color: ${bgColor}">${statusLabel}</div>
-                </div>
-                <div class="casulo-ocupacao">${c.ocupacao}%</div>
-                <div class="progress-bar-bg">
-                    <div class="progress-bar-fill" style="width: ${c.ocupacao}%; background-color: ${bgColor}"></div>
-                </div>
-                <div class="casulo-posicoes">${c.pos_atuais.toLocaleString()} / ${c.pos_total.toLocaleString()} pos.</div>
-            </div>
-        `;
-    });
+        <div class="fila-list" id="fila-list"></div>
+      </div>
+    </div>`;
+  loadRecebimentoQueue();
 }
 
 /**
