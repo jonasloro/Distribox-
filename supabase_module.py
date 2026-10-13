@@ -32,7 +32,7 @@ def pg_connect():
             "SUPABASE_DATABASE_URL não está configurada. Defina essa variável de "
             "ambiente com a connection string do Supabase (Settings → Database)."
         )
-    return psycopg.connect(url, row_factory=dict_row)
+    return psycopg.connect(url, connect_timeout=10, row_factory=dict_row)
 
 
 def gerar_hash_senha(senha_texto_puro: str) -> str:
