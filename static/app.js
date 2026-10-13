@@ -2914,11 +2914,21 @@ async function loadPositionAllocator(cardId,setor){
   if(!box) return;
   box.innerHTML='<div class="position-loading"><span class="spinner-dot"></span> Montando mapa de posições…</div>';
 
-  const results=await Promise.all([
-    safeApi("/api/positions/cards/"+cardId+"/status?setor="+setor,{total_alocado:0,posicoes:[],item_allocations:[]}),
-    safeApi("/api/positions/suggest?setor="+setor,null),
-    safeApi("/api/positions?setor="+setor,[])
-  ]);
+  let results;
+  try {
+    results=await Promise.all([
+      api("/api/positions/cards/"+cardId+"/status?setor="+encodeURIComponent(setor)),
+      api("/api/positions/suggest?setor="+encodeURIComponent(setor)),
+      api("/api/positions?setor="+encodeURIComponent(setor))
+    ]);
+    if(!Array.isArray(results[2])) throw new Error("O servidor retornou um formato inválido para as posições.");
+    if(!results[2].length) throw new Error("Nenhum endereço foi carregado. Confira a conexão com o Supabase e a tabela sector_positions.");
+  } catch(error) {
+    console.error("Falha ao gerar mapa de posições:",error);
+    window.allocCtx=null;
+    box.innerHTML='<div class="position-empty large"><strong>Não foi possível gerar o mapa de casulos.</strong><p>'+esc(error.message||"Falha ao carregar os endereços.")+'</p><button type="button" class="secondary" onclick="loadPositionAllocator('+Number(cardId)+',\''+esc(setor)+'\')">Tentar novamente</button></div>';
+    return;
+  }
   const status=results[0];
   const suggestion=results[1];
   const positions=results[2];
