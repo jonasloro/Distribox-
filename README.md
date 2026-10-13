@@ -10,9 +10,7 @@ Aplicação logística integrada criada a partir dos conteúdos funcionais do Co
 - nova tiragem de 10% no retorno da Costura CD01;
 - Qualidade com Inspeção 1, Inspeção 2 direta e Inspeção 2 pós-costura;
 - Processamento com atribuição por colaborador e cronômetros;
-- Etiquetagem e Estocagem por tamanho para Grade e por quantidade para Saldo;
-- mapa de endereços, ocupação e capacidade do estoque;
-- consulta rápida, estatísticas de casulos e simulador de capacidade;
+- Etiquetagem e Estocagem por tamanho para Grade e por quantidade para Saldo, com fila operacional;/m
 - relatório PDF de estoque com visão por grupo e gênero;
 - importação do planejamento SGO e criação de tarefas;
 - quadro de tarefas por setor, prioridade e andamento;

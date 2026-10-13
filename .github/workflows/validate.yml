@@ -18,6 +18,6 @@ jobs:
         with:
           node-version: "22"
       - name: Compile Python modules
-        run: python -m compileall -q app.py unified_module.py supabase_module.py positions_module.py quality_module.py processing_module.py downstream_module.py production_module.py collab_module.py goat_module.py warehouse_structure.py
+        run: python -m compileall -q app.py unified_module.py supabase_module.py positions_module.py quality_module.py processing_module.py downstream_module.py production_module.py collab_module.py goat_module.py
       - name: Check JavaScript syntax
         run: node --check static/app.js && node --check static/collab.js

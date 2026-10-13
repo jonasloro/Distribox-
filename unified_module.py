@@ -13,8 +13,6 @@ from fastapi import File, HTTPException, Request, UploadFile
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
-from warehouse_structure import ESTRUTURA_CD
-from supabase_module import pg_connect
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -92,42 +90,6 @@ def init_unified_db() -> None:
     con = db_connect()
     con.executescript(
         """
-        CREATE TABLE IF NOT EXISTS warehouse_zones(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          code TEXT NOT NULL UNIQUE,
-          name TEXT NOT NULL,
-          gender TEXT,
-          capacity INTEGER NOT NULL DEFAULT 0,
-          active INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS warehouse_locations(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          zone_id INTEGER NOT NULL REFERENCES warehouse_zones(id),
-          address TEXT NOT NULL UNIQUE,
-          aisle TEXT NOT NULL,
-          side TEXT,
-          column_no INTEGER,
-          level_no TEXT,
-          structure_type TEXT,
-          category TEXT,
-          capacity INTEGER NOT NULL DEFAULT 0,
-          occupied_qty INTEGER NOT NULL DEFAULT 0,
-          status TEXT NOT NULL DEFAULT 'DISPONIVEL',
-          updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS stock_entries(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          card_id INTEGER REFERENCES cards(id),
-          item_id INTEGER REFERENCES items(id),
-          location_id INTEGER NOT NULL REFERENCES warehouse_locations(id),
-          quantity INTEGER NOT NULL CHECK(quantity > 0),
-          brand TEXT,
-          category TEXT,
-          lot TEXT,
-          created_by INTEGER REFERENCES users(id),
-          created_at TEXT NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS stock_report_imports(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           filename TEXT NOT NULL,
@@ -191,7 +153,7 @@ def init_unified_db() -> None:
         CREATE TABLE IF NOT EXISTS shipment_items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           shipment_id INTEGER NOT NULL REFERENCES shipments(id) ON DELETE CASCADE,
-          stock_entry_id INTEGER REFERENCES stock_entries(id),
+          stock_entry_id INTEGER,
           barcode TEXT,
           description TEXT,
           quantity INTEGER NOT NULL DEFAULT 0
@@ -257,11 +219,6 @@ def init_unified_db() -> None:
     }.items():
         if name not in shipment_item_columns:
             con.execute(f"ALTER TABLE shipment_items ADD COLUMN {name} {definition}")
-    # A estrutura de casulos (warehouse_zones/warehouse_locations) NÃO é
-    # mais populada aqui — ela mora no Supabase agora (ver
-    # supabase_module.seed_warehouse_supabase, chamada no startup do
-    # app.py). As tabelas continuam existindo no SQLite só por
-    # compatibilidade com o schema antigo, mas ficam vazias e sem uso.
     # Índices para listas operacionais e detalhes de romaneio.
     con.execute("CREATE INDEX IF NOT EXISTS idx_sgo_forecast_order ON sgo_entries(COALESCE(forecast_date,'9999-12-31'),id DESC)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_sgo_status_forecast ON sgo_entries(status,forecast_date,id DESC)")
@@ -283,10 +240,6 @@ def register_unified_routes(app) -> None:
     def overview():
         con = db_connect()
         sectors = {r["current_sector"]: r["n"] for r in con.execute("SELECT current_sector,COUNT(*) n FROM cards GROUP BY current_sector")}
-        warehouse = con.execute(
-            """SELECT COALESCE(SUM(l.capacity),0) capacity,COALESCE(SUM(l.occupied_qty),0) occupied,COUNT(*) locations
-               FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active=1"""
-        ).fetchone()
         task_counts = {r["status"]: r["n"] for r in con.execute("SELECT status,COUNT(*) n FROM operational_tasks GROUP BY status")}
         return_counts = {r["status"]: r["n"] for r in con.execute("SELECT status,COUNT(*) n FROM returns GROUP BY status")}
         sgo_counts = {r["status"]: r["n"] for r in con.execute("SELECT status,COUNT(*) n FROM sgo_entries GROUP BY status")}
@@ -294,227 +247,29 @@ def register_unified_routes(app) -> None:
             """SELECT domain,event_type,description,created_at FROM unified_movements
                ORDER BY id DESC LIMIT 12"""
         ).fetchall()
-        capacity = int(warehouse["capacity"] or 0)
-        occupied = int(warehouse["occupied"] or 0)
         con.close()
         return {
             "sectors": sectors,
-            "warehouse": {"capacity": capacity, "occupied": occupied, "percentage": round(occupied * 100 / capacity, 1) if capacity else 0, "locations": warehouse["locations"]},
             "tasks": task_counts,
             "returns": return_counts,
             "sgo": sgo_counts,
             "recent_movements": [dict(r) for r in recent],
         }
 
-    @app.get("/api/unified/warehouse/summary")
-    def warehouse_summary():
-        """Retorna somente agregados e uma amostra pequena para evitar baixar milhares de casulos."""
-        try:
-            with pg_connect() as con:
-                with con.cursor() as cur:
-                    cur.execute(
-                        """SELECT COALESCE(z.gender,'Sem gênero') AS gender,
-                           COALESCE(SUM(z.capacity),0) AS capacity,
-                           COALESCE(SUM(loc.occupied),0) AS occupied
-                           FROM warehouse_zones z
-                           LEFT JOIN (
-                             SELECT zone_id,SUM(occupied_qty) AS occupied
-                             FROM warehouse_locations GROUP BY zone_id
-                           ) loc ON loc.zone_id=z.id
-                           WHERE z.active GROUP BY z.gender ORDER BY z.gender"""
-                    )
-                    gender_rows = cur.fetchall()
-                    cur.execute(
-                        """SELECT z.id,z.code,z.name,z.gender,z.capacity,
-                           COALESCE(SUM(l.occupied_qty),0) AS occupied,COUNT(l.id) AS locations,
-                           CASE WHEN z.capacity>0
-                             THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1)
-                             ELSE 0 END AS occupancy
-                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
-                           WHERE z.active GROUP BY z.id ORDER BY z.code"""
-                    )
-                    zone_rows = cur.fetchall()
-                    cur.execute(
-                        """SELECT COALESCE(SUM(l.capacity),0) AS capacity,
-                           COALESCE(SUM(l.occupied_qty),0) AS occupied,COUNT(l.id) AS locations,
-                           COUNT(l.id) FILTER (WHERE l.occupied_qty>0) AS occupied_locations,
-                           COUNT(l.id) FILTER (WHERE l.status='DISPONIVEL') AS available_locations
-                           FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
-                           WHERE z.active"""
-                    )
-                    totals_row = cur.fetchone()
-                    cur.execute(
-                        """SELECT l.id,l.address,z.code AS zone_code,l.structure_type,l.category,
-                           l.capacity,l.occupied_qty,l.status,
-                           CASE WHEN l.capacity>0
-                             THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy
-                           FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
-                           WHERE z.active AND l.occupied_qty>0
-                           ORDER BY l.updated_at DESC,l.id DESC LIMIT 12"""
-                    )
-                    occupied_preview = cur.fetchall()
-        except RuntimeError:
-            return {"genders": [], "zones": [], "totals": {
-                "capacity": 0, "occupied": 0, "locations": 0,
-                "occupied_locations": 0, "available_locations": 0, "percentage": 0
-            }, "occupied_preview": []}
-
-        genders = []
-        for row in gender_rows:
-            capacity = int(row["capacity"] or 0)
-            occupied = int(row["occupied"] or 0)
-            genders.append({
-                "gender": row["gender"],
-                "capacity": capacity,
-                "occupied": occupied,
-                "occupancy": round(occupied * 100 / capacity, 1) if capacity else 0,
-            })
-
-        totals = {
-            "capacity": int(totals_row["capacity"] or 0),
-            "occupied": int(totals_row["occupied"] or 0),
-            "locations": int(totals_row["locations"] or 0),
-            "occupied_locations": int(totals_row["occupied_locations"] or 0),
-            "available_locations": int(totals_row["available_locations"] or 0),
-        }
-        totals["percentage"] = round(totals["occupied"] * 100 / totals["capacity"], 1) if totals["capacity"] else 0
-        return {
-            "genders": genders,
-            "zones": [dict(row) for row in zone_rows],
-            "totals": totals,
-            "occupied_preview": [dict(row) for row in occupied_preview],
-        }
-
-    @app.get("/api/unified/warehouse")
-    def warehouse(search: str = "", zone: str = "", status: str = "", limit: int = 100, offset: int = 0, available_only: bool = False, include_zones: bool = True):
-        """Consulta endereços com paginação opcional; os resumos não devem baixar o CD inteiro."""
-        where = """ FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id WHERE z.active"""
-        args: list[Any] = []
-        if search:
-            where += " AND (l.address ILIKE %s OR l.category ILIKE %s OR l.structure_type ILIKE %s)"
-            q = f"%{search}%"
-            args += [q, q, q]
-        if zone:
-            where += " AND z.code=%s"
-            args.append(zone)
-        if status:
-            where += " AND l.status=%s"
-            args.append(status)
-        if available_only:
-            where += " AND l.occupied_qty<l.capacity AND l.status<>'BLOQUEADO'"
-
-        safe_limit = max(1, min(int(limit or 100), 200))
-        safe_offset = max(0, int(offset))
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS total_locations" + where, args)
-                total_locations = int(cur.fetchone()["total_locations"] or 0)
-                sql = """SELECT l.*,z.code AS zone_code,z.name AS zone_name,
-                         CASE WHEN l.capacity>0 THEN ROUND((l.occupied_qty*100.0/l.capacity)::numeric,1) ELSE 0 END AS occupancy""" + where + " ORDER BY z.code,l.column_no,l.level_no,l.id"
-                page_args = list(args)
-                sql += " LIMIT %s OFFSET %s"
-                page_args.extend([safe_limit, safe_offset])
-                cur.execute(sql, page_args)
-                locations = cur.fetchall()
-                zones = []
-                if include_zones:
-                    cur.execute(
-                        """SELECT z.*,COALESCE(SUM(l.occupied_qty),0) AS occupied,
-                           CASE WHEN z.capacity>0 THEN ROUND((COALESCE(SUM(l.occupied_qty),0)*100.0/z.capacity)::numeric,1) ELSE 0 END AS occupancy
-                           FROM warehouse_zones z LEFT JOIN warehouse_locations l ON l.zone_id=z.id
-                           WHERE z.active GROUP BY z.id ORDER BY z.code"""
-                    )
-                    zones = cur.fetchall()
-        return {
-            "zones": zones,
-            "locations": locations,
-            "total_locations": total_locations,
-            "limit": safe_limit or total_locations,
-            "offset": safe_offset,
-        }
-
-    @app.post("/api/unified/warehouse/locations/{location_id}")
-    async def update_location(location_id: int, request: Request):
-        data = await request.json(); user_id = as_int(data.get("user_id"))
-        con_local = db_connect(); require_user(con_local, user_id, {"admin", "supervisor", "estocagem"})
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                cur.execute("SELECT * FROM warehouse_locations WHERE id=%s", (location_id,))
-                location = cur.fetchone()
-                if not location:
-                    con_local.close(); raise HTTPException(404, "Endereço não encontrado.")
-                capacity = max(0, as_int(data.get("capacity"), location["capacity"]))
-                category = str(data.get("category", location["category"] or "")).strip()
-                status = str(data.get("status", location["status"])).upper()
-                cur.execute(
-                    "UPDATE warehouse_locations SET capacity=%s,category=%s,status=%s,updated_at=now() WHERE id=%s",
-                    (capacity, category, status, location_id),
-                )
-            con.commit()
-        # add_movement (histórico geral) continua no SQLite — é um log que
-        # cruza cards/tarefas/qualidade/estoque, não faz sentido dividir.
-        add_movement(con_local, "ESTOQUE", location_id, "ENDERECO_ATUALIZADO", f"Endereço {location['address']} atualizado.", user_id)
-        con_local.commit(); con_local.close(); return {"ok": True}
-
-    @app.post("/api/unified/warehouse/store")
-    async def store(request: Request):
-        data = await request.json(); user_id = as_int(data.get("user_id")); qty = as_int(data.get("quantity"))
-        con_local = db_connect(); require_user(con_local, user_id, {"admin", "supervisor", "estocagem"})
-        card_id = as_int(data.get("card_id")) or None
-        item_id = as_int(data.get("item_id")) or None
-
-        # 1) Confere capacidade e reserva o espaço no Supabase (casulos).
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                cur.execute("SELECT * FROM warehouse_locations WHERE id=%s", (as_int(data.get("location_id")),))
-                location = cur.fetchone()
-                if not location or qty <= 0:
-                    con_local.close(); raise HTTPException(400, "Informe endereço e quantidade válidos.")
-                if int(location["occupied_qty"]) + qty > int(location["capacity"]):
-                    con_local.close(); raise HTTPException(400, "A quantidade ultrapassa a capacidade do endereço.")
-                novo_status = "LOTADO" if int(location["occupied_qty"]) + qty >= int(location["capacity"]) else "OCUPADO"
-                cur.execute(
-                    "UPDATE warehouse_locations SET occupied_qty=occupied_qty+%s,status=%s,updated_at=now() WHERE id=%s",
-                    (qty, novo_status, location["id"]),
-                )
-            con.commit()
-
-        # 2) Registra o que foi guardado no SQLite (stock_entries continua
-        # local, por decisão explícita — não precisa saber o conteúdo
-        # exato de cada casulo, só a ocupação, que já está no Supabase).
-        cur_local = con_local.execute(
-            """INSERT INTO stock_entries(card_id,item_id,location_id,quantity,brand,category,lot,created_by,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            (card_id, item_id, location["id"], qty, str(data.get("brand", "")), str(data.get("category", "")), str(data.get("lot", "")), user_id, now()),
-        )
-        if card_id:
-            con_local.execute("UPDATE cards SET casulo_current=?,current_sector='ESTOCAGEM',status='FINALIZADO',updated_at=? WHERE id=?", (location["address"], now(), card_id))
-        add_movement(con_local, "ESTOQUE", cur_local.lastrowid, "ENTRADA_ESTOQUE", f"{qty} peça(s) armazenadas em {location['address']}.", user_id)
-        con_local.commit(); con_local.close()
-        return {"ok": True, "stock_entry_id": cur_local.lastrowid}
-
-    @app.get("/api/unified/warehouse/analytics")
-    def warehouse_analytics():
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                cur.execute("""SELECT COALESCE(structure_type,'NÃO DEFINIDO') AS label,COUNT(*) AS locations,
-                    COALESCE(SUM(capacity),0) AS capacity,COALESCE(SUM(occupied_qty),0) AS occupied
-                    FROM warehouse_locations GROUP BY structure_type ORDER BY locations DESC""")
-                structures = cur.fetchall()
-        # categorias/marcas vêm do stock_entries (SQLite) — decisão de manter
-        # esse detalhe local, sem ligação direta com o casulo no Supabase.
+    @app.get("/api/unified/stock-group-report/analytics")
+    def stock_group_report_analytics():
         con = db_connect()
-        categories=[dict(r) for r in con.execute("""SELECT COALESCE(NULLIF(category,''),'SEM CATEGORIA') label,
-            COALESCE(SUM(quantity),0) quantity FROM stock_entries GROUP BY category ORDER BY quantity DESC LIMIT 20""").fetchall()]
-        brands=[dict(r) for r in con.execute("""SELECT COALESCE(NULLIF(brand,''),'SEM MARCA') label,
-            COALESCE(SUM(quantity),0) quantity FROM stock_entries GROUP BY brand ORDER BY quantity DESC LIMIT 20""").fetchall()]
-        latest=con.execute("SELECT * FROM stock_report_imports ORDER BY id DESC LIMIT 1").fetchone()
-        groups=[]
+        latest = con.execute("SELECT * FROM stock_report_imports ORDER BY id DESC LIMIT 1").fetchone()
+        groups = []
         if latest:
-            groups=[dict(r) for r in con.execute("SELECT * FROM stock_group_snapshots WHERE import_id=? ORDER BY quantity DESC",(latest["id"],)).fetchall()]
-        con.close();return {"structures":structures,"categories":categories,"brands":brands,"latest_report":dict(latest) if latest else None,"groups":groups}
+            groups = [dict(row) for row in con.execute(
+                "SELECT * FROM stock_group_snapshots WHERE import_id=? ORDER BY quantity DESC",
+                (latest["id"],),
+            ).fetchall()]
+        con.close()
+        return {"latest_report": dict(latest) if latest else None, "groups": groups}
 
-    @app.post("/api/unified/warehouse/import-group-report")
+    @app.post("/api/unified/stock-group-report/import")
     async def import_group_report(user_id:int,file:UploadFile=File(...)):
         text=read_pdf_text(await file.read());groups={}
         for raw_line in text.splitlines():
@@ -895,91 +650,4 @@ def register_unified_routes(app) -> None:
     @app.get("/api/unified/movements")
     def movements(limit:int=200):
         con=db_connect();rows=[dict(r) for r in con.execute("""SELECT m.*,u.name user_name FROM unified_movements m LEFT JOIN users u ON u.id=m.user_id ORDER BY m.id DESC LIMIT ?""",(max(1,min(limit,1000)),)).fetchall()];con.close();return rows
-
-    @app.get("/api/unified/warehouse/heatmap")
-    def warehouse_heatmap():
-        """Ocupação por Rua/coluna, sem alterar os lançamentos de estoque."""
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                cur.execute(
-                    """SELECT l.aisle,l.column_no,l.side,SUM(l.capacity) AS capacity,
-                              SUM(l.occupied_qty) AS occupied,COUNT(*) AS niveis
-                       FROM warehouse_locations l JOIN warehouse_zones z ON z.id=l.zone_id
-                       WHERE z.active
-                       GROUP BY l.aisle,l.column_no,l.side ORDER BY l.aisle,l.column_no"""
-                )
-                rows = cur.fetchall()
-        sequential_columns = {
-            rua: set(config.get("cols_seq", [])) for rua, config in ESTRUTURA_CD.items()
-        }
-        ruas: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            capacity = int(row["capacity"] or 0)
-            occupied = int(row["occupied"] or 0)
-            section = (
-                "sequencial"
-                if row["column_no"] in sequential_columns.get(row["aisle"], set())
-                else row["side"]
-            )
-            ruas.setdefault(row["aisle"], []).append({
-                "coluna": row["column_no"], "lado": row["side"], "secao": section,
-                "niveis": row["niveis"], "capacidade": capacity, "ocupado": occupied,
-                "ocupacao_pct": round(occupied * 100 / capacity, 1) if capacity else 0.0,
-            })
-        return {
-            "ruas": [
-                {"rua": rua, "colunas": columns}
-                for rua, columns in sorted(ruas.items(), key=lambda item: int(item[0].split()[1]))
-            ]
-        }
-
-    @app.post("/api/unified/warehouse/id-brasil-preview")
-    async def aplicar_snapshot_id_brasil(request: Request):
-        """Reconhece e aplica um snapshot de casulos no MESMO formato que a
-        API ID Brasil devolveria -- uma lista de {rua, linha, coluna,
-        quantidade} -- resolvendo o endereco interno (Rua NN-CCC-lado-NIVEL,
-        igual ao warehouse_structure.py) e atualizando occupied_qty.
-
-        IMPORTANTE: isso ainda NAO chama a API de verdade -- o JSON precisa
-        ser colado/enviado manualmente no corpo da requisicao. E so pra
-        validar que o reconhecimento do formato e a atualizacao dos
-        casulos batem certinho, antes de plugar a chamada HTTP real
-        (GET-only) mais pra frente."""
-        data = await request.json()
-        user_id = as_int(data.get("user_id"))
-        con_local = db_connect()
-        require_user(con_local, user_id)
-        itens = data.get("itens") or data.get("items") or []
-        aplicados = 0
-        nao_encontrados: list[dict] = []
-        with pg_connect() as con:
-            with con.cursor() as cur:
-                for item in itens:
-                    try:
-                        rua_num = int(item["rua"])
-                        coluna = int(item["coluna"])
-                        nivel = str(item["linha"]).strip().upper()
-                        quantidade = int(item.get("quantidade", 0) or 0)
-                    except (KeyError, TypeError, ValueError):
-                        nao_encontrados.append(item)
-                        continue
-                    lado = "par" if coluna % 2 == 0 else "impar"
-                    endereco = f"Rua {rua_num:02d}-{coluna:03d}-{lado}-{nivel}"
-                    cur.execute(
-                        "UPDATE warehouse_locations SET occupied_qty=%s,updated_at=now() WHERE address=%s",
-                        (quantidade, endereco),
-                    )
-                    if cur.rowcount:
-                        aplicados += 1
-                    else:
-                        nao_encontrados.append(item)
-            con.commit()
-        add_movement(
-            con_local, "ESTOQUE", None, "SNAPSHOT_ID_BRASIL_MANUAL",
-            f"{aplicados} casulos atualizados via JSON colado manualmente ({len(nao_encontrados)} nao encontrados).",
-            user_id,
-        )
-        con_local.commit()
-        con_local.close()
-        return {"aplicados": aplicados, "nao_encontrados": len(nao_encontrados), "total_recebido": len(itens)}
 
